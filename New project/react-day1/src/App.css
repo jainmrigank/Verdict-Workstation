@@ -360,6 +360,22 @@ button:disabled {
   grid-template-columns: repeat(3, minmax(240px, 1fr));
 }
 
+.fundamental-quality-grid {
+  grid-template-columns: minmax(320px, 0.95fr) minmax(520px, 1.35fr);
+  align-items: start;
+  width: 100%;
+}
+
+.fundamental-quality-grid .fundamental-score-card,
+.fundamental-quality-grid .fundamental-flow-card {
+  grid-column: auto;
+  width: 100%;
+}
+
+.fundamental-quality-grid .fundamental-flow-card {
+  min-height: 100%;
+}
+
 .fundamental-empty-card {
   grid-column: 1 / -1;
 }
@@ -739,6 +755,7 @@ select {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 16px;
+  align-items: start;
 }
 
 .verdict-columns section,
@@ -819,6 +836,7 @@ select {
   display: grid;
   grid-template-columns: 1.1fr 1fr 1fr;
   gap: 12px;
+  align-items: start;
   margin: 14px 0;
 }
 
@@ -832,6 +850,7 @@ select {
 .adaptive-signal-grid {
   display: grid;
   gap: 10px;
+  align-items: start;
 }
 
 .component-score-grid {
@@ -2193,6 +2212,8 @@ td {
 
 .chart-card {
   grid-column: 1 / -1;
+  gap: 10px;
+  padding: 14px;
 }
 
 .chart-heading strong {
@@ -2215,10 +2236,12 @@ td {
 .chart-legend {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px 14px;
+  gap: 7px 12px;
   align-items: center;
   min-width: 0;
-  padding: 9px 10px;
+  max-height: 82px;
+  overflow: auto;
+  padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface-2);
@@ -2311,9 +2334,9 @@ td {
 
 .chart-timeframes button,
 .indicator-switches button {
-  min-height: 32px;
-  padding: 5px 9px;
-  font-size: 0.8rem;
+  min-height: 30px;
+  padding: 4px 8px;
+  font-size: 0.78rem;
 }
 
 .pattern-swatch {
@@ -2350,6 +2373,8 @@ td {
   flex-wrap: wrap;
   gap: 6px;
   min-width: 0;
+  max-height: 78px;
+  overflow: auto;
 }
 
 .indicator-switches button {
@@ -2374,7 +2399,7 @@ td {
 .forecast-controls,
 .forecast-summary-panel {
   display: grid;
-  gap: 12px;
+  gap: 10px;
   min-width: 0;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -2446,10 +2471,13 @@ td {
 }
 
 .chart-shell {
+  display: flex;
+  justify-content: center;
   width: 100%;
   min-width: 0;
   overflow-x: auto;
   overscroll-behavior: contain;
+  touch-action: none;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface-3);
@@ -2457,7 +2485,7 @@ td {
 
 .candle-chart {
   display: block;
-  width: 100%;
+  width: min(100%, 980px);
   min-width: min(720px, 100%);
   height: auto;
   cursor: crosshair;
@@ -3027,6 +3055,10 @@ td {
   .fundamental-flow-card,
   .fundamental-checklist-card {
     grid-column: 1 / -1;
+  }
+
+  .fundamental-quality-grid {
+    grid-template-columns: 1fr;
   }
 
   .statement-flow,

@@ -1195,13 +1195,18 @@ function buildCandleChart(
   windowEnd?: number | null,
   forecast?: ForecastProjection,
   width = 760,
-  priceHeight = 310,
-  volumeHeight = 78,
+  priceHeight = 232,
+  volumeHeight = 52,
 ) {
   const chartWindow = candlesForTimeframe(candles, timeframe, zoomLevel, windowEnd)
   const chartCandles = chartWindow.candles
   const forecastCases = forecast?.cases ?? []
-  const totalHeight = priceHeight + volumeHeight + 38
+  const plotLeft = 54
+  const plotRight = 66
+  const plotWidth = width - plotLeft - plotRight
+  const volumeGap = 12
+  const volumeBase = priceHeight + volumeGap + volumeHeight
+  const totalHeight = volumeBase + 42
   if (!chartCandles.length) {
     return {
       baseLength: chartWindow.baseLength,
@@ -1230,7 +1235,10 @@ function buildCandleChart(
       latestVwap: undefined,
       step: 0,
       totalHeight,
-      volumeBase: priceHeight + volumeHeight + 16,
+      plotLeft,
+      plotRight,
+      plotWidth,
+      volumeBase,
       volumeHeight,
       windowEnd: chartWindow.windowEnd,
       windowStart: chartWindow.windowStart,
@@ -1270,16 +1278,15 @@ function buildCandleChart(
   const minPrice = rawMin - padding
   const maxPrice = rawMax + padding
   const priceSpan = maxPrice - minPrice || 1
-  const forecastSpace = forecast && forecastCases.length ? Math.min(width * 0.24, 184) : 0
-  const historicalWidth = Math.max(width - forecastSpace, width * 0.62)
+  const forecastSpace = forecast && forecastCases.length ? Math.min(plotWidth * 0.24, 176) : 0
+  const historicalWidth = Math.max(plotWidth - forecastSpace, plotWidth * 0.62)
   const step = historicalWidth / chartCandles.length
   const candleWidth = clamp(step * 0.58, 2, 10)
   const maxVolume = Math.max(...chartCandles.map((candle) => candle.volume), 1)
-  const volumeBase = priceHeight + volumeHeight + 16
-  const xForIndex = (index: number) => index * step + step / 2
+  const xForIndex = (index: number) => plotLeft + index * step + step / 2
   const yForPrice = (value: number) => priceHeight - ((value - minPrice) / priceSpan) * (priceHeight - 18) + 9
   const forecastStartX = xForIndex(chartCandles.length - 1)
-  const forecastEndX = width - 18
+  const forecastEndX = width - plotRight
   const xForForecast = (progress: number) => forecastStartX + (forecastEndX - forecastStartX) * progress
   const grid = Array.from({ length: 5 }, (_, index) => {
     const ratio = index / 4
@@ -1360,6 +1367,9 @@ function buildCandleChart(
     highLine: { value: high, y: yForPrice(high) },
     lowLine: { value: low, y: yForPrice(low) },
     priceHeight,
+    plotLeft,
+    plotRight,
+    plotWidth,
     sma20Path: buildLinePath(sma20, xForIndex, yForPrice),
     sma50Path: buildLinePath(sma50, xForIndex, yForPrice),
     sma100Path: buildLinePath(sma100, xForIndex, yForPrice),
@@ -1372,7 +1382,7 @@ function buildCandleChart(
             bandPath: forecastBandPath,
             endLabel: forecast.horizonLabel,
             lines: forecastLines,
-            separatorX: historicalWidth + 3,
+            separatorX: plotLeft + historicalWidth + 3,
           }
         : undefined,
     vwapPath: buildLinePath(vwap, xForIndex, yForPrice),
@@ -3181,7 +3191,7 @@ function App() {
     if (!chartModel.candles.length || !chartModel.step) return
     const rect = event.currentTarget.getBoundingClientRect()
     const x = ((event.clientX - rect.left) / rect.width) * chartModel.width
-    const index = Math.round(x / chartModel.step - 0.5)
+    const index = Math.round((x - chartModel.plotLeft) / chartModel.step - 0.5)
     setHoveredCandleIndex(clamp(index, 0, chartModel.candles.length - 1))
   }
 
@@ -3193,10 +3203,14 @@ function App() {
   }
 
   function handleChartWheel(event: WheelEvent<HTMLDivElement>) {
-    if (!event.ctrlKey || !chartModel.candles.length || !chartModel.baseLength) return
+    const isPinchZoom = event.ctrlKey || event.metaKey
+    if (!isPinchZoom || !chartModel.candles.length || !chartModel.baseLength) return
     event.preventDefault()
+    event.stopPropagation()
     const rect = event.currentTarget.getBoundingClientRect()
-    const pointerRatio = clamp((event.clientX - rect.left) / rect.width, 0, 1)
+    const plotLeftPx = (chartModel.plotLeft / chartModel.width) * rect.width
+    const plotWidthPx = (chartModel.plotWidth / chartModel.width) * rect.width
+    const pointerRatio = clamp((event.clientX - rect.left - plotLeftPx) / plotWidthPx, 0, 1)
     const pointerIndex = clamp(pointerRatio * chartModel.candles.length - 0.5, 0, chartModel.candles.length - 1)
     const anchoredIndex = chartModel.windowStart + pointerIndex
     const deltaScale = event.deltaMode === 1 ? 18 : event.deltaMode === 2 ? rect.height : 1
@@ -3900,7 +3914,7 @@ function App() {
                   )}
                 </div>
 
-                <div className="chart-shell" onWheel={handleChartWheel}>
+                <div className="chart-shell" onWheelCapture={handleChartWheel}>
                   <svg
                     className="candle-chart"
                     viewBox={`0 0 ${chartModel.width} ${chartModel.totalHeight}`}
@@ -3913,19 +3927,19 @@ function App() {
                   >
                     {chartModel.candles.length ? (
                       <>
-                        <text className="axis-title y-axis-title" transform={`translate(14 ${chartModel.priceHeight / 2}) rotate(-90)`}>
+                        <text className="axis-title y-axis-title" transform={`translate(18 ${chartModel.priceHeight / 2}) rotate(-90)`}>
                           Price (INR)
                         </text>
-                        <text className="axis-title volume-axis-title" x="12" y={chartModel.volumeBase - chartModel.volumeHeight - 6}>
+                        <text className="axis-title volume-axis-title" x="16" y={chartModel.volumeBase - chartModel.volumeHeight - 5}>
                           Volume
                         </text>
-                        <text className="axis-title x-axis-title" x={chartModel.width / 2} y={chartModel.totalHeight - 3}>
+                        <text className="axis-title x-axis-title" x={chartModel.plotLeft + chartModel.plotWidth / 2} y={chartModel.totalHeight - 7}>
                           Date
                         </text>
                         {chartModel.grid.map((line) => (
                           <g key={line.value}>
-                            <line className="chart-grid-line" x1="0" x2={chartModel.width} y1={line.y} y2={line.y} />
-                            <text className="chart-axis-label price-axis-label" x={chartModel.width - 10} y={line.y - 4} textAnchor="end">
+                            <line className="chart-grid-line" x1={chartModel.plotLeft} x2={chartModel.width - chartModel.plotRight} y1={line.y} y2={line.y} />
+                            <text className="chart-axis-label price-axis-label" x={chartModel.width - 12} y={line.y - 4} textAnchor="end">
                               {formatNumber(line.value)}
                             </text>
                           </g>
@@ -3933,7 +3947,7 @@ function App() {
                         {chartModel.xTicks.map((tick) => (
                           <g key={tick.date}>
                             <line className="chart-tick-line" x1={tick.x} x2={tick.x} y1={chartModel.volumeBase + 2} y2={chartModel.volumeBase + 10} />
-                            <text className="chart-axis-label x-tick-label" x={tick.x} y={chartModel.totalHeight - 18}>
+                            <text className="chart-axis-label x-tick-label" x={tick.x} y={chartModel.volumeBase + 24}>
                               {tick.date.slice(5)}
                             </text>
                           </g>
@@ -3950,29 +3964,29 @@ function App() {
                                   {line.points.slice(1).map((point) => (
                                     <circle key={`${line.key}-${point.label}`} cx={point.x} cy={point.y} r={line.key === 'base' ? 3.5 : 2.8} />
                                   ))}
-                                  <text x={chartModel.width - 9} y={clamp(endPoint.y, 15, chartModel.priceHeight - 6)} textAnchor="end">
+                                  <text x={chartModel.width - 12} y={clamp(endPoint.y, 15, chartModel.priceHeight - 6)} textAnchor="end">
                                     {line.key === 'base' ? 'Base' : line.key === 'bull' ? 'Bull' : 'Bear'} {formatInr(endPoint.price)}
                                   </text>
                                 </g>
                               )
                             })}
-                            <text className="forecast-end-label" x={chartModel.width - 9} y={chartModel.volumeBase + 28} textAnchor="end">
+                            <text className="forecast-end-label" x={chartModel.width - 12} y={chartModel.volumeBase + 24} textAnchor="end">
                               {chartModel.forecast.endLabel}
                             </text>
                           </g>
                         )}
                         {chartIndicators.range && chartModel.highLine && (
                           <g>
-                            <line className="range-guide high-guide" x1="0" x2={chartModel.width} y1={chartModel.highLine.y} y2={chartModel.highLine.y} />
-                            <text className="range-guide-label" x="6" y={chartModel.highLine.y - 5}>
+                            <line className="range-guide high-guide" x1={chartModel.plotLeft} x2={chartModel.width - chartModel.plotRight} y1={chartModel.highLine.y} y2={chartModel.highLine.y} />
+                            <text className="range-guide-label" x={chartModel.plotLeft + 6} y={chartModel.highLine.y - 5}>
                               High {formatInr(chartModel.highLine.value)}
                             </text>
                           </g>
                         )}
                         {chartIndicators.range && chartModel.lowLine && (
                           <g>
-                            <line className="range-guide low-guide" x1="0" x2={chartModel.width} y1={chartModel.lowLine.y} y2={chartModel.lowLine.y} />
-                            <text className="range-guide-label" x="6" y={chartModel.lowLine.y + 14}>
+                            <line className="range-guide low-guide" x1={chartModel.plotLeft} x2={chartModel.width - chartModel.plotRight} y1={chartModel.lowLine.y} y2={chartModel.lowLine.y} />
+                            <text className="range-guide-label" x={chartModel.plotLeft + 6} y={chartModel.lowLine.y + 14}>
                               Low {formatInr(chartModel.lowLine.value)}
                             </text>
                           </g>
@@ -4031,11 +4045,11 @@ function App() {
                               height={point.volumeBarHeight}
                             />
                           ))}
-                        <line className="volume-base" x1="0" x2={chartModel.width} y1={chartModel.volumeBase} y2={chartModel.volumeBase} />
+                        <line className="volume-base" x1={chartModel.plotLeft} x2={chartModel.width - chartModel.plotRight} y1={chartModel.volumeBase} y2={chartModel.volumeBase} />
                         {hoveredChartPoint && (
                           <g>
-                            <line className="crosshair" x1={hoveredChartPoint.x} x2={hoveredChartPoint.x} y1="0" y2={chartModel.totalHeight} />
-                            <line className="crosshair horizontal" x1="0" x2={chartModel.width} y1={hoveredChartPoint.closeY} y2={hoveredChartPoint.closeY} />
+                            <line className="crosshair" x1={hoveredChartPoint.x} x2={hoveredChartPoint.x} y1="0" y2={chartModel.volumeBase} />
+                            <line className="crosshair horizontal" x1={chartModel.plotLeft} x2={chartModel.width - chartModel.plotRight} y1={hoveredChartPoint.closeY} y2={hoveredChartPoint.closeY} />
                             <circle className="crosshair-dot" cx={hoveredChartPoint.x} cy={hoveredChartPoint.closeY} r="4" />
                             <g className="chart-hover-card" transform={`translate(${hoverTooltipX} ${hoverTooltipY})`}>
                               <rect width="220" height="136" rx="7" />
@@ -4538,7 +4552,7 @@ function App() {
                 id="fundamental-quality-heading"
                 title="Financial Quality and Due Diligence"
               >
-                <div className="visual-grid subsection-card-grid fundamental-subgrid">
+                <div className="visual-grid subsection-card-grid fundamental-subgrid fundamental-quality-grid">
               <article className={`visual-card fundamental-score-card tone-${fundamentalScore >= 70 ? 'positive' : fundamentalScore < 40 ? 'negative' : 'neutral'}`}>
                 <div className="visual-card-heading">
                   <div>
