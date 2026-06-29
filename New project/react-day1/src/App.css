@@ -361,19 +361,24 @@ button:disabled {
 }
 
 .fundamental-quality-grid {
-  grid-template-columns: minmax(320px, 0.95fr) minmax(520px, 1.35fr);
+  grid-template-columns: minmax(0, 1fr);
   align-items: start;
   width: 100%;
 }
 
 .fundamental-quality-grid .fundamental-score-card,
-.fundamental-quality-grid .fundamental-flow-card {
-  grid-column: auto;
+.fundamental-quality-grid .fundamental-flow-card,
+.fundamental-quality-grid .fundamental-checklist-card {
+  grid-column: 1 / -1;
   width: 100%;
 }
 
-.fundamental-quality-grid .fundamental-flow-card {
-  min-height: 100%;
+.fundamental-quality-grid .fundamental-bars {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.fundamental-quality-grid .statement-flow {
+  grid-template-columns: repeat(4, minmax(180px, 1fr));
 }
 
 .fundamental-empty-card {
@@ -2476,7 +2481,7 @@ td {
   width: 100%;
   min-width: 0;
   overflow-x: auto;
-  overscroll-behavior: contain;
+  overscroll-behavior: none;
   touch-action: none;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -3057,7 +3062,8 @@ td {
     grid-column: 1 / -1;
   }
 
-  .fundamental-quality-grid {
+  .fundamental-quality-grid,
+  .fundamental-quality-grid .fundamental-bars {
     grid-template-columns: 1fr;
   }
 
