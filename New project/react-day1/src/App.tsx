@@ -1,4 +1,4 @@
-import { type CSSProperties, type MouseEvent, type ReactNode, type WheelEvent, useEffect, useMemo, useState } from 'react'
+import { type CSSProperties, type FocusEvent, type MouseEvent, type ReactNode, type WheelEvent, useEffect, useMemo, useState } from 'react'
 import './App.css'
 
 type Exchange = 'NSE' | 'BSE'
@@ -520,8 +520,25 @@ const forecastHelp = {
 }
 
 function HelpTip({ text }: { text: string }) {
+  function positionTooltip(event: MouseEvent<HTMLSpanElement> | FocusEvent<HTMLSpanElement>) {
+    const rect = event.currentTarget.getBoundingClientRect()
+    const halfTooltip = Math.min(160, Math.max(120, (window.innerWidth - 32) / 2))
+    const minX = halfTooltip + 16
+    const maxX = Math.max(minX, window.innerWidth - halfTooltip - 16)
+    const x = Math.min(Math.max(rect.left + rect.width / 2, minX), maxX)
+    event.currentTarget.style.setProperty('--tip-x', `${x}px`)
+    event.currentTarget.style.setProperty('--tip-y', `${rect.top}px`)
+  }
+
   return (
-    <span className="help-tip" data-tip={text} tabIndex={0} aria-label={text}>
+    <span
+      className="help-tip"
+      data-tip={text}
+      tabIndex={0}
+      aria-label={text}
+      onMouseEnter={positionTooltip}
+      onFocus={positionTooltip}
+    >
       ?
     </span>
   )
