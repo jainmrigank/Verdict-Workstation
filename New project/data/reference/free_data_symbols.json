@@ -1,0 +1,52 @@
+{
+  "symbols": [
+    {
+      "input": "NSE:ENGINERSIN",
+      "exchange": "NSE",
+      "tradingsymbol": "ENGINERSIN",
+      "yahoo": "ENGINERSIN.NS",
+      "screener": "ENGINERSIN",
+      "name": "Engineers India Ltd"
+    },
+    {
+      "input": "BSE:SAMRATPH",
+      "exchange": "BSE",
+      "tradingsymbol": "SAMRATPH",
+      "yahoo": "530125.BO",
+      "screener": "530125",
+      "name": "Samrat Pharmachem Ltd"
+    },
+    {
+      "input": "BSE:REGANTO",
+      "exchange": "BSE",
+      "tradingsymbol": "REGANTO",
+      "yahoo": "517393.BO",
+      "screener": "517393",
+      "name": "Reganto Enterprises Ltd"
+    },
+    {
+      "input": "NSE:GOYALSALT",
+      "exchange": "NSE",
+      "tradingsymbol": "GOYALSALT",
+      "yahoo": "GOYALSALT.NS",
+      "screener": "GOYALSALT",
+      "name": "Goyal Salt Ltd"
+    },
+    {
+      "input": "NSE:GRAPHISAD",
+      "exchange": "NSE",
+      "tradingsymbol": "GRAPHISAD",
+      "yahoo": "GRAPHISAD.NS",
+      "screener": "GRAPHISAD",
+      "name": "Graphisads Ltd"
+    },
+    {
+      "input": "NSE:REPL",
+      "exchange": "NSE",
+      "tradingsymbol": "REPL",
+      "yahoo": "REPL.NS",
+      "screener": "REPL",
+      "name": "Rudrabhishek Enterprises Ltd"
+    }
+  ]
+}

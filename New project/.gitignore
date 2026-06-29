@@ -1,0 +1,12 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+
+data/cache/kite/*
+!data/cache/kite/.gitkeep
+data/cache/free/*
+!data/cache/free/.gitkeep
+data/reference/portfolio_holdings.json
+data/reference/watchlist.json
+react-day1/public/stock-data/latest.json
