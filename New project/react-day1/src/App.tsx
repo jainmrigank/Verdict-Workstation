@@ -1,4 +1,4 @@
-import { type CSSProperties, type FocusEvent, type MouseEvent, type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
+import { type CSSProperties, type FocusEvent, type MouseEvent, type ReactNode, useEffect, useMemo, useState } from 'react'
 import './App.css'
 
 type Exchange = 'NSE' | 'BSE'
@@ -2409,7 +2409,7 @@ function App() {
     patterns: true,
   })
   const [hoveredCandleIndex, setHoveredCandleIndex] = useState<number | null>(null)
-  const chartShellRef = useRef<HTMLDivElement | null>(null)
+  const [chartShellElement, setChartShellElement] = useState<HTMLDivElement | null>(null)
 
   useEffect(() => {
     fetch('/stock-data/latest.json', { cache: 'no-store' })
@@ -2483,9 +2483,8 @@ function App() {
   }, [analysis.quoteKey])
 
   useEffect(() => {
-    const chartShell = chartShellRef.current
-    if (!chartShell) return undefined
-    const chartShellElement = chartShell
+    if (!chartShellElement) return undefined
+    const shellElement = chartShellElement
 
     function handleNativeChartWheel(event: WheelEvent) {
       const isPinchZoom = event.ctrlKey || event.metaKey
@@ -2493,7 +2492,7 @@ function App() {
       event.preventDefault()
       event.stopPropagation()
 
-      const rect = chartShellElement.getBoundingClientRect()
+      const rect = shellElement.getBoundingClientRect()
       const plotLeftPx = (chartModel.plotLeft / chartModel.width) * rect.width
       const plotWidthPx = (chartModel.plotWidth / chartModel.width) * rect.width
       const pointerRatio = clamp((event.clientX - rect.left - plotLeftPx) / plotWidthPx, 0, 1)
@@ -2510,9 +2509,9 @@ function App() {
       setChartWindowEnd(nextZoom <= 1 ? null : nextStart + nextLength)
     }
 
-    chartShellElement.addEventListener('wheel', handleNativeChartWheel, { passive: false })
-    return () => chartShellElement.removeEventListener('wheel', handleNativeChartWheel)
-  }, [chartModel, chartZoomLevel])
+    shellElement.addEventListener('wheel', handleNativeChartWheel, { passive: false })
+    return () => shellElement.removeEventListener('wheel', handleNativeChartWheel)
+  }, [chartModel, chartShellElement, chartZoomLevel])
 
   const priceRangePercent = rangePosition(analysis.ltp, activeRange.low, activeRange.high)
   const recentTrendPct = candleTrendPct(activeCandles, 30)
@@ -3925,7 +3924,7 @@ function App() {
                   )}
                 </div>
 
-                <div className="chart-shell" ref={chartShellRef}>
+                <div className="chart-shell" ref={setChartShellElement}>
                   <svg
                     className="candle-chart"
                     viewBox={`0 0 ${chartModel.width} ${chartModel.totalHeight}`}
