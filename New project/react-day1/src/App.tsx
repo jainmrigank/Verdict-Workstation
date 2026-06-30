@@ -77,6 +77,13 @@ type ScoreComponent = {
   rationale: string
 }
 
+type SyncCoverage = {
+  technicalLoaded: string[]
+  technicalMissing: string[]
+  fundamentalsLoaded: string[]
+  fundamentalsMissing: string[]
+}
+
 type ForecastSettings = {
   enabled: boolean
   horizon: ForecastHorizon
@@ -612,6 +619,62 @@ function CollapsibleSection({
   )
 }
 
+function SymbolCoverageList({ emptyLabel, items, tone }: { emptyLabel: string; items: string[]; tone: SignalTone }) {
+  if (!items.length) {
+    return <span className="coverage-empty">{emptyLabel}</span>
+  }
+  return (
+    <div className="coverage-chip-list">
+      {items.map((symbol) => (
+        <span className={`coverage-chip tone-${tone}`} key={symbol}>
+          {symbol}
+        </span>
+      ))}
+    </div>
+  )
+}
+
+function SyncCoveragePanel({ coverage }: { coverage: SyncCoverage }) {
+  return (
+    <div className="sync-coverage-panel">
+      <div className="sync-coverage-heading">
+        <span>Sync coverage</span>
+        <small>Technical means quote plus candle history. Fundamentals means company profile/ratios/statements data was loaded.</small>
+      </div>
+      <div className="coverage-grid">
+        <article className="coverage-card">
+          <div className="coverage-card-title">
+            <span>Technical data loaded</span>
+            <strong>{coverage.technicalLoaded.length}</strong>
+          </div>
+          <SymbolCoverageList emptyLabel="No technical data loaded yet." items={coverage.technicalLoaded} tone="positive" />
+        </article>
+        <article className="coverage-card">
+          <div className="coverage-card-title">
+            <span>Technical still missing</span>
+            <strong>{coverage.technicalMissing.length}</strong>
+          </div>
+          <SymbolCoverageList emptyLabel="None missing." items={coverage.technicalMissing} tone="negative" />
+        </article>
+        <article className="coverage-card">
+          <div className="coverage-card-title">
+            <span>Fundamentals loaded</span>
+            <strong>{coverage.fundamentalsLoaded.length}</strong>
+          </div>
+          <SymbolCoverageList emptyLabel="No fundamentals loaded yet." items={coverage.fundamentalsLoaded} tone="positive" />
+        </article>
+        <article className="coverage-card">
+          <div className="coverage-card-title">
+            <span>Fundamentals still missing</span>
+            <strong>{coverage.fundamentalsMissing.length}</strong>
+          </div>
+          <SymbolCoverageList emptyLabel="None missing." items={coverage.fundamentalsMissing} tone="neutral" />
+        </article>
+      </div>
+    </div>
+  )
+}
+
 function numberFrom(value: unknown) {
   if (value === undefined || value === null || value === '') return undefined
   if (typeof value === 'number') return Number.isFinite(value) ? value : undefined
@@ -750,6 +813,33 @@ function mergeHoldingsPrices(holdings: Holding[], quotes: Record<string, MarketQ
 
 function quotedHoldingsCount(snapshot: Snapshot) {
   return snapshot.holdings.filter((holding) => Boolean(snapshot.quotes[holdingKey(holding)])).length
+}
+
+function orderedSnapshotSymbols(snapshot: Snapshot) {
+  const seen = new Set<string>()
+  const symbols: string[] = []
+  const add = (symbol?: string) => {
+    if (!symbol || seen.has(symbol)) return
+    seen.add(symbol)
+    symbols.push(symbol)
+  }
+  snapshot.symbols.forEach((symbol) => add(symbol.kite_key || symbol.input))
+  Object.keys(snapshot.quotes).forEach(add)
+  Object.keys(snapshot.candles).forEach(add)
+  Object.keys(snapshot.fundamentals ?? {}).forEach(add)
+  return symbols
+}
+
+function buildSyncCoverage(snapshot: Snapshot): SyncCoverage {
+  const symbols = orderedSnapshotSymbols(snapshot)
+  const hasTechnical = (symbol: string) => Boolean(snapshot.quotes[symbol]) && (snapshot.candles[symbol]?.length ?? 0) > 0
+  const hasFundamentals = (symbol: string) => Object.keys(snapshot.fundamentals?.[symbol] ?? {}).length > 0
+  return {
+    technicalLoaded: symbols.filter(hasTechnical),
+    technicalMissing: symbols.filter((symbol) => !hasTechnical(symbol)),
+    fundamentalsLoaded: symbols.filter(hasFundamentals),
+    fundamentalsMissing: symbols.filter((symbol) => !hasFundamentals(symbol)),
+  }
 }
 
 function mergeFundamentals(refreshedSnapshot: Snapshot, previousSnapshot: Snapshot) {
@@ -2431,6 +2521,7 @@ function App() {
   const [copied, setCopied] = useState<string | null>(null)
   const [freeRefreshState, setFreeRefreshState] = useState<RefreshState>('idle')
   const [freeRefreshMessage, setFreeRefreshMessage] = useState('')
+  const [syncCoverage, setSyncCoverage] = useState<SyncCoverage | null>(null)
   const [serverRestartState, setServerRestartState] = useState<ServerRestartState>('idle')
   const [serverRestartMessage, setServerRestartMessage] = useState('')
   const [uploadState, setUploadState] = useState<UploadState>('idle')
@@ -3171,6 +3262,7 @@ function App() {
   async function refreshFreeData() {
     setFreeRefreshState('refreshing')
     setFreeRefreshMessage('Syncing EOD prices, candles, fundamentals, and company updates...')
+    setSyncCoverage(null)
     try {
       const bridgeUrl = requireMarketDataBridge('Market-data sync')
       const response = await fetch(apiUrl(bridgeUrl, '/api/free-data/refresh'), {
@@ -3190,6 +3282,7 @@ function App() {
       const mergedRefresh = mergeRefreshedSnapshot(refreshedSnapshot, activeSnapshot)
       setSnapshot(mergedRefresh.snapshot)
       setCacheState(cacheStateFromProvider(mergedRefresh.snapshot.provider))
+      setSyncCoverage(buildSyncCoverage(mergedRefresh.snapshot))
       setFreeRefreshState('done')
       const fundamentalsMessage = mergedRefresh.refreshedCount
         ? `Fundamentals loaded for ${mergedRefresh.refreshedCount} symbols.`
@@ -3206,6 +3299,7 @@ function App() {
       )
     } catch (error) {
       setFreeRefreshState('error')
+      setSyncCoverage(null)
       setFreeRefreshMessage(bridgeFailureMessage(error, 'Market-data sync failed.'))
     }
   }
@@ -3214,6 +3308,7 @@ function App() {
     if (!file) return
     setUploadState('uploading')
     setUploadMessage(`Uploading ${file.name}...`)
+    setSyncCoverage(null)
     try {
       const bridgeUrl = requireMarketDataBridge('Holdings upload')
       const response = await fetch(apiUrl(bridgeUrl, `/api/portfolio/upload?days=${days}`), {
@@ -3233,6 +3328,7 @@ function App() {
       const mergedRefresh = mergeRefreshedSnapshot(refreshedSnapshot, activeSnapshot)
       setSnapshot(mergedRefresh.snapshot)
       setCacheState(cacheStateFromProvider(mergedRefresh.snapshot.provider))
+      setSyncCoverage(buildSyncCoverage(mergedRefresh.snapshot))
       if (refreshedSnapshot.upload?.symbols.length) {
         setSymbols(refreshedSnapshot.upload.symbols.join(' '))
       }
@@ -4788,6 +4884,7 @@ function App() {
                 <p>{freeRefreshMessage}</p>
               </div>
             )}
+            {syncCoverage && (freeRefreshState === 'done' || uploadState === 'done') && <SyncCoveragePanel coverage={syncCoverage} />}
             {serverRestartMessage && (
               <div className={`refresh-message ${serverRestartState === 'restarting' ? 'uploading' : serverRestartState}`}>
                 <p>{serverRestartMessage}</p>
