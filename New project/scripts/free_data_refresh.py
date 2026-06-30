@@ -82,6 +82,36 @@ def yahoo_guess(exchange: str, tradingsymbol: str) -> str:
     return f"{tradingsymbol}.NS"
 
 
+def unique_candidates(candidates: list[str]) -> list[str]:
+    output = []
+    for candidate in candidates:
+        clean = candidate.strip()
+        if clean and clean not in output:
+            output.append(clean)
+    return output
+
+
+def yahoo_candidates(item: dict[str, str]) -> list[str]:
+    exchange = item.get("exchange", "NSE").upper()
+    tradingsymbol = item.get("tradingsymbol", "").upper()
+    configured = item.get("yahoo", "")
+    candidates = [configured, yahoo_guess(exchange, tradingsymbol)]
+    if "-" in tradingsymbol:
+        candidates.append(yahoo_guess(exchange, tradingsymbol.split("-", 1)[0]))
+        candidates.append(yahoo_guess(exchange, tradingsymbol.replace("-", "")))
+    return unique_candidates(candidates)
+
+
+def unsupported_reason(item: dict[str, str]) -> str:
+    exchange = item.get("exchange", "").upper()
+    tradingsymbol = item.get("tradingsymbol", "").upper()
+    if exchange not in {"NSE", "BSE"}:
+        return "unsupported exchange; only NSE/BSE listed symbols can be auto-fetched"
+    if re.fullmatch(r"IN[A-Z0-9]{10}", tradingsymbol):
+        return "looks like an ISIN/unlisted holding row, not a directly fetchable NSE/BSE ticker"
+    return ""
+
+
 def resolve_symbol(symbol: str, mapping: dict[str, dict[str, str]]) -> dict[str, str]:
     exchange, tradingsymbol = split_symbol(symbol)
     key = f"{exchange}:{tradingsymbol}"
@@ -95,9 +125,53 @@ def resolve_symbol(symbol: str, mapping: dict[str, dict[str, str]]) -> dict[str,
         "instrument_type": "EQ",
         "instrument_token": configured.get("yahoo", yahoo_guess(exchange, tradingsymbol)),
         "kite_key": f"{configured.get('exchange', exchange)}:{configured.get('tradingsymbol', tradingsymbol)}",
+        "mapped": bool(configured),
         "yahoo": configured.get("yahoo", yahoo_guess(exchange, tradingsymbol)),
         "screener": configured.get("screener", ""),
     }
+
+
+def upsert_symbol_mapping(payload: dict[str, Any]) -> dict[str, str]:
+    raw_input = str(payload.get("input") or "").strip().upper()
+    if not raw_input:
+        raise ValueError("Mapping needs an input symbol such as NSE:TCS.")
+    input_exchange, input_symbol = split_symbol(raw_input)
+    exchange = str(payload.get("exchange") or input_exchange).strip().upper()
+    tradingsymbol = str(payload.get("tradingsymbol") or input_symbol).strip().upper()
+    if exchange not in {"NSE", "BSE"}:
+        raise ValueError("Only NSE and BSE mappings are supported.")
+    if not tradingsymbol:
+        raise ValueError("Mapping needs a tradingsymbol.")
+
+    normalized = {
+        "exchange": exchange,
+        "input": f"{input_exchange}:{input_symbol}",
+        "name": str(payload.get("name") or "").strip(),
+        "screener": str(payload.get("screener") or tradingsymbol).strip().upper(),
+        "tradingsymbol": tradingsymbol,
+        "yahoo": str(payload.get("yahoo") or yahoo_guess(exchange, tradingsymbol)).strip().upper(),
+    }
+    symbol_key = f"{exchange}:{tradingsymbol}"
+    existing = read_json(SYMBOL_MAP_PATH, {"symbols": []})
+    rows = existing.get("symbols") if isinstance(existing, dict) else []
+    if not isinstance(rows, list):
+        rows = []
+    next_rows = []
+    replaced = False
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row_input = str(row.get("input") or "").upper()
+        row_key = f"{str(row.get('exchange') or '').upper()}:{str(row.get('tradingsymbol') or '').upper()}"
+        if row_input == normalized["input"] or row_key == symbol_key:
+            next_rows.append(normalized)
+            replaced = True
+        else:
+            next_rows.append(row)
+    if not replaced:
+        next_rows.append(normalized)
+    write_json(SYMBOL_MAP_PATH, {"symbols": sorted(next_rows, key=lambda row: str(row.get("input") or ""))})
+    return normalized
 
 
 def yahoo_chart_url(yahoo_symbol: str, days: int) -> str:
@@ -452,6 +526,9 @@ def screener_candidates(item: dict[str, str]) -> list[str]:
     if yahoo.endswith(".BO") and yahoo[:-3].isdigit():
         candidates.append(yahoo[:-3])
     candidates.append(tradingsymbol)
+    if "-" in tradingsymbol:
+        candidates.append(tradingsymbol.split("-", 1)[0])
+        candidates.append(tradingsymbol.replace("-", ""))
     output = []
     for candidate in candidates:
         clean = candidate.strip().upper()
@@ -685,20 +762,39 @@ def refresh_free_data(
     errors: list[str] = []
 
     for item in resolved:
-        yahoo_symbol = item["yahoo"]
         key = item["kite_key"]
-        try:
-            series = fetch_yahoo_candles(yahoo_symbol, days)
-            candles[key] = series
-            quotes[key] = quote_from_candles(series)
-        except (RuntimeError, urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
-            errors.append(f"{key}: could not fetch Yahoo EOD data for {yahoo_symbol}: {exc}")
+        unsupported = unsupported_reason(item)
+        if unsupported and not item.get("mapped"):
+            errors.append(f"{key}: unsupported/unlisted security detected: {unsupported}")
+            fundamentals[key] = {}
+            continue
+
+        used_yahoo_symbol = ""
+        candle_errors = []
+        for yahoo_symbol in yahoo_candidates(item):
+            try:
+                series = fetch_yahoo_candles(yahoo_symbol, days)
+                candles[key] = series
+                quotes[key] = quote_from_candles(series)
+                used_yahoo_symbol = yahoo_symbol
+                item["resolved_yahoo"] = yahoo_symbol
+                break
+            except (RuntimeError, urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
+                candle_errors.append(f"{yahoo_symbol}: {exc}")
+        if not used_yahoo_symbol:
+            errors.append(f"{key}: could not fetch Yahoo EOD data for {', '.join(yahoo_candidates(item))}: {'; '.join(candle_errors)}")
+
         yahoo_fundamentals: dict[str, Any] = {}
         screener_fundamentals: dict[str, Any] = {}
-        try:
-            yahoo_fundamentals = fetch_yahoo_fundamentals(yahoo_symbol)
-        except (RuntimeError, urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
-            errors.append(f"{key}: could not fetch Yahoo company/fundamental data for {yahoo_symbol}: {exc}")
+        yahoo_fundamental_errors = []
+        for yahoo_symbol in unique_candidates([used_yahoo_symbol, *yahoo_candidates(item)]):
+            try:
+                yahoo_fundamentals = fetch_yahoo_fundamentals(yahoo_symbol)
+                break
+            except (RuntimeError, urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
+                yahoo_fundamental_errors.append(f"{yahoo_symbol}: {exc}")
+        if not yahoo_fundamentals and yahoo_fundamental_errors:
+            errors.append(f"{key}: could not fetch Yahoo company/fundamental data: {'; '.join(yahoo_fundamental_errors)}")
         try:
             screener_fundamentals = fetch_screener_fundamentals(item)
         except (RuntimeError, urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
@@ -711,7 +807,7 @@ def refresh_free_data(
         "provider": "free_yahoo_eod",
         "generated_at": now_iso(),
         "symbols": [
-            {key: value for key, value in item.items() if key not in {"yahoo", "screener"}}
+            {key: value for key, value in item.items()}
             for item in resolved
         ],
         "quotes": quotes,

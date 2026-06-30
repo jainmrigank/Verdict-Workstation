@@ -140,7 +140,7 @@ def parse_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         exchange, tradingsymbol = clean_symbol(str(raw_symbol))
         sector = str(by_header(row, header_by_column, "Sector") or "").strip().upper()
         isin = by_header(row, header_by_column, "ISIN") or ""
-        if sector == "UNLISTED" or (not isin and ISIN_LIKE_RE.fullmatch(tradingsymbol)):
+        if sector == "UNLISTED" or ISIN_LIKE_RE.fullmatch(tradingsymbol):
             exchange = "UNLISTED"
         quantity_available = numeric_by_header(row, header_by_column, "Quantity Available", "Quantity", "Qty") or 0
         quantity_discrepant = numeric_by_header(row, header_by_column, "Quantity Discrepant") or 0

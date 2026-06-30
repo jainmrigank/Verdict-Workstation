@@ -84,6 +84,26 @@ type SyncCoverage = {
   fundamentalsMissing: string[]
 }
 
+type MissingDataIssueAction = 'mapping' | 'retry' | 'unsupported'
+
+type MissingDataIssue = {
+  action: MissingDataIssueAction
+  errors: string[]
+  fundamentalsMissing: boolean
+  reason: string
+  suggestion: string
+  symbol: string
+  technicalMissing: boolean
+}
+
+type SymbolMappingDraft = {
+  name: string
+  screener: string
+  yahoo: string
+}
+
+type MappingSaveState = 'idle' | 'saving' | 'done' | 'error'
+
 type BrowserWorkspace = {
   version: 1
   snapshot: Snapshot
@@ -227,6 +247,9 @@ type Snapshot = {
     tradingsymbol: string
     instrument_token?: string
     kite_key: string
+    screener?: string
+    unsupported_reason?: string
+    yahoo?: string
   }>
   quotes: Record<string, MarketQuote>
   candles: Record<string, Candle[]>
@@ -681,6 +704,107 @@ function SyncCoveragePanel({ coverage }: { coverage: SyncCoverage }) {
   )
 }
 
+function MissingDataResolverPanel({
+  drafts,
+  issues,
+  mappingState,
+  mappingStatus,
+  onDraftChange,
+  onMarkUnsupported,
+  onRetryMissing,
+  onSaveMapping,
+  retryDisabled,
+}: {
+  drafts: Record<string, SymbolMappingDraft>
+  issues: MissingDataIssue[]
+  mappingState: MappingSaveState
+  mappingStatus: string
+  onDraftChange: (symbol: string, field: keyof SymbolMappingDraft, value: string) => void
+  onMarkUnsupported: (symbol: string) => void
+  onRetryMissing: () => void
+  onSaveMapping: (symbol: string) => void
+  retryDisabled: boolean
+}) {
+  if (!issues.length) return null
+  const retryableCount = issues.filter((issue) => issue.action !== 'unsupported').length
+  return (
+    <div className="missing-data-panel">
+      <div className="sync-coverage-heading">
+        <span>Missing Data Resolver</span>
+        <small>
+          Use this when a symbol did not return quote/candle history or Screener fundamentals. Mapped symbols are saved on your data bridge
+          and used for future portfolio uploads.
+        </small>
+      </div>
+      <div className="resolver-toolbar">
+        <button type="button" onClick={onRetryMissing} disabled={retryDisabled || retryableCount === 0}>
+          Retry Missing Only
+        </button>
+        <span>{retryableCount} retryable symbols</span>
+      </div>
+      {mappingStatus && <p className={`resolver-status ${mappingState}`}>{mappingStatus}</p>}
+      <div className="missing-issue-list">
+        {issues.map((issue) => {
+          const draft = drafts[issue.symbol] ?? mappingDraftForSymbol({ ...starterSnapshot, symbols: [], errors: [], holdings: [] }, issue.symbol)
+          return (
+            <article className={`missing-issue-card tone-${issue.action === 'unsupported' ? 'neutral' : issue.action === 'mapping' ? 'negative' : 'positive'}`} key={issue.symbol}>
+              <div className="missing-issue-header">
+                <div>
+                  <strong>{issue.symbol}</strong>
+                  <span>{issue.action === 'unsupported' ? 'Unsupported or unlisted' : issue.action === 'mapping' ? 'Needs symbol mapping' : 'Retry candidate'}</span>
+                </div>
+                <div className="coverage-chip-list">
+                  {issue.technicalMissing && <span className="coverage-chip tone-negative">Technical missing</span>}
+                  {issue.fundamentalsMissing && <span className="coverage-chip tone-neutral">Fundamentals missing</span>}
+                </div>
+              </div>
+              <p>{issue.reason}</p>
+              <p className="issue-suggestion">{issue.suggestion}</p>
+              {issue.action === 'unsupported' ? (
+                <div className="resolver-actions">
+                  <button className="secondary-action" type="button" onClick={() => onMarkUnsupported(issue.symbol)}>
+                    Remove From Sync List
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <div className="mapping-grid">
+                    <label className="field compact">
+                      Yahoo code
+                      <input value={draft.yahoo} placeholder="Example: TCS.NS" onChange={(event) => onDraftChange(issue.symbol, 'yahoo', event.target.value)} />
+                    </label>
+                    <label className="field compact">
+                      Screener code
+                      <input value={draft.screener} placeholder="Example: TCS" onChange={(event) => onDraftChange(issue.symbol, 'screener', event.target.value)} />
+                    </label>
+                    <label className="field compact">
+                      Company name
+                      <input value={draft.name} placeholder="Optional" onChange={(event) => onDraftChange(issue.symbol, 'name', event.target.value)} />
+                    </label>
+                  </div>
+                  <div className="resolver-actions">
+                    <button type="button" onClick={() => onSaveMapping(issue.symbol)} disabled={mappingState === 'saving'}>
+                      {mappingState === 'saving' ? 'Saving...' : 'Save Mapping'}
+                    </button>
+                  </div>
+                </>
+              )}
+              {issue.errors.length > 1 && (
+                <details className="resolver-error-details">
+                  <summary>Show technical warnings</summary>
+                  {issue.errors.slice(0, 4).map((error) => (
+                    <code key={error}>{compactSyncError(error, issue.symbol)}</code>
+                  ))}
+                </details>
+              )}
+            </article>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 function numberFrom(value: unknown) {
   if (value === undefined || value === null || value === '') return undefined
   if (typeof value === 'number') return Number.isFinite(value) ? value : undefined
@@ -850,6 +974,93 @@ function buildSyncCoverage(snapshot: Snapshot): SyncCoverage {
   }
 }
 
+function splitMarketSymbol(symbol: string) {
+  const [rawExchange, ...rest] = symbol.trim().toUpperCase().split(':')
+  const tradingsymbol = rest.length ? rest.join(':') : rawExchange
+  const exchange = rest.length && (rawExchange === 'BSE' || rawExchange === 'NSE') ? rawExchange : 'NSE'
+  return { exchange, tradingsymbol }
+}
+
+function defaultYahooSymbol(symbol: string) {
+  const { exchange, tradingsymbol } = splitMarketSymbol(symbol)
+  if (!tradingsymbol) return ''
+  return `${tradingsymbol}${exchange === 'BSE' ? '.BO' : '.NS'}`
+}
+
+function defaultScreenerSymbol(symbol: string) {
+  const { tradingsymbol } = splitMarketSymbol(symbol)
+  return tradingsymbol.replace(/-(BE|EQ|SM|ST)$/i, '')
+}
+
+function isLikelyIsinSymbol(symbol: string) {
+  const { tradingsymbol } = splitMarketSymbol(symbol)
+  return /^IN[A-Z0-9]{10}$/i.test(tradingsymbol)
+}
+
+function syncErrorsForSymbol(snapshot: Snapshot, symbol: string) {
+  const normalizedSymbol = symbol.toUpperCase()
+  return snapshot.errors.filter((error) => error.toUpperCase().startsWith(`${normalizedSymbol}:`))
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function compactSyncError(error: string, symbol: string) {
+  return error.replace(new RegExp(`^${escapeRegExp(symbol)}:\\s*`, 'i'), '').replace(/\s+/g, ' ').slice(0, 180)
+}
+
+function mappingDraftForSymbol(snapshot: Snapshot, symbol: string): SymbolMappingDraft {
+  const resolved = snapshot.symbols.find((row) => (row.kite_key || row.input).toUpperCase() === symbol.toUpperCase())
+  return {
+    name: '',
+    screener: resolved?.screener || defaultScreenerSymbol(symbol),
+    yahoo: resolved?.yahoo || defaultYahooSymbol(symbol),
+  }
+}
+
+function buildMissingDataIssues(snapshot: Snapshot, coverage: SyncCoverage): MissingDataIssue[] {
+  const symbols = Array.from(new Set([...coverage.technicalMissing, ...coverage.fundamentalsMissing]))
+  return symbols.map((symbol) => {
+    const errors = syncErrorsForSymbol(snapshot, symbol)
+    const technicalMissing = coverage.technicalMissing.includes(symbol)
+    const fundamentalsMissing = coverage.fundamentalsMissing.includes(symbol)
+    const errorText = errors.join(' ').toLowerCase()
+    const unsupported =
+      isLikelyIsinSymbol(symbol) ||
+      errorText.includes('unsupported') ||
+      errorText.includes('unlisted') ||
+      errorText.includes('isin')
+    const likelyMappingIssue =
+      errorText.includes('404') ||
+      errorText.includes('not found') ||
+      errorText.includes('no price data') ||
+      errorText.includes('no historical data') ||
+      errorText.includes('screener')
+    const action: MissingDataIssueAction = unsupported ? 'unsupported' : likelyMappingIssue ? 'mapping' : 'retry'
+    const reason = errors.length
+      ? compactSyncError(errors[0], symbol)
+      : unsupported
+        ? 'Looks like an unlisted/ISIN-only holding rather than a directly tradable NSE/BSE symbol.'
+        : 'The last sync did not return the required quote, candle, or company data.'
+    const suggestion =
+      action === 'unsupported'
+        ? 'Keep it in portfolio value if needed, but exclude it from technical/fundamental analysis unless you can map it to a listed NSE/BSE symbol.'
+        : action === 'mapping'
+          ? 'Add the correct Yahoo price code and Screener company code, save the mapping, then retry missing symbols only.'
+          : 'Retry just this missing set first. If it still fails, add a manual mapping.'
+    return {
+      action,
+      errors,
+      fundamentalsMissing,
+      reason,
+      suggestion,
+      symbol,
+      technicalMissing,
+    }
+  })
+}
+
 function mergeFundamentals(refreshedSnapshot: Snapshot, previousSnapshot: Snapshot) {
   const merged: Record<string, CompanyFundamentals> = { ...(previousSnapshot.fundamentals ?? {}) }
   for (const [key, fundamentals] of Object.entries(refreshedSnapshot.fundamentals ?? {})) {
@@ -860,11 +1071,28 @@ function mergeFundamentals(refreshedSnapshot: Snapshot, previousSnapshot: Snapsh
   return merged
 }
 
-function mergeRefreshedSnapshot(refreshedSnapshot: Snapshot, previousSnapshot: Snapshot) {
+function mergeSymbolRows(previousRows: Snapshot['symbols'], refreshedRows: Snapshot['symbols']) {
+  const merged = new Map<string, Snapshot['symbols'][number]>()
+  for (const row of previousRows) merged.set((row.kite_key || row.input).toUpperCase(), row)
+  for (const row of refreshedRows) merged.set((row.kite_key || row.input).toUpperCase(), row)
+  return Array.from(merged.values())
+}
+
+function uniqueMessages(messages: string[]) {
+  return Array.from(new Set(messages.filter(Boolean))).slice(-80)
+}
+
+function mergeRefreshedSnapshot(refreshedSnapshot: Snapshot, previousSnapshot: Snapshot, options: { retainMarketData?: boolean } = {}) {
   const refreshedCount = filledFundamentalsCount(refreshedSnapshot)
   const previousCount = filledFundamentalsCount(previousSnapshot)
   const fundamentals = mergeFundamentals(refreshedSnapshot, previousSnapshot)
   const retainedCount = filledFundamentalsRecordCount(fundamentals)
+  const quotes = options.retainMarketData
+    ? { ...(previousSnapshot.quotes ?? {}), ...(refreshedSnapshot.quotes ?? {}) }
+    : (refreshedSnapshot.quotes ?? {})
+  const candles = options.retainMarketData
+    ? { ...(previousSnapshot.candles ?? {}), ...(refreshedSnapshot.candles ?? {}) }
+    : (refreshedSnapshot.candles ?? {})
   const previousHoldings = previousSnapshot.holdings ?? []
   const refreshedHoldings = refreshedSnapshot.holdings ?? []
   const retainedHoldings =
@@ -872,7 +1100,7 @@ function mergeRefreshedSnapshot(refreshedSnapshot: Snapshot, previousSnapshot: S
     refreshedHoldings.length === 0 &&
     previousHoldings.length > 0 &&
     !previousSnapshot.provider.includes('sample')
-  const holdings = retainedHoldings ? mergeHoldingsPrices(previousHoldings, refreshedSnapshot.quotes ?? {}) : refreshedHoldings
+  const holdings = retainedHoldings ? mergeHoldingsPrices(previousHoldings, quotes) : refreshedHoldings
 
   return {
     refreshedCount,
@@ -881,8 +1109,14 @@ function mergeRefreshedSnapshot(refreshedSnapshot: Snapshot, previousSnapshot: S
     retainedHoldings,
     snapshot: {
       ...refreshedSnapshot,
+      candles,
+      errors: options.retainMarketData
+        ? uniqueMessages([...(previousSnapshot.errors ?? []), ...(refreshedSnapshot.errors ?? [])])
+        : (refreshedSnapshot.errors ?? []),
       fundamentals,
       holdings,
+      quotes,
+      symbols: options.retainMarketData ? mergeSymbolRows(previousSnapshot.symbols ?? [], refreshedSnapshot.symbols ?? []) : (refreshedSnapshot.symbols ?? []),
       upload: refreshedSnapshot.upload ?? (retainedHoldings ? previousSnapshot.upload : undefined),
     },
   }
@@ -1921,6 +2155,9 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
   if (!quote) cautions.push('No quote was found in the current cache for this symbol.')
   if (candleCount >= 180) positives.push('Daily candles are available for trend and support/resistance checks.')
   if (candleCount === 0) cautions.push('No historical candles are cached yet, so the technical view is incomplete.')
+  if (!companyFundamentals || Object.keys(companyFundamentals).length === 0) {
+    cautions.push('Fundamental data is missing. The verdict treats this as lower confidence and incomplete evidence, not as proof that the company is weak.')
+  }
 
   if (form.riskProfile === 'conservative') score -= 5
   if (form.riskProfile === 'balanced_aggressive') score += 3
@@ -2558,6 +2795,9 @@ function App() {
   const [freeRefreshMessage, setFreeRefreshMessage] = useState('')
   const [syncProgress, setSyncProgress] = useState(0)
   const [syncCoverage, setSyncCoverage] = useState<SyncCoverage | null>(null)
+  const [mappingDrafts, setMappingDrafts] = useState<Record<string, SymbolMappingDraft>>({})
+  const [mappingState, setMappingState] = useState<MappingSaveState>('idle')
+  const [mappingStatus, setMappingStatus] = useState('')
   const [serverRestartState, setServerRestartState] = useState<ServerRestartState>('idle')
   const [serverRestartMessage, setServerRestartMessage] = useState('')
   const [uploadState, setUploadState] = useState<UploadState>('idle')
@@ -2611,6 +2851,24 @@ function App() {
   }, [days, form, includeHoldings, snapshot, symbols])
 
   const activeSnapshot = snapshot
+  const missingDataIssues = useMemo(
+    () => (syncCoverage ? buildMissingDataIssues(activeSnapshot, syncCoverage) : []),
+    [activeSnapshot, syncCoverage],
+  )
+  useEffect(() => {
+    if (!missingDataIssues.length) return
+    setMappingDrafts((current) => {
+      let changed = false
+      const next = { ...current }
+      for (const issue of missingDataIssues) {
+        if (next[issue.symbol]) continue
+        next[issue.symbol] = mappingDraftForSymbol(activeSnapshot, issue.symbol)
+        changed = true
+      }
+      return changed ? next : current
+    })
+  }, [activeSnapshot, missingDataIssues])
+
   const hasUploadedHoldingsFeed = activeSnapshot.holdings.length > 0
   const loadedHoldingsFilename = activeSnapshot.upload?.filename ?? (hasUploadedHoldingsFeed ? 'Browser cached holdings' : '')
   const loadedHoldingsCount = activeSnapshot.upload?.holdings_count ?? activeSnapshot.holdings.length
@@ -3350,6 +3608,98 @@ function App() {
       setSyncCoverage(null)
       setFreeRefreshMessage(bridgeFailureMessage(error, 'Market-data sync failed.'))
     }
+  }
+
+  function updateMappingDraft(symbol: string, field: keyof SymbolMappingDraft, value: string) {
+    setMappingDrafts((current) => ({
+      ...current,
+      [symbol]: {
+        ...(current[symbol] ?? mappingDraftForSymbol(activeSnapshot, symbol)),
+        [field]: value,
+      },
+    }))
+  }
+
+  async function saveSymbolMapping(symbol: string) {
+    setMappingState('saving')
+    setMappingStatus(`Saving mapping for ${symbol}...`)
+    try {
+      const bridgeUrl = requireMarketDataBridge('Symbol mapping')
+      const draft = mappingDrafts[symbol] ?? mappingDraftForSymbol(activeSnapshot, symbol)
+      const response = await fetch(apiUrl(bridgeUrl, '/api/symbol-map/upsert'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          input: symbol,
+          name: draft.name.trim(),
+          screener: draft.screener.trim(),
+          yahoo: draft.yahoo.trim(),
+        }),
+      })
+      const data = await readResponseJson(response)
+      if (!response.ok) {
+        throw new Error(typeof data.error === 'string' ? data.error : 'Could not save symbol mapping.')
+      }
+      setMappingState('done')
+      setMappingStatus(`Saved mapping for ${symbol}. Click Retry Missing Only to fetch it with the corrected codes.`)
+    } catch (error) {
+      setMappingState('error')
+      setMappingStatus(bridgeFailureMessage(error, 'Could not save symbol mapping.'))
+    }
+  }
+
+  async function retryMissingData() {
+    const retrySymbols = missingDataIssues
+      .filter((issue) => issue.action !== 'unsupported')
+      .map((issue) => issue.symbol)
+    if (!retrySymbols.length) return
+    setFreeRefreshState('refreshing')
+    setFreeRefreshMessage(`Retrying ${retrySymbols.length} missing symbols only...`)
+    setSyncProgress(12)
+    try {
+      const bridgeUrl = requireMarketDataBridge('Missing-data retry')
+      const response = await fetch(apiUrl(bridgeUrl, '/api/free-data/refresh'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          symbols: retrySymbols,
+          days,
+          includeHoldings: false,
+        }),
+      })
+      const data = await response.json()
+      if (!response.ok) {
+        throw new Error(data.error || 'Missing-data retry failed.')
+      }
+      const refreshedSnapshot = data as Snapshot
+      const mergedRefresh = mergeRefreshedSnapshot(refreshedSnapshot, activeSnapshot, { retainMarketData: true })
+      const coverage = buildSyncCoverage(mergedRefresh.snapshot)
+      setSnapshot(mergedRefresh.snapshot)
+      setCacheState(cacheStateFromProvider(mergedRefresh.snapshot.provider))
+      setSyncCoverage(coverage)
+      setSyncProgress(100)
+      setFreeRefreshState('done')
+      setFreeRefreshMessage(
+        `Retried ${retrySymbols.length} missing symbols. Technical loaded for ${coverage.technicalLoaded.length}; fundamentals loaded for ${coverage.fundamentalsLoaded.length}. ${mergedRefresh.snapshot.errors.length} warnings.`,
+      )
+    } catch (error) {
+      setFreeRefreshState('error')
+      setSyncProgress(0)
+      setFreeRefreshMessage(bridgeFailureMessage(error, 'Missing-data retry failed.'))
+    }
+  }
+
+  function markSymbolUnsupported(symbol: string) {
+    const normalized = symbol.trim().toUpperCase()
+    setSymbols((current) =>
+      current
+        .trim()
+        .split(/\s+/)
+        .filter((candidate) => candidate.trim().toUpperCase() !== normalized)
+        .join(' '),
+    )
+    setMappingState('done')
+    setMappingStatus(`${symbol} removed from the sync input. It can stay in holdings, but it will not be requested as a listed quote unless you add it again.`)
   }
 
   async function uploadHoldingsReport(file: File | undefined) {
@@ -5038,6 +5388,19 @@ function App() {
               </div>
             )}
             {syncCoverage && (freeRefreshState === 'done' || uploadState === 'done') && <SyncCoveragePanel coverage={syncCoverage} />}
+            {syncCoverage && (freeRefreshState === 'done' || uploadState === 'done') && (
+              <MissingDataResolverPanel
+                drafts={mappingDrafts}
+                issues={missingDataIssues}
+                mappingState={mappingState}
+                mappingStatus={mappingStatus}
+                retryDisabled={freeRefreshState === 'refreshing' || serverRestartState === 'restarting'}
+                onDraftChange={updateMappingDraft}
+                onMarkUnsupported={markSymbolUnsupported}
+                onRetryMissing={retryMissingData}
+                onSaveMapping={saveSymbolMapping}
+              />
+            )}
             {serverRestartMessage && (
               <div className={`refresh-message ${serverRestartState === 'restarting' ? 'uploading' : serverRestartState}`}>
                 <p>{serverRestartMessage}</p>

@@ -160,6 +160,9 @@ class FreeDataHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/portfolio/clear":
             self._handle_portfolio_clear()
             return
+        if parsed.path == "/api/symbol-map/upsert":
+            self._handle_symbol_map_upsert()
+            return
         self._write_json({"error": "Not found"}, status=404)
 
     def _handle_server_restart(self) -> None:
@@ -252,6 +255,17 @@ class FreeDataHandler(BaseHTTPRequestHandler):
             if upload_path.exists():
                 upload_path.unlink()
             self._write_json({"ok": True, "message": "Uploaded holdings feed cleared."})
+        except Exception as exc:
+            self._write_json({"error": str(exc)}, status=500)
+
+    def _handle_symbol_map_upsert(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length).decode("utf-8") if length else "{}"
+            payload = json.loads(body or "{}")
+            module = refresh_module()
+            mapping = module.upsert_symbol_mapping(payload)
+            self._write_json({"ok": True, "mapping": mapping})
         except Exception as exc:
             self._write_json({"error": str(exc)}, status=500)
 
