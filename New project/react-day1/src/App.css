@@ -150,6 +150,11 @@ button:disabled {
   cursor: wait;
 }
 
+input:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
 .collapsible-heading {
   align-items: flex-start;
 }
@@ -1864,6 +1869,59 @@ li {
   align-items: end;
 }
 
+.loaded-upload-card {
+  display: flex;
+  grid-column: 1 / -1;
+  gap: 14px;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--positive) 38%, var(--border));
+  border-radius: 8px;
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--positive) 12%, transparent), transparent 48%),
+    var(--surface-2);
+}
+
+.loaded-upload-card div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.loaded-upload-card span {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.loaded-upload-card strong {
+  color: var(--text-primary);
+  font-size: 1rem;
+  overflow-wrap: anywhere;
+}
+
+.loaded-upload-card p,
+.field-note {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.danger-action {
+  border-color: color-mix(in srgb, var(--negative) 48%, var(--border));
+  color: var(--negative);
+  background: color-mix(in srgb, var(--negative) 8%, var(--surface-2));
+}
+
+.danger-action:hover {
+  border-color: var(--negative);
+  color: var(--negative);
+}
+
 .positive {
   color: #047857 !important;
 }
@@ -3194,6 +3252,11 @@ td {
   .visual-card-heading,
   .forecast-control-head,
   .forecast-summary-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .loaded-upload-card {
     align-items: stretch;
     flex-direction: column;
   }

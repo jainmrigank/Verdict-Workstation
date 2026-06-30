@@ -157,6 +157,9 @@ class FreeDataHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/portfolio/upload":
             self._handle_portfolio_upload(parsed.query)
             return
+        if parsed.path == "/api/portfolio/clear":
+            self._handle_portfolio_clear()
+            return
         self._write_json({"error": "Not found"}, status=404)
 
     def _handle_server_restart(self) -> None:
@@ -200,7 +203,7 @@ class FreeDataHandler(BaseHTTPRequestHandler):
                 symbols=symbols,
                 days=days,
                 include_holdings=include_holdings,
-                return_holdings=True,
+                return_holdings=include_holdings,
             )
             self._write_json(snapshot)
         except Exception as exc:  # Keep local UI errors visible.
@@ -238,6 +241,17 @@ class FreeDataHandler(BaseHTTPRequestHandler):
             module.write_json(module.CACHE_DIR / "latest.json", snapshot)
             module.write_json(module.APP_SNAPSHOT, snapshot)
             self._write_json(snapshot)
+        except Exception as exc:
+            self._write_json({"error": str(exc)}, status=500)
+
+    def _handle_portfolio_clear(self) -> None:
+        try:
+            module = refresh_module()
+            module.write_json(module.HOLDINGS_PATH, [])
+            upload_path = UPLOAD_DIR / "latest_holdings_upload.xlsx"
+            if upload_path.exists():
+                upload_path.unlink()
+            self._write_json({"ok": True, "message": "Uploaded holdings feed cleared."})
         except Exception as exc:
             self._write_json({"error": str(exc)}, status=500)
 

@@ -360,7 +360,7 @@ function readBrowserWorkspace(): BrowserWorkspace | null {
       form: { ...initialForm, ...(parsed.form ?? {}) },
       symbols: typeof parsed.symbols === 'string' ? parsed.symbols : '',
       days: typeof parsed.days === 'number' && Number.isFinite(parsed.days) ? parsed.days : 730,
-      includeHoldings: typeof parsed.includeHoldings === 'boolean' ? parsed.includeHoldings : true,
+      includeHoldings: typeof parsed.includeHoldings === 'boolean' ? parsed.includeHoldings : false,
     }
   } catch {
     return null
@@ -2524,7 +2524,7 @@ function App() {
   const [form, setForm] = useState<AnalysisForm>(() => storedWorkspace?.form ?? initialForm)
   const [symbols, setSymbols] = useState(() => storedWorkspace?.symbols ?? '')
   const [days, setDays] = useState(() => storedWorkspace?.days ?? 730)
-  const [includeHoldings, setIncludeHoldings] = useState(() => storedWorkspace?.includeHoldings ?? true)
+  const [includeHoldings, setIncludeHoldings] = useState(() => storedWorkspace?.includeHoldings ?? false)
   const [copied, setCopied] = useState<string | null>(null)
   const [freeRefreshState, setFreeRefreshState] = useState<RefreshState>('idle')
   const [freeRefreshMessage, setFreeRefreshMessage] = useState('')
@@ -2573,6 +2573,10 @@ function App() {
   }, [days, form, includeHoldings, snapshot, symbols])
 
   const activeSnapshot = snapshot
+  const hasUploadedHoldingsFeed = activeSnapshot.holdings.length > 0
+  const loadedHoldingsFilename = activeSnapshot.upload?.filename ?? (hasUploadedHoldingsFeed ? 'Browser cached holdings' : '')
+  const loadedHoldingsCount = activeSnapshot.upload?.holdings_count ?? activeSnapshot.holdings.length
+  const includeHoldingsInSync = includeHoldings && hasUploadedHoldingsFeed
   const analysis = useMemo(() => buildAnalysis(form, activeSnapshot, cacheState), [activeSnapshot, cacheState, form])
   const portfolio = useMemo(() => portfolioSummary(activeSnapshot), [activeSnapshot])
   const portfolioReturn = portfolio.cost ? (portfolio.pnl / portfolio.cost) * 100 : 0
@@ -2585,9 +2589,9 @@ function App() {
   const productionBuildCommand = 'cd react-day1 && npm run build'
   const publicAppCommand = 'cd react-day1 && npm run preview:lan'
   const freeCliCommand = useMemo(() => {
-    const holdingsFlag = includeHoldings ? '' : ' --no-holdings'
+    const holdingsFlag = includeHoldingsInSync ? '' : ' --no-holdings'
     return `python3 scripts/market_data_refresh.py --symbols ${symbols.trim()} --days ${days}${holdingsFlag}`
-  }, [days, includeHoldings, symbols])
+  }, [days, includeHoldingsInSync, symbols])
 
   const quoteRows = Object.entries(activeSnapshot.quotes).map(([symbol, quote]) => {
     const close = quote.ohlc?.close
@@ -3273,7 +3277,7 @@ function App() {
         body: JSON.stringify({
           symbols: symbols.trim().split(/\s+/).filter(Boolean),
           days,
-          includeHoldings,
+          includeHoldings: includeHoldingsInSync,
         }),
       })
       const data = await response.json()
@@ -3347,6 +3351,62 @@ function App() {
     } catch (error) {
       setUploadState('error')
       setUploadMessage(bridgeFailureMessage(error, 'Holdings upload failed.'))
+    }
+  }
+
+  async function removeUploadedHoldingsFeed() {
+    if (!hasUploadedHoldingsFeed) return
+    const removedKeys = new Set(activeSnapshot.holdings.map(holdingKey).filter(Boolean))
+    const symbolsToRemove = new Set(
+      [
+        ...(activeSnapshot.upload?.symbols ?? []),
+        ...activeSnapshot.holdings.map(holdingKey).filter((key) => key && !key.startsWith('UNLISTED:')),
+      ].map((symbol) => symbol.trim().toUpperCase()),
+    )
+    const nextSnapshot: Snapshot = {
+      ...activeSnapshot,
+      holdings: [],
+      upload: undefined,
+    }
+    setSnapshot(nextSnapshot)
+    setSyncCoverage(null)
+    setIncludeHoldings(false)
+    setUploadState('idle')
+    setUploadMessage('Removed the uploaded holdings feed from this browser. You can upload another XLSX now.')
+    setSymbols((current) =>
+      current
+        .trim()
+        .split(/\s+/)
+        .filter((symbol) => symbol && !symbolsToRemove.has(symbol.toUpperCase()))
+        .join(' '),
+    )
+    setForm((current) => {
+      const currentKey = `${current.exchange}:${current.ticker.trim().toUpperCase()}`
+      if (!removedKeys.has(currentKey)) return current
+      return {
+        ...current,
+        alreadyHold: false,
+        boughtOn: '',
+        quantity: '',
+        averagePrice: '',
+      }
+    })
+
+    try {
+      const bridgeUrl = marketDataBaseUrl()
+      if (!bridgeUrl) return
+      const response = await fetch(apiUrl(bridgeUrl, '/api/portfolio/clear'), { method: 'POST' })
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}))
+        throw new Error(typeof data.error === 'string' ? data.error : 'Bridge clear failed.')
+      }
+    } catch (error) {
+      setUploadState('error')
+      setUploadMessage(
+        error instanceof Error
+          ? `Removed from this browser, but the data bridge did not clear its saved upload: ${error.message}`
+          : 'Removed from this browser, but the data bridge did not clear its saved upload.',
+      )
     }
   }
 
@@ -4874,7 +4934,12 @@ function App() {
                 />
               </label>
               <label className="toggle-field">
-                <input checked={includeHoldings} type="checkbox" onChange={(event) => setIncludeHoldings(event.target.checked)} />
+                <input
+                  checked={includeHoldingsInSync}
+                  disabled={!hasUploadedHoldingsFeed}
+                  type="checkbox"
+                  onChange={(event) => setIncludeHoldings(event.target.checked)}
+                />
                 <span className="toggle-copy">
                   Holdings
                   <HelpTip text={optionalHelp.holdingsRefresh} />
@@ -4911,7 +4976,7 @@ function App() {
           <CollapsibleSection
             action={
               <span className={`status-dot ${uploadState === 'error' ? 'warning' : 'ready'}`}>
-                {uploadState === 'uploading' ? 'Uploading' : uploadState === 'done' ? 'Imported' : 'Local only'}
+                {uploadState === 'uploading' ? 'Uploading' : hasUploadedHoldingsFeed ? 'Loaded' : uploadState === 'error' ? 'Check' : 'Local only'}
               </span>
             }
             className="panel upload-panel"
@@ -4920,16 +4985,39 @@ function App() {
             title="Upload Holdings XLSX"
           >
             <div className="upload-grid">
+              {hasUploadedHoldingsFeed && (
+                <div className="loaded-upload-card">
+                  <div>
+                    <span>Loaded holdings feed</span>
+                    <strong>{loadedHoldingsFilename}</strong>
+                    <p>
+                      {loadedHoldingsCount} holdings are active in this browser. Remove this feed before uploading another XLSX.
+                    </p>
+                  </div>
+                  <button
+                    className="secondary-action danger-action"
+                    type="button"
+                    onClick={() => {
+                      void removeUploadedHoldingsFeed()
+                    }}
+                  >
+                    Remove feed
+                  </button>
+                </div>
+              )}
               <label className="field">
                 Zerodha holdings report
                 <input
                   accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                  disabled={hasUploadedHoldingsFeed || uploadState === 'uploading'}
+                  key={hasUploadedHoldingsFeed ? 'holdings-loaded' : 'holdings-ready'}
                   type="file"
                   onChange={(event) => {
                     void uploadHoldingsReport(event.target.files?.[0])
                     event.target.value = ''
                   }}
                 />
+                {hasUploadedHoldingsFeed && <span className="field-note">Remove the loaded feed to choose a replacement file.</span>}
               </label>
               <div className={`refresh-message ${uploadState}`}>
                 <p>
