@@ -7,58 +7,113 @@
       ],
       "exchange": "BSE",
       "input": "AUTO:ACTIVE",
-      "name": "ACTIVE",
-      "screener": "ACTIVE",
+      "name": "Active Clothing Co Ltd",
+      "screener": "541144",
       "tradingsymbol": "ACTIVE",
       "yahoo": "ACTIVE.BO"
     },
     {
-      "input": "NSE:ENGINERSIN",
-      "exchange": "NSE",
-      "tradingsymbol": "ENGINERSIN",
-      "yahoo": "ENGINERSIN.NS",
-      "screener": "ENGINERSIN",
-      "name": "Engineers India Ltd"
-    },
-    {
-      "input": "BSE:SAMRATPH",
+      "aliases": [
+        "AUTO:ESSEX-MT",
+        "NSE:ESSEX-MT",
+        "ESSEX-MT"
+      ],
       "exchange": "BSE",
-      "tradingsymbol": "SAMRATPH",
-      "yahoo": "530125.BO",
-      "screener": "530125",
-      "name": "Samrat Pharmachem Ltd"
+      "input": "BSE:ESSEX-MT",
+      "name": "Essex Marine Ltd",
+      "screener": "544475",
+      "tradingsymbol": "ESSEX-MT",
+      "yahoo": "ESSEX.BO"
     },
     {
+      "aliases": [
+        "AUTO:MALPANI-M",
+        "NSE:MALPANI-M",
+        "MALPANI-M"
+      ],
+      "exchange": "BSE",
+      "input": "BSE:MALPANI-M",
+      "name": "Malpani Pipes & Fittings Ltd",
+      "screener": "544351",
+      "tradingsymbol": "MALPANI-M",
+      "yahoo": "MALPANI.BO"
+    },
+    {
+      "aliases": [
+        "AUTO:NSDL",
+        "NSE:NSDL",
+        "NSDL"
+      ],
+      "exchange": "BSE",
+      "input": "BSE:NSDL",
+      "name": "National Securities Depository Ltd",
+      "screener": "544467",
+      "tradingsymbol": "NSDL",
+      "yahoo": "NSDL.BO"
+    },
+    {
+      "exchange": "BSE",
       "input": "BSE:REGANTO",
-      "exchange": "BSE",
-      "tradingsymbol": "REGANTO",
-      "yahoo": "517393.BO",
+      "name": "Reganto Enterprises Ltd",
       "screener": "517393",
-      "name": "Reganto Enterprises Ltd"
+      "tradingsymbol": "REGANTO",
+      "yahoo": "517393.BO"
     },
     {
+      "exchange": "BSE",
+      "input": "BSE:SAMRATPH",
+      "name": "Samrat Pharmachem Ltd",
+      "screener": "530125",
+      "tradingsymbol": "SAMRATPH",
+      "yahoo": "530125.BO"
+    },
+    {
+      "exchange": "NSE",
+      "input": "NSE:DHANSA",
+      "name": "",
+      "screener": "DHANSA",
+      "tradingsymbol": "DHANSA",
+      "yahoo": "DHANSA-SM.NS"
+    },
+    {
+      "exchange": "NSE",
+      "input": "NSE:ENGINERSIN",
+      "name": "Engineers India Ltd",
+      "screener": "ENGINERSIN",
+      "tradingsymbol": "ENGINERSIN",
+      "yahoo": "ENGINERSIN.NS"
+    },
+    {
+      "exchange": "NSE",
       "input": "NSE:GOYALSALT",
-      "exchange": "NSE",
-      "tradingsymbol": "GOYALSALT",
-      "yahoo": "GOYALSALT.NS",
+      "name": "Goyal Salt Ltd",
       "screener": "GOYALSALT",
-      "name": "Goyal Salt Ltd"
+      "tradingsymbol": "GOYALSALT",
+      "yahoo": "GOYALSALT.NS"
     },
     {
+      "exchange": "NSE",
       "input": "NSE:GRAPHISAD",
-      "exchange": "NSE",
-      "tradingsymbol": "GRAPHISAD",
-      "yahoo": "GRAPHISAD.NS",
+      "name": "Graphisads Ltd",
       "screener": "GRAPHISAD",
-      "name": "Graphisads Ltd"
+      "tradingsymbol": "GRAPHISAD",
+      "yahoo": "GRAPHISAD.NS"
     },
     {
-      "input": "NSE:REPL",
       "exchange": "NSE",
-      "tradingsymbol": "REPL",
-      "yahoo": "REPL.NS",
+      "input": "NSE:NMSTEEL",
+      "name": "",
+      "screener": "NMSTEEL",
+      "tradingsymbol": "NMSTEEL",
+      "yahoo": "NMSTEEL-SM.NS"
+    },
+    {
+      "exchange": "NSE",
+      "input": "NSE:REPL",
+      "name": "Rudrabhishek Enterprises Ltd",
       "screener": "REPL",
-      "name": "Rudrabhishek Enterprises Ltd"
+      "tradingsymbol": "REPL",
+      "yahoo": "REPL.NS"
     }
   ]
 }
