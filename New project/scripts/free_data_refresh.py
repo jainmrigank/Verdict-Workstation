@@ -28,6 +28,12 @@ APP_SNAPSHOT = ROOT / "react-day1" / "public" / "stock-data" / "latest.json"
 SYMBOL_MAP_PATH = REFERENCE_DIR / "free_data_symbols.json"
 WATCHLIST_PATH = REFERENCE_DIR / "watchlist.json"
 HOLDINGS_PATH = REFERENCE_DIR / "portfolio_holdings.json"
+INDEX_ALIASES = {
+    "NSEI": {"name": "NIFTY 50", "tradingsymbol": "NSEI", "yahoo": "^NSEI"},
+    "NIFTY": {"name": "NIFTY 50", "tradingsymbol": "NSEI", "yahoo": "^NSEI"},
+    "NIFTY50": {"name": "NIFTY 50", "tradingsymbol": "NSEI", "yahoo": "^NSEI"},
+    "NIFTY-50": {"name": "NIFTY 50", "tradingsymbol": "NSEI", "yahoo": "^NSEI"},
+}
 
 
 def now_iso() -> str:
@@ -74,6 +80,8 @@ def default_symbols() -> list[str]:
 
 def split_symbol(symbol: str) -> tuple[str, str]:
     clean = symbol.strip().upper()
+    if clean.startswith("^"):
+        return "INDEX", clean[1:]
     if ":" in clean:
         exchange, tradingsymbol = clean.split(":", 1)
         return exchange or "AUTO", tradingsymbol
@@ -81,6 +89,8 @@ def split_symbol(symbol: str) -> tuple[str, str]:
 
 
 def yahoo_guess(exchange: str, tradingsymbol: str) -> str:
+    if exchange == "INDEX":
+        return f"^{tradingsymbol}"
     if exchange == "BSE" and tradingsymbol.isdigit():
         return f"{tradingsymbol}.BO"
     if exchange == "BSE":
@@ -101,6 +111,8 @@ def yahoo_candidates(item: dict[str, str]) -> list[str]:
     exchange = item.get("exchange", "NSE").upper()
     tradingsymbol = item.get("tradingsymbol", "").upper()
     configured = item.get("yahoo", "")
+    if item.get("instrument_type") == "INDEX" or exchange == "INDEX":
+        return unique_candidates([configured, yahoo_guess("INDEX", tradingsymbol)])
     if exchange == "AUTO":
         candidates = [configured, yahoo_guess("NSE", tradingsymbol), yahoo_guess("BSE", tradingsymbol)]
     else:
@@ -118,6 +130,8 @@ def yahoo_candidates(item: dict[str, str]) -> list[str]:
 
 def exchange_from_yahoo(yahoo_symbol: str) -> str:
     yahoo_symbol = yahoo_symbol.upper()
+    if yahoo_symbol.startswith("^"):
+        return "INDEX"
     if yahoo_symbol.endswith(".BO"):
         return "BSE"
     if yahoo_symbol.endswith(".NS"):
@@ -128,17 +142,42 @@ def exchange_from_yahoo(yahoo_symbol: str) -> str:
 def unsupported_reason(item: dict[str, str]) -> str:
     exchange = item.get("exchange", "").upper()
     tradingsymbol = item.get("tradingsymbol", "").upper()
-    if exchange not in {"NSE", "BSE", "AUTO"}:
-        return "unsupported exchange; only NSE/BSE listed symbols can be auto-fetched"
+    if exchange not in {"NSE", "BSE", "AUTO", "INDEX"}:
+        return "unsupported exchange; only NSE/BSE equities and known indices can be auto-fetched"
     if re.fullmatch(r"IN[A-Z0-9]{10}", tradingsymbol):
         return "looks like an ISIN/unlisted holding row, not a directly fetchable NSE/BSE ticker"
     return ""
+
+
+def index_definition(exchange: str, tradingsymbol: str) -> dict[str, str] | None:
+    normalized = tradingsymbol.strip().upper().replace(" ", "")
+    if exchange == "INDEX" and normalized:
+        return INDEX_ALIASES.get(normalized) or {"name": normalized, "tradingsymbol": normalized, "yahoo": f"^{normalized}"}
+    if exchange in {"AUTO", "NSE"}:
+        return INDEX_ALIASES.get(normalized)
+    return None
 
 
 def resolve_symbol(symbol: str, mapping: dict[str, dict[str, str]]) -> dict[str, str]:
     exchange, tradingsymbol = split_symbol(symbol)
     key = f"{exchange}:{tradingsymbol}"
     configured = mapping.get(key, {})
+    index = None if configured else index_definition(exchange, tradingsymbol)
+    if index:
+        return {
+            "input": symbol,
+            "exchange": "INDEX",
+            "tradingsymbol": index["tradingsymbol"],
+            "name": index.get("name", index["tradingsymbol"]),
+            "segment": "INDEX",
+            "instrument_type": "INDEX",
+            "instrument_token": index["yahoo"],
+            "kite_key": f"INDEX:{index['tradingsymbol']}",
+            "mapped": False,
+            "yahoo": index["yahoo"],
+            "screener": "",
+            "fundamentals_applicable": False,
+        }
     return {
         "input": symbol,
         "exchange": configured.get("exchange", exchange),
@@ -1033,6 +1072,9 @@ def refresh_free_data(
                 candle_errors.append(f"{yahoo_symbol}: {exc}")
         if not used_yahoo_symbol:
             errors.append(f"{key}: could not fetch Yahoo EOD data for {', '.join(yahoo_candidates(item))}: {'; '.join(candle_errors)}")
+        if item.get("instrument_type") == "INDEX" or item.get("fundamentals_applicable") is False:
+            fundamentals[key] = {}
+            continue
 
         yahoo_fundamentals: dict[str, Any] = {}
         screener_fundamentals: dict[str, Any] = {}

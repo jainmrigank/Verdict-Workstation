@@ -247,7 +247,11 @@ type Snapshot = {
     exchange: string
     tradingsymbol: string
     instrument_token?: string
+    instrument_type?: string
     kite_key: string
+    name?: string
+    segment?: string
+    fundamentals_applicable?: boolean
     screener?: string
     unsupported_reason?: string
     yahoo?: string
@@ -956,6 +960,18 @@ function hasFundamentalData(snapshot: Snapshot, symbol: string) {
   return Object.keys(snapshot.fundamentals?.[symbol] ?? {}).length > 0
 }
 
+function symbolMetadata(snapshot: Snapshot, symbol: string) {
+  const normalized = symbol.trim().toUpperCase()
+  return snapshot.symbols.find((row) => (row.kite_key || row.input).trim().toUpperCase() === normalized)
+}
+
+function fundamentalsApplicable(snapshot: Snapshot, symbol: string) {
+  const row = symbolMetadata(snapshot, symbol)
+  if (row?.fundamentals_applicable === false) return false
+  if (row?.instrument_type === 'INDEX' || row?.exchange === 'INDEX') return false
+  return !symbol.trim().toUpperCase().startsWith('INDEX:')
+}
+
 function hasAnyMarketData(snapshot: Snapshot, symbol: string) {
   return hasTechnicalData(snapshot, symbol) || hasFundamentalData(snapshot, symbol)
 }
@@ -1042,12 +1058,17 @@ function orderedSnapshotSymbols(snapshot: Snapshot, options: { includeCachedFund
 
 function buildSyncCoverage(snapshot: Snapshot): SyncCoverage {
   const symbols = orderedSnapshotSymbols(snapshot)
+  const fundamentalSymbols = symbols.filter((symbol) => fundamentalsApplicable(snapshot, symbol))
   return {
     technicalLoaded: symbols.filter((symbol) => hasTechnicalData(snapshot, symbol)),
     technicalMissing: symbols.filter((symbol) => !hasTechnicalData(snapshot, symbol)),
-    fundamentalsLoaded: symbols.filter((symbol) => hasFundamentalData(snapshot, symbol)),
-    fundamentalsMissing: symbols.filter((symbol) => !hasFundamentalData(snapshot, symbol)),
+    fundamentalsLoaded: fundamentalSymbols.filter((symbol) => hasFundamentalData(snapshot, symbol)),
+    fundamentalsMissing: fundamentalSymbols.filter((symbol) => !hasFundamentalData(snapshot, symbol)),
   }
+}
+
+function hasFundamentalScope(snapshot: Snapshot) {
+  return orderedSnapshotSymbols(snapshot).some((symbol) => fundamentalsApplicable(snapshot, symbol))
 }
 
 function splitMarketSymbol(symbol: string) {
@@ -3675,11 +3696,13 @@ function App() {
       setSyncCoverage(buildSyncCoverage(mergedRefresh.snapshot))
       setSyncProgress(100)
       setFreeRefreshState('done')
-      const fundamentalsMessage = mergedRefresh.refreshedCount
-        ? `Fundamentals loaded for ${mergedRefresh.refreshedCount} symbols.`
-        : mergedRefresh.retainedExisting
-          ? `Refresh returned no fundamentals, so existing fundamentals for ${mergedRefresh.retainedCount} symbols were kept. Restart the local data server once to activate the Screener-backed fundamentals fetcher.`
-          : `No fundamentals returned yet. Restart the local data server once, then refresh again to activate the Screener-backed fundamentals fetcher.`
+      const fundamentalsMessage = !hasFundamentalScope(mergedRefresh.snapshot)
+        ? 'Company fundamentals are not applicable for index symbols.'
+        : mergedRefresh.refreshedCount
+          ? `Fundamentals loaded for ${mergedRefresh.refreshedCount} symbols.`
+          : mergedRefresh.retainedExisting
+            ? `Refresh returned no fundamentals, so existing fundamentals for ${mergedRefresh.retainedCount} symbols were kept. Restart the local data server once to activate the Screener-backed fundamentals fetcher.`
+            : `No fundamentals returned yet. Restart the local data server once, then refresh again to activate the Screener-backed fundamentals fetcher.`
       const holdingsMessage = mergedRefresh.snapshot.holdings.length
         ? mergedRefresh.retainedHoldings
           ? `Imported portfolio kept with ${mergedRefresh.snapshot.holdings.length} holdings; ${quotedHoldingsCount(mergedRefresh.snapshot)} have refreshed prices.`
@@ -3818,11 +3841,13 @@ function App() {
       }
       setIncludeHoldings(true)
       setUploadState('done')
-      const fundamentalsMessage = mergedRefresh.refreshedCount
-        ? `Fundamentals loaded for ${mergedRefresh.refreshedCount} symbols.`
-        : mergedRefresh.retainedExisting
-          ? `Existing fundamentals for ${mergedRefresh.retainedCount} symbols were kept because the upload refresh returned quotes only.`
-          : `No fundamentals returned yet; restart the local data server once and refresh again.`
+      const fundamentalsMessage = !hasFundamentalScope(mergedRefresh.snapshot)
+        ? 'Company fundamentals are not applicable for index symbols.'
+        : mergedRefresh.refreshedCount
+          ? `Fundamentals loaded for ${mergedRefresh.refreshedCount} symbols.`
+          : mergedRefresh.retainedExisting
+            ? `Existing fundamentals for ${mergedRefresh.retainedCount} symbols were kept because the upload refresh returned quotes only.`
+            : `No fundamentals returned yet; restart the local data server once and refresh again.`
       setUploadMessage(
         `Imported ${refreshedSnapshot.upload?.holdings_count ?? mergedRefresh.snapshot.holdings.length} holdings from ${file.name}. ${quotedHoldingsCount(mergedRefresh.snapshot)} holdings have refreshed prices. ${fundamentalsMessage}`,
       )
