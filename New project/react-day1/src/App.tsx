@@ -84,6 +84,15 @@ type SyncCoverage = {
   fundamentalsMissing: string[]
 }
 
+type BrowserWorkspace = {
+  version: 1
+  snapshot: Snapshot
+  form: AnalysisForm
+  symbols: string
+  days: number
+  includeHoldings: boolean
+}
+
 type ForecastSettings = {
   enabled: boolean
   horizon: ForecastHorizon
@@ -284,72 +293,28 @@ type AnalysisResult = {
   scoreComponents: ScoreComponent[]
 }
 
-const sampleSnapshot: Snapshot = {
-  provider: 'portfolio_export_sample',
-  generated_at: '2026-06-28T00:00:00+05:30',
-  symbols: [
-    { input: 'NSE:ENGINERSIN', exchange: 'NSE', tradingsymbol: 'ENGINERSIN', kite_key: 'NSE:ENGINERSIN' },
-    { input: 'BSE:SAMRATPH', exchange: 'BSE', tradingsymbol: 'SAMRATPH', kite_key: 'BSE:SAMRATPH' },
-    { input: 'BSE:REGANTO', exchange: 'BSE', tradingsymbol: 'REGANTO', kite_key: 'BSE:REGANTO' },
-  ],
-  quotes: {
-    'NSE:ENGINERSIN': {
-      last_price: 251.82,
-      ohlc: { close: 251.82 },
-      volume: 0,
-    },
-    'BSE:SAMRATPH': {
-      last_price: 216.8,
-      ohlc: { close: 216.8 },
-      volume: 2530,
-      average_price: 215.41,
-    },
-    'BSE:REGANTO': {
-      last_price: 6.7,
-      ohlc: { close: 6.6, open: 6.6, high: 6.81, low: 6.46 },
-      volume: 95000,
-      average_price: 6.69,
-    },
-  },
+const starterSnapshot: Snapshot = {
+  provider: 'starter_workspace',
+  generated_at: new Date().toISOString(),
+  symbols: [],
+  quotes: {},
   candles: {},
-  fundamentals: {
-    'NSE:ENGINERSIN': {
-      name: 'Engineers India Ltd',
-      sector: 'Industrials',
-      industry: 'Engineering and construction services',
-      country: 'India',
-      business_summary:
-        'Engineers India provides engineering consultancy, project management, and turnkey services for energy, infrastructure, and industrial projects.',
-      market_cap: 141000000000,
-      trailing_pe: 20.4,
-      profit_margins: 0.13,
-      return_on_equity: 0.18,
-      debt_to_equity: 0.02,
-      source: 'sample_company_profile',
-    },
-  },
-  holdings: [
-    { tradingsymbol: 'GOYALSALT', exchange: 'NSE', quantity: 1200, average_price: 207, last_price: 119.1, pnl: -105480 },
-    { tradingsymbol: 'ENGINERSIN', exchange: 'NSE', quantity: 500, average_price: 263.9897, last_price: 251.82, pnl: -6084.86 },
-    { tradingsymbol: 'SAMRATPH', exchange: 'BSE', quantity: 500, average_price: 644.936, last_price: 216.8, pnl: -214068 },
-    { tradingsymbol: 'GRAPHISAD', exchange: 'NSE', quantity: 3600, average_price: 69.15, last_price: 28, pnl: -148140 },
-    { tradingsymbol: 'REGANTO', exchange: 'BSE', quantity: 5000, average_price: 40.1628, last_price: 6.7, pnl: -167313.9 },
-    { tradingsymbol: 'REPL', exchange: 'NSE', quantity: 500, average_price: 327.7, last_price: 65.76, pnl: -130970 },
-  ],
-  errors: ['Live Kite cache has not been loaded yet.'],
+  fundamentals: {},
+  holdings: [],
+  errors: [],
 }
 
 const emptyCandles: Candle[] = []
 
 const initialForm: AnalysisForm = {
-  ticker: 'ENGINERSIN',
+  ticker: '',
   exchange: 'NSE',
-  capital: '150000',
+  capital: '',
   horizon: '1-3y',
-  alreadyHold: true,
-  boughtOn: '2024-06-14',
-  quantity: '500',
-  averagePrice: '263.98',
+  alreadyHold: false,
+  boughtOn: '',
+  quantity: '',
+  averagePrice: '',
   maxRisk: '2.5',
   riskMode: 'percent',
   riskProfile: 'balanced_aggressive',
@@ -370,6 +335,45 @@ const initialForm: AnalysisForm = {
     avoidIntraday: true,
     noAveragingDown: true,
   },
+}
+
+const browserWorkspaceKey = 'verdict-workstation:browser-workspace:v1'
+
+function readBrowserWorkspace(): BrowserWorkspace | null {
+  if (typeof window === 'undefined') return null
+  try {
+    const raw = window.localStorage.getItem(browserWorkspaceKey)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as Partial<BrowserWorkspace>
+    if (parsed.version !== 1 || !parsed.snapshot || !Array.isArray(parsed.snapshot.holdings)) return null
+    return {
+      version: 1,
+      snapshot: {
+        ...starterSnapshot,
+        ...parsed.snapshot,
+        holdings: parsed.snapshot.holdings ?? [],
+        quotes: parsed.snapshot.quotes ?? {},
+        candles: parsed.snapshot.candles ?? {},
+        fundamentals: parsed.snapshot.fundamentals ?? {},
+        errors: parsed.snapshot.errors ?? [],
+      },
+      form: { ...initialForm, ...(parsed.form ?? {}) },
+      symbols: typeof parsed.symbols === 'string' ? parsed.symbols : '',
+      days: typeof parsed.days === 'number' && Number.isFinite(parsed.days) ? parsed.days : 730,
+      includeHoldings: typeof parsed.includeHoldings === 'boolean' ? parsed.includeHoldings : true,
+    }
+  } catch {
+    return null
+  }
+}
+
+function writeBrowserWorkspace(workspace: BrowserWorkspace) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(browserWorkspaceKey, JSON.stringify(workspace))
+  } catch {
+    // Browser storage can be disabled or full; the app should still work for the current session.
+  }
 }
 
 const riskProfileLabels: Record<RiskProfile, string> = {
@@ -742,7 +746,7 @@ function cacheLabel(cacheState: CacheState) {
   if (cacheState === 'free') return 'Market Data Sync'
   if (cacheState === 'live') return 'API cache'
   if (cacheState === 'loading') return 'Loading'
-  return 'Sample cache'
+  return 'Starter workspace'
 }
 
 function marketDataBaseUrl() {
@@ -771,12 +775,14 @@ function apiUrl(baseUrl: string, path: string) {
 
 function providerLabel(provider: string) {
   if (provider.startsWith('free_')) return 'Market Data Sync'
+  if (provider.includes('starter')) return 'Starter Workspace'
   if (provider.includes('sample')) return 'Sample Workspace'
   return provider.replaceAll('_', ' ')
 }
 
 function cacheStateFromProvider(provider: string): CacheState {
   if (provider.startsWith('free_')) return 'free'
+  if (provider.includes('starter')) return 'sample'
   if (provider.includes('sample')) return 'sample'
   return 'live'
 }
@@ -1906,7 +1912,7 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
   const cautions: string[] = []
   const actions: string[] = []
 
-  if (cacheState === 'sample') cautions.push('Refresh delayed EOD data before taking market action; this screen is using sample/export data.')
+  if (cacheState === 'sample') cautions.push('No personal market cache is loaded yet. Upload holdings or sync delayed market data before taking action.')
   if (cacheState === 'free') positives.push('Delayed end-of-day price data is cached for non-intraday analysis.')
   if (!quote) cautions.push('No quote was found in the current cache for this symbol.')
   if (candleCount >= 180) positives.push('Daily candles are available for trend and support/resistance checks.')
@@ -2511,13 +2517,14 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
 }
 
 function App() {
-  const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
-  const [cacheState, setCacheState] = useState<CacheState>('loading')
+  const [storedWorkspace] = useState<BrowserWorkspace | null>(() => readBrowserWorkspace())
+  const [snapshot, setSnapshot] = useState<Snapshot>(() => storedWorkspace?.snapshot ?? starterSnapshot)
+  const [cacheState, setCacheState] = useState<CacheState>(() => cacheStateFromProvider((storedWorkspace?.snapshot ?? starterSnapshot).provider))
   const [view, setView] = useState<View>('verdict')
-  const [form, setForm] = useState<AnalysisForm>(initialForm)
-  const [symbols, setSymbols] = useState('NSE:ENGINERSIN BSE:SAMRATPH BSE:REGANTO')
-  const [days, setDays] = useState(730)
-  const [includeHoldings, setIncludeHoldings] = useState(true)
+  const [form, setForm] = useState<AnalysisForm>(() => storedWorkspace?.form ?? initialForm)
+  const [symbols, setSymbols] = useState(() => storedWorkspace?.symbols ?? '')
+  const [days, setDays] = useState(() => storedWorkspace?.days ?? 730)
+  const [includeHoldings, setIncludeHoldings] = useState(() => storedWorkspace?.includeHoldings ?? true)
   const [copied, setCopied] = useState<string | null>(null)
   const [freeRefreshState, setFreeRefreshState] = useState<RefreshState>('idle')
   const [freeRefreshMessage, setFreeRefreshMessage] = useState('')
@@ -2551,26 +2558,21 @@ function App() {
   const [chartShellElement, setChartShellElement] = useState<HTMLDivElement | null>(null)
 
   useEffect(() => {
-    fetch('/stock-data/latest.json', { cache: 'no-store' })
-      .then((response) => {
-        if (!response.ok) throw new Error('No cache')
-        return response.json()
-      })
-      .then((data: Snapshot) => {
-        setSnapshot(data)
-        setCacheState(cacheStateFromProvider(data.provider))
-      })
-      .catch(() => {
-        setSnapshot(sampleSnapshot)
-        setCacheState('sample')
-      })
-  }, [])
-
-  useEffect(() => {
     document.documentElement.dataset.theme = theme
   }, [theme])
 
-  const activeSnapshot = snapshot ?? sampleSnapshot
+  useEffect(() => {
+    writeBrowserWorkspace({
+      version: 1,
+      snapshot,
+      form,
+      symbols,
+      days,
+      includeHoldings,
+    })
+  }, [days, form, includeHoldings, snapshot, symbols])
+
+  const activeSnapshot = snapshot
   const analysis = useMemo(() => buildAnalysis(form, activeSnapshot, cacheState), [activeSnapshot, cacheState, form])
   const portfolio = useMemo(() => portfolioSummary(activeSnapshot), [activeSnapshot])
   const portfolioReturn = portfolio.cost ? (portfolio.pnl / portfolio.cost) * 100 : 0
@@ -5110,8 +5112,8 @@ function App() {
                 </div>
                 <div>
                   <span className="step-index">4</span>
-                  <code>stock-data/latest.json</code>
-                  <p>Frontend cache used by verdicts</p>
+                  <code>Browser local storage</code>
+                  <p>Private per-browser cache used by verdicts</p>
                 </div>
               </div>
             </CollapsibleSection>

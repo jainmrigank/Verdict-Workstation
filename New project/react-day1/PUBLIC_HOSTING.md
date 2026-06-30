@@ -72,7 +72,7 @@ Use this when you want peers to open the app on HTTPS without seeing or changing
 
 2. Deploy `react-day1/dist` to Vercel, Netlify, or Cloudflare Pages.
 
-3. The hosted app will read the bundled `stock-data/latest.json` snapshot. Refresh/upload buttons need a bridge and will show a setup warning if no bridge is configured.
+3. The hosted app starts with an empty browser-local workspace. Each visitor's uploaded holdings and refreshed data stay in that browser's local storage. Refresh/upload buttons need a bridge and will show a setup warning if no bridge is configured.
 
 ## Option 2: Public App With Refresh
 
