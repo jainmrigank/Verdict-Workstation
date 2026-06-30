@@ -491,7 +491,8 @@ const indicatorLabels: Record<IndicatorKey, { label: string; help: string }> = {
 const requiredHelp = {
   ticker: 'Company symbol to analyse. It controls which quote, candles, and holding row the app matches.',
   exchange: 'NSE or BSE route for the ticker. The wrong exchange can fetch the wrong security or no data.',
-  capital: 'Capital base used to calculate maximum rupee risk. Higher capital raises the allowed position size for the same risk percent.',
+  capital:
+    'For a new position, this is the cash you are willing to deploy and is required for sizing. For an existing holding, it is optional fresh/additional capital only if you are considering adding more.',
   horizon: 'Your intended holding period. Longer horizons give more weight to fundamentals and less to short-term noise.',
   alreadyHold: 'Turn this on when the stock is already in your portfolio. It makes average price, drawdown, and portfolio weight affect the verdict.',
   boughtOn: 'Reference date for your original entry. It is useful context for reviewing whether the thesis has had enough time to work.',
@@ -499,8 +500,9 @@ const requiredHelp = {
   averagePrice: 'Your average buy price. It is used to calculate unrealized gain/loss and breakeven recovery needed.',
   riskProfile: 'Adjusts score tolerance. Conservative penalises risk more; aggressive allows more risk but still requires evidence.',
   marketAccess: 'Tells the app whether to stay delivery-only or mention F&O only as context/hedging.',
-  maxRisk: 'Maximum loss you are willing to take on this idea. This is the anchor for risk-sized quantity.',
-  riskUnit: 'Choose whether max risk is a percentage of capital or a fixed rupee amount.',
+  maxRisk:
+    'Maximum fresh loss you are willing to take on this idea. It is needed for new entry sizing or add-more sizing, but not required just to review an existing holding.',
+  riskUnit: 'Choose whether max risk is a percentage of deployable capital or a fixed rupee amount.',
 }
 
 const optionalHelp = {
@@ -1899,10 +1901,12 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
   const invalidationPrice = parseNumber(form.invalidationPrice)
   const targetPrice = parseNumber(form.targetPrice)
   const riskCapital = capital && maxRisk ? (form.riskMode === 'percent' ? capital * (maxRisk / 100) : maxRisk) : undefined
+  const needsFreshCapital = !form.alreadyHold
+  const riskPlanDefined = Boolean(invalidationPrice && (form.alreadyHold || riskCapital))
 
   const missing: string[] = []
   if (!ticker) missing.push('Ticker')
-  if (!capital) missing.push('Capital')
+  if (needsFreshCapital && !capital) missing.push('Capital for new position')
   if (!ltp) missing.push('LTP from live cache or manual input')
   if (form.alreadyHold && !quantity) missing.push('Holding quantity')
   if (form.alreadyHold && !avgPrice) missing.push('Average buy price')
@@ -2030,6 +2034,8 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
     if (suggestedShares > 0) {
       actions.push(`Risk-based size is up to ${suggestedShares} shares if invalidation is ${formatInr(invalidationPrice)}.`)
     }
+  } else if (form.alreadyHold && !capital) {
+    actions.push('Capital is optional for a holding review. Add fresh capital only if you want add-more sizing.')
   } else {
     actions.push('Add an invalidation price to calculate risk-based share quantity.')
   }
@@ -2251,7 +2257,17 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
   const riskPerShareForScore = ltp && invalidationPrice && invalidationPrice < ltp ? ltp - invalidationPrice : undefined
   const rewardRiskForScore = targetPrice && ltp && riskPerShareForScore && targetPrice > ltp ? (targetPrice - ltp) / riskPerShareForScore : undefined
   addSignal(riskSignals, 'Risk', 'Reward/risk', rewardRiskForScore === undefined ? '-' : `${rewardRiskForScore.toFixed(1)}x`, scoreMetric(rewardRiskForScore, (value) => (value >= 2 ? 74 : value >= 1.5 ? 60 : value > 0 ? 36 : 28), 40), 0.9, 'Reward/risk decides whether the potential upside justifies the defined downside.')
-  addSignal(riskSignals, 'Risk', 'Risk plan', invalidationPrice && riskCapital ? 'Defined' : 'Incomplete', invalidationPrice && riskCapital ? 68 : 34, 0.75, 'A defined invalidation and risk budget turn opinion into a controllable trade plan.')
+  addSignal(
+    riskSignals,
+    'Risk',
+    'Risk plan',
+    riskPlanDefined ? 'Defined' : 'Incomplete',
+    riskPlanDefined ? 68 : 34,
+    0.75,
+    form.alreadyHold
+      ? 'For an existing holding, a clear invalidation level is the key risk-control input; fresh capital is only needed if you plan to add more.'
+      : 'For a new position, defined invalidation plus a capital/risk budget turn opinion into a controllable trade plan.',
+  )
   addSignal(riskSignals, 'Risk', 'Legacy checklist', `${Math.round(clamp(score))}/100`, clamp(score), 1, 'This preserves the earlier checklist logic for constraints, holding state, liquidity, and supplied evidence.')
 
   const profileWeights =
@@ -2358,10 +2374,14 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
       : `Treat this as a ${verdict.toLowerCase()} setup, not a blind order. Confirm price, corporate announcements, and the latest results before acting.`,
     invalidationPrice && ltp && invalidationPrice < ltp
       ? `Use ${formatInr(invalidationPrice)} as the current invalidation reference. If price breaks it, the thesis needs a fresh review instead of emotional averaging.`
-      : 'Set an invalidation price before adding capital. Without it, the app cannot tell how much money is actually at risk.',
+      : form.alreadyHold
+        ? 'Set an invalidation level for the existing holding. It gives you a clear review point even if you are not adding fresh capital.'
+        : 'Set an invalidation price before adding capital. Without it, the app cannot tell how much money is actually at risk.',
     suggestedShares !== undefined && suggestedShares > 0
       ? `Cap any fresh risk-sized deployment near ${formatNumber(suggestedShares)} shares, about ${formatInr(suggestedDeployment)}, unless you deliberately change the risk budget.`
-      : 'Keep sizing conservative until target, invalidation, and capital risk are fully defined.',
+      : form.alreadyHold && !capital
+        ? 'Because this is a holding review with no fresh capital entered, focus on hold/reduce/exit discipline rather than add-more sizing.'
+        : 'Keep sizing conservative until target, invalidation, and capital risk are fully defined.',
     marketCapCr === undefined || debtEquity === undefined || roce === undefined || pe === undefined || form.profitTrend === 'unknown'
       ? 'Add the missing fundamentals from annual reports or a trusted screener: market cap, debt/equity, ROCE, P/E, and profit trend.'
       : 'Cross-check the supplied fundamentals against the latest annual report, quarterly results, and exchange filings.',
@@ -2434,8 +2454,12 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
     },
     {
       title: '3. Portfolio risk',
-      plainEnglish: `This stock is currently about ${formatPercent(portfolioWeight)} of the portfolio value shown in the app. Your risk budget is ${formatInr(riskCapital)}.`,
-      formula: `Portfolio weight = position value / total portfolio value. Risk budget = capital x max-risk % or fixed rupee risk.`,
+      plainEnglish: form.alreadyHold
+        ? `This stock is currently about ${formatPercent(portfolioWeight)} of the portfolio value shown in the app. ${capital ? `Fresh add-more risk budget is ${formatInr(riskCapital)}.` : 'No fresh capital was entered, so this is treated as a holding review.'}`
+        : `This is being treated as a new position. Your risk budget is ${formatInr(riskCapital)}.`,
+      formula: form.alreadyHold
+        ? 'Portfolio weight = position value / total portfolio value. Fresh risk budget is calculated only if additional capital is supplied.'
+        : 'Risk budget = capital x max-risk % or fixed rupee risk.',
       rationale:
         'Concentration matters because one company-specific problem can damage the whole portfolio. A high weight deserves stricter evidence before adding more.',
       takeaway:
@@ -2469,9 +2493,13 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
       title: '6. Risk plan',
       plainEnglish:
         riskPerShare !== undefined
-          ? `If invalidation is ${formatInr(invalidationPrice)}, the risk per share is ${formatInr(riskPerShare)} and the suggested risk-sized quantity is ${formatNumber(suggestedShares)} shares.`
+          ? riskCapital
+            ? `If invalidation is ${formatInr(invalidationPrice)}, the risk per share is ${formatInr(riskPerShare)} and the suggested risk-sized quantity is ${formatNumber(suggestedShares)} shares.`
+            : `If invalidation is ${formatInr(invalidationPrice)}, the existing holding has a clear review level. Add fresh capital only if you want risk-sized add-more quantity.`
           : 'No invalidation price is entered, so the app cannot compute proper risk-sized quantity.',
-      formula: `Risk per share = LTP - invalidation price. Suggested shares = risk budget / risk per share. Reward/risk = target upside / risk per share.`,
+      formula: form.alreadyHold && !riskCapital
+        ? 'Existing holding review = check invalidation, drawdown, concentration, and thesis quality. Add-more sizing needs fresh capital plus max risk.'
+        : 'Risk per share = LTP - invalidation price. Suggested shares = risk budget / risk per share. Reward/risk = target upside / risk per share.',
       rationale:
         'Invalidation is the price or condition where the thesis is considered wrong. Without it, position sizing becomes guesswork.',
       takeaway:
@@ -2528,6 +2556,7 @@ function App() {
   const [copied, setCopied] = useState<string | null>(null)
   const [freeRefreshState, setFreeRefreshState] = useState<RefreshState>('idle')
   const [freeRefreshMessage, setFreeRefreshMessage] = useState('')
+  const [syncProgress, setSyncProgress] = useState(0)
   const [syncCoverage, setSyncCoverage] = useState<SyncCoverage | null>(null)
   const [serverRestartState, setServerRestartState] = useState<ServerRestartState>('idle')
   const [serverRestartMessage, setServerRestartMessage] = useState('')
@@ -2562,6 +2591,15 @@ function App() {
   }, [theme])
 
   useEffect(() => {
+    if (freeRefreshState !== 'refreshing') return undefined
+    setSyncProgress(8)
+    const timer = window.setInterval(() => {
+      setSyncProgress((current) => Math.min(92, current + Math.max(1, Math.round((92 - current) * 0.12))))
+    }, 650)
+    return () => window.clearInterval(timer)
+  }, [freeRefreshState])
+
+  useEffect(() => {
     writeBrowserWorkspace({
       version: 1,
       snapshot,
@@ -2577,6 +2615,7 @@ function App() {
   const loadedHoldingsFilename = activeSnapshot.upload?.filename ?? (hasUploadedHoldingsFeed ? 'Browser cached holdings' : '')
   const loadedHoldingsCount = activeSnapshot.upload?.holdings_count ?? activeSnapshot.holdings.length
   const includeHoldingsInSync = includeHoldings && hasUploadedHoldingsFeed
+  const isHoldingReview = form.alreadyHold
   const analysis = useMemo(() => buildAnalysis(form, activeSnapshot, cacheState), [activeSnapshot, cacheState, form])
   const portfolio = useMemo(() => portfolioSummary(activeSnapshot), [activeSnapshot])
   const portfolioReturn = portfolio.cost ? (portfolio.pnl / portfolio.cost) * 100 : 0
@@ -3159,7 +3198,7 @@ function App() {
     return [
       `Ticker: ${form.exchange}:${form.ticker.toUpperCase()}`,
       `Verdict: ${analysis.verdict} (${analysis.score}/100, ${analysis.confidenceLabel} confidence)`,
-      `Capital: ${formatInr(parseNumber(form.capital))}`,
+      `${form.alreadyHold ? 'Fresh capital' : 'Capital to deploy'}: ${formatInr(parseNumber(form.capital))}`,
       `Horizon: ${horizonLabels[form.horizon]}`,
       `Risk profile: ${riskProfileLabels[form.riskProfile]}`,
       `Already hold: ${form.alreadyHold ? 'Yes' : 'No'}`,
@@ -3268,6 +3307,7 @@ function App() {
   async function refreshFreeData() {
     setFreeRefreshState('refreshing')
     setFreeRefreshMessage('Syncing EOD prices, candles, fundamentals, and company updates...')
+    setSyncProgress(8)
     setSyncCoverage(null)
     try {
       const bridgeUrl = requireMarketDataBridge('Market-data sync')
@@ -3289,6 +3329,7 @@ function App() {
       setSnapshot(mergedRefresh.snapshot)
       setCacheState(cacheStateFromProvider(mergedRefresh.snapshot.provider))
       setSyncCoverage(buildSyncCoverage(mergedRefresh.snapshot))
+      setSyncProgress(100)
       setFreeRefreshState('done')
       const fundamentalsMessage = mergedRefresh.refreshedCount
         ? `Fundamentals loaded for ${mergedRefresh.refreshedCount} symbols.`
@@ -3305,6 +3346,7 @@ function App() {
       )
     } catch (error) {
       setFreeRefreshState('error')
+      setSyncProgress(0)
       setSyncCoverage(null)
       setFreeRefreshMessage(bridgeFailureMessage(error, 'Market-data sync failed.'))
     }
@@ -3501,6 +3543,25 @@ function App() {
               id="required-heading"
               title="Analysis Inputs"
             >
+              <div className={`position-mode-card ${isHoldingReview ? 'holding-mode' : 'new-mode'}`}>
+                <div>
+                  <span>{isHoldingReview ? 'Existing holding review' : 'New position analysis'}</span>
+                  <strong>{isHoldingReview ? 'Capital is optional unless you plan to add more.' : 'Capital is required for a fresh entry.'}</strong>
+                  <p>
+                    {isHoldingReview
+                      ? 'The verdict prioritises quantity, average price, current P&L, concentration, invalidation, and whether the thesis still deserves fresh capital.'
+                      : 'The verdict prioritises deployable capital, risk budget, invalidation, reward/risk, and whether the current price is worth a new allocation.'}
+                  </p>
+                </div>
+                <ul>
+                  {(isHoldingReview
+                    ? ['Required: ticker, exchange, horizon, quantity, average price', 'Optional: bought date, fresh/additional capital, max risk for add-more sizing']
+                    : ['Required: ticker, exchange, horizon, capital to deploy', 'Optional but useful: max risk, invalidation, target, manual LTP']
+                  ).map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              </div>
 
               <div className="form-grid two">
                 <label className="field">
@@ -3514,10 +3575,13 @@ function App() {
                     <option value="BSE">BSE</option>
                   </select>
                 </label>
-                <label className="field">
-                  <FieldLabel help={requiredHelp.capital}>Capital</FieldLabel>
-                  <input inputMode="decimal" value={form.capital} onChange={(event) => updateForm('capital', event.target.value)} />
-                </label>
+                {!isHoldingReview && (
+                  <label className="field">
+                    <FieldLabel help={requiredHelp.capital}>Capital to deploy</FieldLabel>
+                    <input inputMode="decimal" value={form.capital} onChange={(event) => updateForm('capital', event.target.value)} />
+                    <span className="field-note">Required for a new position because sizing and risk budget need a capital base.</span>
+                  </label>
+                )}
                 <label className="field">
                   <FieldLabel help={requiredHelp.horizon}>Horizon</FieldLabel>
                   <select value={form.horizon} onChange={(event) => updateForm('horizon', event.target.value as Horizon)}>
@@ -3538,14 +3602,15 @@ function App() {
                     <HelpTip text={requiredHelp.alreadyHold} />
                   </span>
                 </label>
-                <label className="field compact">
-                  <FieldLabel help={requiredHelp.boughtOn}>Bought on</FieldLabel>
-                  <input type="date" value={form.boughtOn} onChange={(event) => updateForm('boughtOn', event.target.value)} />
-                </label>
               </div>
 
-              {form.alreadyHold && (
+              {isHoldingReview && (
                 <div className="form-grid two">
+                  <label className="field">
+                    <FieldLabel help={requiredHelp.boughtOn}>Bought on</FieldLabel>
+                    <input type="date" value={form.boughtOn} onChange={(event) => updateForm('boughtOn', event.target.value)} />
+                    <span className="field-note">Optional context for reviewing how long the thesis has had to work.</span>
+                  </label>
                   <label className="field">
                     <FieldLabel help={requiredHelp.quantity}>Quantity</FieldLabel>
                     <input inputMode="decimal" value={form.quantity} onChange={(event) => updateForm('quantity', event.target.value)} />
@@ -3553,6 +3618,11 @@ function App() {
                   <label className="field">
                     <FieldLabel help={requiredHelp.averagePrice}>Average price</FieldLabel>
                     <input inputMode="decimal" value={form.averagePrice} onChange={(event) => updateForm('averagePrice', event.target.value)} />
+                  </label>
+                  <label className="field">
+                    <FieldLabel help={requiredHelp.capital}>Fresh capital</FieldLabel>
+                    <input inputMode="decimal" value={form.capital} onChange={(event) => updateForm('capital', event.target.value)} />
+                    <span className="field-note">Optional. Fill only if you are considering adding more to this holding.</span>
                   </label>
                 </div>
               )}
@@ -3597,8 +3667,11 @@ function App() {
 
               <div className="form-grid two">
                 <label className="field">
-                  <FieldLabel help={requiredHelp.maxRisk}>Max risk</FieldLabel>
+                  <FieldLabel help={requiredHelp.maxRisk}>{isHoldingReview ? 'Fresh max risk' : 'Max risk'}</FieldLabel>
                   <input inputMode="decimal" value={form.maxRisk} onChange={(event) => updateForm('maxRisk', event.target.value)} />
+                  <span className="field-note">
+                    {isHoldingReview ? 'Optional unless you are planning an add-more trade.' : 'Used with capital and invalidation to estimate risk-sized quantity.'}
+                  </span>
                 </label>
                 <label className="field">
                   <FieldLabel help={requiredHelp.riskUnit}>Risk unit</FieldLabel>
@@ -3606,6 +3679,7 @@ function App() {
                     <option value="percent">% of capital</option>
                     <option value="amount">Rupee amount</option>
                   </select>
+                  {isHoldingReview && <span className="field-note">Percentage mode uses the fresh capital field, not your existing invested amount.</span>}
                 </label>
               </div>
             </CollapsibleSection>
@@ -4949,6 +5023,18 @@ function App() {
             {freeRefreshMessage && (
               <div className={`refresh-message ${freeRefreshState}`}>
                 <p>{freeRefreshMessage}</p>
+              </div>
+            )}
+            {freeRefreshState === 'refreshing' && (
+              <div className="sync-progress-panel" role="status" aria-live="polite">
+                <div className="sync-progress-top">
+                  <span>Syncing market data</span>
+                  <strong>{syncProgress}%</strong>
+                </div>
+                <div className="sync-progress-track" aria-hidden="true">
+                  <span style={{ width: `${syncProgress}%` }} />
+                </div>
+                <p>Fetching prices, candles, fundamentals, company updates, and portfolio price matches. Large portfolios can take longer.</p>
               </div>
             )}
             {syncCoverage && (freeRefreshState === 'done' || uploadState === 'done') && <SyncCoveragePanel coverage={syncCoverage} />}

@@ -494,6 +494,70 @@ input:disabled {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.position-mode-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 0.72fr);
+  gap: 14px;
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.position-mode-card.holding-mode {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--accent) 12%, transparent), transparent 55%),
+    var(--surface-2);
+}
+
+.position-mode-card.new-mode {
+  border-color: color-mix(in srgb, var(--positive) 38%, var(--border));
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--positive) 10%, transparent), transparent 55%),
+    var(--surface-2);
+}
+
+.position-mode-card div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.position-mode-card span,
+.position-mode-card li {
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.position-mode-card strong {
+  color: var(--text-primary);
+  font-size: 1rem;
+}
+
+.position-mode-card p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
+.position-mode-card ul {
+  display: grid;
+  align-content: center;
+  gap: 7px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.position-mode-card li {
+  text-transform: none;
+  line-height: 1.35;
+}
+
 .field {
   display: grid;
   gap: 8px;
@@ -1768,6 +1832,55 @@ li {
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface-2);
+}
+
+.sync-progress-panel {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+  border-radius: 8px;
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--accent) 10%, transparent), transparent 52%),
+    var(--surface-2);
+}
+
+.sync-progress-top {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text-primary);
+  font-size: 0.9rem;
+  font-weight: 900;
+}
+
+.sync-progress-top strong {
+  color: var(--accent);
+}
+
+.sync-progress-track {
+  height: 9px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+}
+
+.sync-progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--positive));
+  transition: width 0.45s ease;
+}
+
+.sync-progress-panel p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  line-height: 1.4;
 }
 
 .sync-coverage-heading {
@@ -3206,6 +3319,7 @@ td {
   .company-ratio-grid,
   .company-updates-list,
   .chart-guide-grid,
+  .position-mode-card,
   .coverage-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -3292,6 +3406,7 @@ td {
   .company-ratio-grid,
   .company-updates-list,
   .chart-guide-grid,
+  .position-mode-card,
   .coverage-grid,
   .statement-flow,
   .fundamental-checklist {
