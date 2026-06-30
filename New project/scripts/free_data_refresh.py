@@ -662,14 +662,16 @@ def refresh_free_data(
     symbols: list[str] | None = None,
     days: int = 730,
     include_holdings: bool = True,
+    return_holdings: bool = True,
     output: Path | None = None,
     app_output: Path | None = APP_SNAPSHOT,
 ) -> dict[str, Any]:
     mapping = load_symbol_map()
     requested_symbols = symbols or default_symbols()
-    holdings = read_json(HOLDINGS_PATH, []) if include_holdings else []
-    if holdings:
-        for holding in holdings:
+    stored_holdings = read_json(HOLDINGS_PATH, [])
+    holdings_for_request = stored_holdings if include_holdings else []
+    if holdings_for_request:
+        for holding in holdings_for_request:
             exchange = str(holding.get("exchange") or "").upper()
             tradingsymbol = str(holding.get("tradingsymbol") or "").upper()
             if exchange and tradingsymbol:
@@ -703,8 +705,7 @@ def refresh_free_data(
             errors.append(f"{key}: could not fetch Screener company/fundamental data: {exc}")
         fundamentals[key] = merge_fundamentals(yahoo_fundamentals, screener_fundamentals)
 
-    if holdings:
-        holdings = merge_holdings_prices(holdings, quotes)
+    holdings = merge_holdings_prices(stored_holdings, quotes) if return_holdings and stored_holdings else []
 
     snapshot = {
         "provider": "free_yahoo_eod",
@@ -759,6 +760,7 @@ def main() -> int:
         symbols=args.symbols,
         days=args.days,
         include_holdings=not args.no_holdings,
+        return_holdings=not args.no_holdings,
         output=output,
         app_output=app_output,
     )

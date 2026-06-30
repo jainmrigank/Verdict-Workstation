@@ -196,7 +196,12 @@ class FreeDataHandler(BaseHTTPRequestHandler):
             days = int(payload.get("days") or 730)
             include_holdings = bool(payload.get("includeHoldings", True))
             module = refresh_module()
-            snapshot = module.refresh_free_data(symbols=symbols, days=days, include_holdings=include_holdings)
+            snapshot = module.refresh_free_data(
+                symbols=symbols,
+                days=days,
+                include_holdings=include_holdings,
+                return_holdings=True,
+            )
             self._write_json(snapshot)
         except Exception as exc:  # Keep local UI errors visible.
             self._write_json({"error": str(exc)}, status=500)

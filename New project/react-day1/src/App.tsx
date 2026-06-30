@@ -141,6 +141,7 @@ type Holding = {
   tradingsymbol?: string
   exchange?: string
   isin?: string
+  sector?: string
   quantity?: number
   average_price?: number
   last_price?: number
@@ -502,7 +503,8 @@ const optionalHelp = {
   profitTrend: 'Direction of recent profits. Growing/stable profits improve confidence; declining/loss-making hurts it.',
   constraints: 'Personal rules. Enabled filters penalise companies or setups that violate your preferences.',
   thesis: 'Your notes do not auto-score yet, but they keep the decision checklist anchored to your actual investment reason.',
-  holdingsRefresh: 'When checked, refresh adds every ticker from the uploaded holdings file to the data request, not only the symbols typed above.',
+  holdingsRefresh:
+    'When checked, sync adds every ticker from the uploaded holdings file to the price request, not only the symbols typed above. Your imported portfolio table stays loaded either way.',
   serverRestart: 'Restarts the local Python data bridge on port 8787. If an older bridge is already running, manually restart it once; after that this button can restart it from the app.',
 }
 
@@ -716,28 +718,74 @@ function cacheStateFromProvider(provider: string): CacheState {
   return 'live'
 }
 
-function filledFundamentalsCount(snapshot: Snapshot) {
-  return Object.values(snapshot.fundamentals ?? {}).filter((fundamentals) => Object.keys(fundamentals ?? {}).length > 0).length
+function filledFundamentalsRecordCount(fundamentals?: Record<string, CompanyFundamentals>) {
+  return Object.values(fundamentals ?? {}).filter((row) => Object.keys(row ?? {}).length > 0).length
 }
 
-function preserveFundamentalsIfMissing(refreshedSnapshot: Snapshot, previousSnapshot: Snapshot) {
-  const refreshedCount = filledFundamentalsCount(refreshedSnapshot)
-  const previousCount = filledFundamentalsCount(previousSnapshot)
-  if (refreshedCount > 0 || previousCount === 0) {
+function filledFundamentalsCount(snapshot: Snapshot) {
+  return filledFundamentalsRecordCount(snapshot.fundamentals)
+}
+
+function holdingKey(holding: Holding) {
+  const exchange = String(holding.exchange ?? '').trim().toUpperCase()
+  const tradingsymbol = String(holding.tradingsymbol ?? '').trim().toUpperCase()
+  return exchange && tradingsymbol ? `${exchange}:${tradingsymbol}` : ''
+}
+
+function mergeHoldingsPrices(holdings: Holding[], quotes: Record<string, MarketQuote>) {
+  return holdings.map((holding) => {
+    const key = holdingKey(holding)
+    const quote = key ? quotes[key] : undefined
+    if (!quote || quote.last_price === undefined || quote.last_price === null) return holding
+    const quantity = holding.quantity ?? 0
+    const averagePrice = holding.average_price ?? 0
+    const lastPrice = quote.last_price
     return {
-      refreshedCount,
-      retainedCount: refreshedCount,
-      retainedExisting: false,
-      snapshot: refreshedSnapshot,
+      ...holding,
+      last_price: lastPrice,
+      pnl: quantity * lastPrice - quantity * averagePrice,
+    }
+  })
+}
+
+function quotedHoldingsCount(snapshot: Snapshot) {
+  return snapshot.holdings.filter((holding) => Boolean(snapshot.quotes[holdingKey(holding)])).length
+}
+
+function mergeFundamentals(refreshedSnapshot: Snapshot, previousSnapshot: Snapshot) {
+  const merged: Record<string, CompanyFundamentals> = { ...(previousSnapshot.fundamentals ?? {}) }
+  for (const [key, fundamentals] of Object.entries(refreshedSnapshot.fundamentals ?? {})) {
+    if (Object.keys(fundamentals ?? {}).length > 0 || !merged[key]) {
+      merged[key] = fundamentals
     }
   }
+  return merged
+}
+
+function mergeRefreshedSnapshot(refreshedSnapshot: Snapshot, previousSnapshot: Snapshot) {
+  const refreshedCount = filledFundamentalsCount(refreshedSnapshot)
+  const previousCount = filledFundamentalsCount(previousSnapshot)
+  const fundamentals = mergeFundamentals(refreshedSnapshot, previousSnapshot)
+  const retainedCount = filledFundamentalsRecordCount(fundamentals)
+  const previousHoldings = previousSnapshot.holdings ?? []
+  const refreshedHoldings = refreshedSnapshot.holdings ?? []
+  const retainedHoldings =
+    !refreshedSnapshot.upload &&
+    refreshedHoldings.length === 0 &&
+    previousHoldings.length > 0 &&
+    !previousSnapshot.provider.includes('sample')
+  const holdings = retainedHoldings ? mergeHoldingsPrices(previousHoldings, refreshedSnapshot.quotes ?? {}) : refreshedHoldings
+
   return {
     refreshedCount,
-    retainedCount: previousCount,
-    retainedExisting: true,
+    retainedCount,
+    retainedExisting: previousCount > 0 && retainedCount > refreshedCount,
+    retainedHoldings,
     snapshot: {
       ...refreshedSnapshot,
-      fundamentals: previousSnapshot.fundamentals ?? {},
+      fundamentals,
+      holdings,
+      upload: refreshedSnapshot.upload ?? (retainedHoldings ? previousSnapshot.upload : undefined),
     },
   }
 }
@@ -3139,7 +3187,7 @@ function App() {
         throw new Error(data.error || 'Market-data sync failed.')
       }
       const refreshedSnapshot = data as Snapshot
-      const mergedRefresh = preserveFundamentalsIfMissing(refreshedSnapshot, activeSnapshot)
+      const mergedRefresh = mergeRefreshedSnapshot(refreshedSnapshot, activeSnapshot)
       setSnapshot(mergedRefresh.snapshot)
       setCacheState(cacheStateFromProvider(mergedRefresh.snapshot.provider))
       setFreeRefreshState('done')
@@ -3148,8 +3196,13 @@ function App() {
         : mergedRefresh.retainedExisting
           ? `Refresh returned no fundamentals, so existing fundamentals for ${mergedRefresh.retainedCount} symbols were kept. Restart the local data server once to activate the Screener-backed fundamentals fetcher.`
           : `No fundamentals returned yet. Restart the local data server once, then refresh again to activate the Screener-backed fundamentals fetcher.`
+      const holdingsMessage = mergedRefresh.snapshot.holdings.length
+        ? mergedRefresh.retainedHoldings
+          ? `Imported portfolio kept with ${mergedRefresh.snapshot.holdings.length} holdings; ${quotedHoldingsCount(mergedRefresh.snapshot)} have refreshed prices.`
+          : `Portfolio shows ${mergedRefresh.snapshot.holdings.length} holdings; ${quotedHoldingsCount(mergedRefresh.snapshot)} have refreshed prices.`
+        : 'No uploaded holdings are loaded.'
       setFreeRefreshMessage(
-        `Updated ${Object.keys(mergedRefresh.snapshot.quotes).length} symbols. ${fundamentalsMessage} ${mergedRefresh.snapshot.errors.length} warnings.`,
+        `Updated ${Object.keys(mergedRefresh.snapshot.quotes).length} priced symbols. ${holdingsMessage} ${fundamentalsMessage} ${mergedRefresh.snapshot.errors.length} warnings.`,
       )
     } catch (error) {
       setFreeRefreshState('error')
@@ -3177,12 +3230,13 @@ function App() {
         throw new Error(data.error || 'Holdings upload failed.')
       }
       const refreshedSnapshot = data as Snapshot
-      const mergedRefresh = preserveFundamentalsIfMissing(refreshedSnapshot, activeSnapshot)
+      const mergedRefresh = mergeRefreshedSnapshot(refreshedSnapshot, activeSnapshot)
       setSnapshot(mergedRefresh.snapshot)
       setCacheState(cacheStateFromProvider(mergedRefresh.snapshot.provider))
       if (refreshedSnapshot.upload?.symbols.length) {
         setSymbols(refreshedSnapshot.upload.symbols.join(' '))
       }
+      setIncludeHoldings(true)
       setUploadState('done')
       const fundamentalsMessage = mergedRefresh.refreshedCount
         ? `Fundamentals loaded for ${mergedRefresh.refreshedCount} symbols.`
@@ -3190,7 +3244,7 @@ function App() {
           ? `Existing fundamentals for ${mergedRefresh.retainedCount} symbols were kept because the upload refresh returned quotes only.`
           : `No fundamentals returned yet; restart the local data server once and refresh again.`
       setUploadMessage(
-        `Imported ${refreshedSnapshot.upload?.holdings_count ?? mergedRefresh.snapshot.holdings.length} holdings from ${file.name}. ${fundamentalsMessage}`,
+        `Imported ${refreshedSnapshot.upload?.holdings_count ?? mergedRefresh.snapshot.holdings.length} holdings from ${file.name}. ${quotedHoldingsCount(mergedRefresh.snapshot)} holdings have refreshed prices. ${fundamentalsMessage}`,
       )
     } catch (error) {
       setUploadState('error')
@@ -3199,7 +3253,9 @@ function App() {
   }
 
   function analyzeHolding(holding: Holding) {
-    const exchange = holding.exchange?.toUpperCase() === 'BSE' ? 'BSE' : 'NSE'
+    const holdingExchange = holding.exchange?.toUpperCase()
+    if (holdingExchange !== 'NSE' && holdingExchange !== 'BSE') return
+    const exchange = holdingExchange === 'BSE' ? 'BSE' : 'NSE'
     setForm((current) => ({
       ...current,
       ticker: holding.tradingsymbol ?? current.ticker,
@@ -4801,23 +4857,32 @@ function App() {
                     </tr>
                   </thead>
                   <tbody>
-                    {activeSnapshot.holdings.map((holding) => (
-                      <tr key={`${holding.exchange}:${holding.tradingsymbol}`}>
-                        <td>
-                          {holding.exchange}:{holding.tradingsymbol}
-                        </td>
-                        <td>{formatNumber(holding.quantity)}</td>
-                        <td>{formatInr(holding.average_price)}</td>
-                        <td>{formatInr(holding.last_price)}</td>
-                        <td>{formatInr(holdingValue(holding))}</td>
-                        <td className={(holding.pnl ?? 0) >= 0 ? 'positive' : 'negative'}>{formatInr(holding.pnl)}</td>
-                        <td>
-                          <button className="table-button" type="button" onClick={() => analyzeHolding(holding)}>
-                            Analyze
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
+                    {activeSnapshot.holdings.map((holding) => {
+                      const canAnalyze = ['NSE', 'BSE'].includes(String(holding.exchange ?? '').toUpperCase())
+                      return (
+                        <tr key={`${holding.exchange}:${holding.tradingsymbol}`}>
+                          <td>
+                            {holding.exchange}:{holding.tradingsymbol}
+                          </td>
+                          <td>{formatNumber(holding.quantity)}</td>
+                          <td>{formatInr(holding.average_price)}</td>
+                          <td>{formatInr(holding.last_price)}</td>
+                          <td>{formatInr(holdingValue(holding))}</td>
+                          <td className={(holding.pnl ?? 0) >= 0 ? 'positive' : 'negative'}>{formatInr(holding.pnl)}</td>
+                          <td>
+                            <button
+                              className="table-button"
+                              disabled={!canAnalyze}
+                              title={canAnalyze ? undefined : 'Unlisted holdings need a valid NSE or BSE symbol before analysis.'}
+                              type="button"
+                              onClick={() => analyzeHolding(holding)}
+                            >
+                              Analyze
+                            </button>
+                          </td>
+                        </tr>
+                      )
+                    })}
                   </tbody>
                 </table>
               </div>

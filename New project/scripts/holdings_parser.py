@@ -20,6 +20,8 @@ SUFFIX_EXCHANGES = {
     "-ST": "NSE",
     "-EQ": "NSE",
 }
+MARKET_EXCHANGES = {"NSE", "BSE"}
+ISIN_LIKE_RE = re.compile(r"IN[A-Z0-9]{10}")
 
 
 def normalize_header(value: str) -> str:
@@ -136,6 +138,10 @@ def parse_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not raw_symbol:
             continue
         exchange, tradingsymbol = clean_symbol(str(raw_symbol))
+        sector = str(by_header(row, header_by_column, "Sector") or "").strip().upper()
+        isin = by_header(row, header_by_column, "ISIN") or ""
+        if sector == "UNLISTED" or (not isin and ISIN_LIKE_RE.fullmatch(tradingsymbol)):
+            exchange = "UNLISTED"
         quantity_available = numeric_by_header(row, header_by_column, "Quantity Available", "Quantity", "Qty") or 0
         quantity_discrepant = numeric_by_header(row, header_by_column, "Quantity Discrepant") or 0
         pledged_margin = numeric_by_header(row, header_by_column, "Quantity Pledged (Margin)") or 0
@@ -153,7 +159,8 @@ def parse_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "tradingsymbol": tradingsymbol,
                 "source_symbol": str(raw_symbol).strip().upper(),
                 "exchange": exchange,
-                "isin": by_header(row, header_by_column, "ISIN") or "",
+                "isin": isin,
+                "sector": sector,
                 "quantity": quantity,
                 "average_price": average_price,
                 "last_price": last_price or 0,
@@ -189,7 +196,7 @@ def holdings_to_symbols(holdings: list[dict[str, Any]]) -> list[str]:
     for holding in holdings:
         exchange = str(holding.get("exchange") or "NSE").upper()
         tradingsymbol = str(holding.get("tradingsymbol") or "").upper()
-        if not tradingsymbol:
+        if exchange not in MARKET_EXCHANGES or not tradingsymbol:
             continue
         key = f"{exchange}:{tradingsymbol}"
         if key not in seen:
