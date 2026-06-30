@@ -183,6 +183,7 @@ type Holding = {
   last_price?: number
   pnl?: number
   product?: string
+  resolved_from_exchange?: string
 }
 
 type CompanyFundamentals = {
@@ -947,13 +948,83 @@ function quotedHoldingsCount(snapshot: Snapshot) {
   return snapshot.holdings.filter((holding) => Boolean(snapshot.quotes[holdingKey(holding)])).length
 }
 
+function hasTechnicalData(snapshot: Snapshot, symbol: string) {
+  return Boolean(snapshot.quotes[symbol]) && (snapshot.candles[symbol]?.length ?? 0) > 0
+}
+
+function hasFundamentalData(snapshot: Snapshot, symbol: string) {
+  return Object.keys(snapshot.fundamentals?.[symbol] ?? {}).length > 0
+}
+
+function hasAnyMarketData(snapshot: Snapshot, symbol: string) {
+  return hasTechnicalData(snapshot, symbol) || hasFundamentalData(snapshot, symbol)
+}
+
+function symbolTradingsymbol(symbol: string) {
+  const [, ...rest] = symbol.trim().toUpperCase().split(':')
+  return rest.length ? rest.join(':') : symbol.trim().toUpperCase()
+}
+
+function coverageAliasMap(snapshot: Snapshot) {
+  const aliases = new Map<string, string>()
+  for (const row of snapshot.symbols) {
+    const canonical = (row.kite_key || row.input || '').trim().toUpperCase()
+    const input = (row.input || '').trim().toUpperCase()
+    const tradingsymbol = (row.tradingsymbol || '').trim().toUpperCase()
+    if (!canonical) continue
+    if (input && input !== canonical) aliases.set(input, canonical)
+    if (tradingsymbol && row.exchange !== 'AUTO') aliases.set(`AUTO:${tradingsymbol}`, canonical)
+    if (tradingsymbol && row.exchange === 'UNLISTED') {
+      aliases.set(`NSE:${tradingsymbol}`, canonical)
+      aliases.set(`BSE:${tradingsymbol}`, canonical)
+    }
+  }
+  for (const holding of snapshot.holdings) {
+    const canonical = holdingKey(holding)
+    const originalExchange = String(holding.resolved_from_exchange ?? '').trim().toUpperCase()
+    const tradingsymbol = String(holding.tradingsymbol ?? '').trim().toUpperCase()
+    if (canonical && originalExchange && tradingsymbol) aliases.set(`${originalExchange}:${tradingsymbol}`, canonical)
+  }
+  return aliases
+}
+
+function loadedSymbolByTradingsymbol(snapshot: Snapshot) {
+  const loaded = new Map<string, string>()
+  const candidates = [
+    ...Object.keys(snapshot.quotes),
+    ...Object.keys(snapshot.candles),
+    ...Object.keys(snapshot.fundamentals ?? {}).filter((symbol) => hasFundamentalData(snapshot, symbol)),
+  ]
+  for (const symbol of candidates) {
+    if (!hasAnyMarketData(snapshot, symbol)) continue
+    const tradingsymbol = symbolTradingsymbol(symbol)
+    if (!loaded.has(tradingsymbol) || hasTechnicalData(snapshot, symbol)) loaded.set(tradingsymbol, symbol)
+  }
+  return loaded
+}
+
+function canonicalCoverageSymbol(snapshot: Snapshot, symbol: string, aliases: Map<string, string>, loadedBySymbol: Map<string, string>) {
+  const normalized = symbol.trim().toUpperCase()
+  const directAlias = aliases.get(normalized)
+  if (directAlias && (hasAnyMarketData(snapshot, directAlias) || !hasAnyMarketData(snapshot, normalized))) return directAlias
+  if (!hasAnyMarketData(snapshot, normalized)) {
+    const loadedPeer = loadedBySymbol.get(symbolTradingsymbol(normalized))
+    if (loadedPeer) return loadedPeer
+  }
+  return normalized
+}
+
 function orderedSnapshotSymbols(snapshot: Snapshot) {
   const seen = new Set<string>()
   const symbols: string[] = []
+  const aliases = coverageAliasMap(snapshot)
+  const loadedBySymbol = loadedSymbolByTradingsymbol(snapshot)
   const add = (symbol?: string) => {
-    if (!symbol || seen.has(symbol)) return
-    seen.add(symbol)
-    symbols.push(symbol)
+    if (!symbol) return
+    const canonical = canonicalCoverageSymbol(snapshot, symbol, aliases, loadedBySymbol)
+    if (seen.has(canonical)) return
+    seen.add(canonical)
+    symbols.push(canonical)
   }
   snapshot.symbols.forEach((symbol) => add(symbol.kite_key || symbol.input))
   Object.keys(snapshot.quotes).forEach(add)
@@ -964,13 +1035,11 @@ function orderedSnapshotSymbols(snapshot: Snapshot) {
 
 function buildSyncCoverage(snapshot: Snapshot): SyncCoverage {
   const symbols = orderedSnapshotSymbols(snapshot)
-  const hasTechnical = (symbol: string) => Boolean(snapshot.quotes[symbol]) && (snapshot.candles[symbol]?.length ?? 0) > 0
-  const hasFundamentals = (symbol: string) => Object.keys(snapshot.fundamentals?.[symbol] ?? {}).length > 0
   return {
-    technicalLoaded: symbols.filter(hasTechnical),
-    technicalMissing: symbols.filter((symbol) => !hasTechnical(symbol)),
-    fundamentalsLoaded: symbols.filter(hasFundamentals),
-    fundamentalsMissing: symbols.filter((symbol) => !hasFundamentals(symbol)),
+    technicalLoaded: symbols.filter((symbol) => hasTechnicalData(snapshot, symbol)),
+    technicalMissing: symbols.filter((symbol) => !hasTechnicalData(snapshot, symbol)),
+    fundamentalsLoaded: symbols.filter((symbol) => hasFundamentalData(snapshot, symbol)),
+    fundamentalsMissing: symbols.filter((symbol) => !hasFundamentalData(snapshot, symbol)),
   }
 }
 
@@ -1062,9 +1131,14 @@ function buildMissingDataIssues(snapshot: Snapshot, coverage: SyncCoverage): Mis
 }
 
 function mergeFundamentals(refreshedSnapshot: Snapshot, previousSnapshot: Snapshot) {
-  const merged: Record<string, CompanyFundamentals> = { ...(previousSnapshot.fundamentals ?? {}) }
+  const merged: Record<string, CompanyFundamentals> = {}
+  for (const [key, fundamentals] of Object.entries(previousSnapshot.fundamentals ?? {})) {
+    if (Object.keys(fundamentals ?? {}).length > 0) {
+      merged[key] = fundamentals
+    }
+  }
   for (const [key, fundamentals] of Object.entries(refreshedSnapshot.fundamentals ?? {})) {
-    if (Object.keys(fundamentals ?? {}).length > 0 || !merged[key]) {
+    if (Object.keys(fundamentals ?? {}).length > 0) {
       merged[key] = fundamentals
     }
   }
