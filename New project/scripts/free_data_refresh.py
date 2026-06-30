@@ -231,11 +231,20 @@ def yahoo_quote_summary_url(yahoo_symbol: str) -> str:
 
 
 def screener_company_url(screener_symbol: str) -> str:
-    encoded_symbol = urllib.parse.quote(screener_symbol.strip().upper(), safe="")
+    clean = screener_symbol.strip()
+    if clean.startswith("http://") or clean.startswith("https://"):
+        return clean
+    if clean.startswith("/company/"):
+        return f"https://www.screener.in{clean}"
+    encoded_symbol = urllib.parse.quote(clean.strip("/").upper(), safe="/")
     return f"https://www.screener.in/company/{encoded_symbol}/"
 
 
-def fetch_json(url: str) -> dict[str, Any]:
+def screener_search_url(query: str) -> str:
+    return f"https://www.screener.in/api/company/search/?{urllib.parse.urlencode({'q': query})}"
+
+
+def fetch_json(url: str) -> Any:
     request = urllib.request.Request(
         url,
         headers={
@@ -562,6 +571,128 @@ def screener_candidates(item: dict[str, str]) -> list[str]:
     return output
 
 
+def compact_token(value: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", value.upper())
+
+
+def symbol_roots(symbol: str) -> list[str]:
+    symbol = symbol.strip().upper()
+    roots = [symbol]
+    if "-" in symbol:
+        roots.append(symbol.split("-", 1)[0])
+        roots.append(symbol.replace("-", ""))
+    return [root for root in unique_candidates([compact_token(root) for root in roots]) if root]
+
+
+def meaningful_words(value: str) -> list[str]:
+    ignored = {"AND", "THE", "LTD", "LIMITED", "CO", "COMPANY", "PVT", "PRIVATE", "INC", "CORP", "CORPORATION"}
+    return [word for word in re.findall(r"[A-Z0-9]+", value.upper()) if word and word not in ignored]
+
+
+def company_acronyms(name: str) -> set[str]:
+    words = meaningful_words(name)
+    acronyms = set()
+    if words:
+        acronyms.add("".join(word[0] for word in words))
+        with_legal_words = [word for word in re.findall(r"[A-Z0-9]+", name.upper()) if word]
+        acronyms.add("".join(word[0] for word in with_legal_words))
+    return acronyms
+
+
+def screener_code_from_url(url: str) -> str:
+    match = re.search(r"/company/([^/]+)/?", url)
+    return match.group(1).strip().upper() if match else url.strip().upper()
+
+
+def screener_search_terms(item: dict[str, str]) -> list[str]:
+    terms = [
+        item.get("screener", ""),
+        item.get("isin", ""),
+        item.get("source_symbol", ""),
+        item.get("holding_name", ""),
+        item.get("name", ""),
+        item.get("tradingsymbol", ""),
+    ]
+    terms.extend(symbol_roots(item.get("tradingsymbol", "")))
+    return unique_candidates([term for term in terms if term])
+
+
+def fetch_screener_search(term: str) -> list[dict[str, Any]]:
+    payload = fetch_json(screener_search_url(term))
+    return payload if isinstance(payload, list) else []
+
+
+def score_screener_search_result(item: dict[str, str], result: dict[str, Any], term: str) -> int:
+    name = str(result.get("name") or "")
+    url = str(result.get("url") or "")
+    code = compact_token(screener_code_from_url(url))
+    exchange = str(item.get("exchange") or "").upper()
+    roots = symbol_roots(item.get("tradingsymbol", ""))
+    source_roots = symbol_roots(item.get("source_symbol", ""))
+    term_token = compact_token(term)
+    name_words = {compact_token(word) for word in meaningful_words(name)}
+    acronyms = company_acronyms(name)
+
+    score = 0
+    if exchange == "BSE" and code.isdigit():
+        score += 30
+    if exchange == "NSE" and code and not code.isdigit():
+        score += 8
+
+    for root in unique_candidates([*roots, *source_roots]):
+        if not root:
+            continue
+        if code == root:
+            score += 45
+        elif code.startswith(root) and len(code) > len(root):
+            score += 18
+        if root in name_words:
+            score += 32
+        if root in acronyms:
+            score += 45
+
+    if term_token and term_token == code:
+        score += 18
+    if term_token and term_token in name_words:
+        score += 10
+    if "PARTLY" in name.upper() and "PP" not in item.get("tradingsymbol", "").upper():
+        score -= 25
+    return score
+
+
+def discover_screener_candidates(item: dict[str, str]) -> list[dict[str, Any]]:
+    ranked: dict[str, dict[str, Any]] = {}
+    for term in screener_search_terms(item):
+        try:
+            results = fetch_screener_search(term)
+        except (RuntimeError, urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError):
+            continue
+        for result in results:
+            url = str(result.get("url") or "")
+            if not url:
+                continue
+            code = screener_code_from_url(url)
+            score = score_screener_search_result(item, result, term)
+            previous = ranked.get(code)
+            if previous and int(previous["score"]) >= score:
+                continue
+            ranked[code] = {
+                "code": code,
+                "name": str(result.get("name") or ""),
+                "score": score,
+                "term": term,
+                "url": url,
+            }
+    candidates = sorted(ranked.values(), key=lambda row: int(row["score"]), reverse=True)
+    if not candidates:
+        return []
+    best_score = int(candidates[0]["score"])
+    second_score = int(candidates[1]["score"]) if len(candidates) > 1 else 0
+    if best_score < 58 or (second_score and best_score - second_score < 8):
+        return []
+    return candidates[:3]
+
+
 def parse_screener_fundamentals(page: str, source_url: str) -> dict[str, Any]:
     company_id = first_match(r'data-company-id="([^"]+)"', page)
     name = clean_html_text(first_match(r'<h1[^>]*>(.*?)</h1>', page)) or clean_html_text(first_match(r"<title[^>]*>(.*?)</title>", page)).split(" share price")[0]
@@ -680,17 +811,48 @@ def parse_screener_fundamentals(page: str, source_url: str) -> dict[str, Any]:
 
 def fetch_screener_fundamentals(item: dict[str, str]) -> dict[str, Any]:
     errors = []
-    for candidate in screener_candidates(item):
-        url = screener_company_url(candidate)
-        try:
-            page = fetch_text(url)
-            parsed = parse_screener_fundamentals(page, url)
-            if parsed.get("name") or parsed.get("top_ratios"):
-                return parsed
-            errors.append(f"{candidate}: empty Screener parse")
-        except (RuntimeError, urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
-            errors.append(f"{candidate}: {exc}")
-    raise RuntimeError("; ".join(errors) or "no Screener candidates")
+    attempted = set()
+
+    def try_candidate_rows(candidate_rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+        for row in candidate_rows:
+            candidate = str(row.get("code") or "").strip()
+            if not candidate or candidate in attempted:
+                continue
+            attempted.add(candidate)
+            url = screener_company_url(candidate)
+            try:
+                page = fetch_text(url)
+                parsed = parse_screener_fundamentals(page, url)
+                if parsed.get("name") or parsed.get("top_ratios"):
+                    if row.get("term") != "configured":
+                        parsed["screener_discovery"] = {
+                            "candidate": candidate,
+                            "name": row.get("name"),
+                            "score": row.get("score"),
+                            "term": row.get("term"),
+                        }
+                    return parsed
+                errors.append(f"{candidate}: empty Screener parse")
+            except (RuntimeError, urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
+                errors.append(f"{candidate}: {exc}")
+        return None
+
+    configured_rows = [{"code": candidate, "name": "", "score": 100, "term": "configured"} for candidate in screener_candidates(item)]
+    configured_result = try_candidate_rows(configured_rows)
+    if configured_result:
+        return configured_result
+
+    discovered_rows = discover_screener_candidates(item)
+    if discovered_rows:
+        item["discovered_screener"] = discovered_rows[0]["code"]
+        item["discovered_screener_name"] = discovered_rows[0]["name"]
+        item["discovered_screener_score"] = str(discovered_rows[0]["score"])
+    discovered_result = try_candidate_rows(discovered_rows)
+    if discovered_result:
+        return discovered_result
+
+    search_note = "no confident Screener search match" if not discovered_rows else ""
+    raise RuntimeError("; ".join([*errors, search_note]).strip("; ") or "no Screener candidates")
 
 
 def merge_fundamentals(*payloads: dict[str, Any]) -> dict[str, Any]:
@@ -767,6 +929,49 @@ def merge_holdings_prices(holdings: list[dict[str, Any]], quotes: dict[str, Any]
     return merged
 
 
+def holding_lookup_keys(holding: dict[str, Any]) -> list[str]:
+    exchange = str(holding.get("exchange") or "").upper()
+    tradingsymbol = str(holding.get("tradingsymbol") or "").upper()
+    if not tradingsymbol:
+        return []
+    keys = [f"{exchange}:{tradingsymbol}" if exchange else "", f"AUTO:{tradingsymbol}"]
+    if exchange == "AUTO":
+        keys.extend([f"NSE:{tradingsymbol}", f"BSE:{tradingsymbol}"])
+    return unique_candidates([key for key in keys if key])
+
+
+def holdings_metadata_by_symbol(holdings: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    metadata: dict[str, dict[str, Any]] = {}
+    for holding in holdings:
+        for key in holding_lookup_keys(holding):
+            metadata[key] = holding
+    return metadata
+
+
+def apply_holding_metadata(item: dict[str, Any], metadata: dict[str, dict[str, Any]]) -> None:
+    tradingsymbol = str(item.get("tradingsymbol") or "").upper()
+    keys = [
+        str(item.get("input") or "").upper(),
+        str(item.get("kite_key") or "").upper(),
+        f"AUTO:{tradingsymbol}",
+        f"NSE:{tradingsymbol}",
+        f"BSE:{tradingsymbol}",
+    ]
+    holding = next((metadata[key] for key in keys if key in metadata), None)
+    if not holding:
+        return
+    field_map = {
+        "isin": "isin",
+        "name": "holding_name",
+        "sector": "holding_sector",
+        "source_symbol": "source_symbol",
+    }
+    for holding_key, item_key in field_map.items():
+        value = holding.get(holding_key)
+        if value not in (None, ""):
+            item[item_key] = str(value)
+
+
 def refresh_free_data(
     symbols: list[str] | None = None,
     days: int = 730,
@@ -778,6 +983,7 @@ def refresh_free_data(
     mapping = load_symbol_map()
     requested_symbols = symbols or default_symbols()
     stored_holdings = read_json(HOLDINGS_PATH, [])
+    holding_metadata = holdings_metadata_by_symbol(stored_holdings)
     holdings_for_request = stored_holdings if include_holdings else []
     if holdings_for_request:
         for holding in holdings_for_request:
@@ -787,7 +993,11 @@ def refresh_free_data(
                 holding_symbol = f"{exchange}:{tradingsymbol}"
                 if holding_symbol not in requested_symbols:
                     requested_symbols.append(holding_symbol)
-    resolved = [resolve_symbol(symbol, mapping) for symbol in requested_symbols]
+    resolved = []
+    for symbol in requested_symbols:
+        item = resolve_symbol(symbol, mapping)
+        apply_holding_metadata(item, holding_metadata)
+        resolved.append(item)
     quotes: dict[str, Any] = {}
     candles: dict[str, list[dict[str, Any]]] = {}
     fundamentals: dict[str, dict[str, Any]] = {}
@@ -900,7 +1110,7 @@ def main() -> int:
         output=output,
         app_output=app_output,
     )
-    print(f"Wrote {CACHE_DIR / 'latest.json'}")
+    print(f"Wrote {output or (CACHE_DIR / 'latest.json')}")
     if app_output:
         print(f"Wrote {app_output}")
     if snapshot["errors"]:

@@ -142,6 +142,17 @@ def parse_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         isin = by_header(row, header_by_column, "ISIN") or ""
         if sector == "UNLISTED" or ISIN_LIKE_RE.fullmatch(tradingsymbol):
             exchange = "UNLISTED"
+        name = str(
+            by_header(
+                row,
+                header_by_column,
+                "Instrument Name",
+                "Company Name",
+                "Name",
+                "Security Name",
+            )
+            or ""
+        ).strip()
         quantity_available = numeric_by_header(row, header_by_column, "Quantity Available", "Quantity", "Qty") or 0
         quantity_discrepant = numeric_by_header(row, header_by_column, "Quantity Discrepant") or 0
         pledged_margin = numeric_by_header(row, header_by_column, "Quantity Pledged (Margin)") or 0
@@ -160,6 +171,7 @@ def parse_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "source_symbol": str(raw_symbol).strip().upper(),
                 "exchange": exchange,
                 "isin": isin,
+                "name": name,
                 "sector": sector,
                 "quantity": quantity,
                 "average_price": average_price,
