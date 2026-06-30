@@ -108,7 +108,6 @@ type BrowserWorkspace = {
   version: 1
   snapshot: Snapshot
   form: AnalysisForm
-  symbols: string
   days: number
   includeHoldings: boolean
 }
@@ -386,7 +385,6 @@ function readBrowserWorkspace(): BrowserWorkspace | null {
         errors: parsed.snapshot.errors ?? [],
       },
       form: { ...initialForm, ...(parsed.form ?? {}) },
-      symbols: typeof parsed.symbols === 'string' ? parsed.symbols : '',
       days: typeof parsed.days === 'number' && Number.isFinite(parsed.days) ? parsed.days : 730,
       includeHoldings: typeof parsed.includeHoldings === 'boolean' ? parsed.includeHoldings : false,
     }
@@ -545,7 +543,7 @@ const optionalHelp = {
   constraints: 'Personal rules. Enabled filters penalise companies or setups that violate your preferences.',
   thesis: 'Your notes do not auto-score yet, but they keep the decision checklist anchored to your actual investment reason.',
   holdingsRefresh:
-    'When checked, sync adds every ticker from the uploaded holdings file to the price request, not only the symbols typed above. Your imported portfolio table stays loaded either way.',
+    'When checked, sync refreshes every listed ticker from the uploaded holdings file along with the current decision ticker. Your imported portfolio table stays loaded either way.',
   serverRestart: 'Restarts the local Python data bridge on port 8787. If an older bridge is already running, manually restart it once; after that this button can restart it from the app.',
 }
 
@@ -930,6 +928,35 @@ function holdingKey(holding: Holding) {
   const exchange = String(holding.exchange ?? '').trim().toUpperCase()
   const tradingsymbol = String(holding.tradingsymbol ?? '').trim().toUpperCase()
   return exchange && tradingsymbol ? `${exchange}:${tradingsymbol}` : ''
+}
+
+function uniqueSymbols(values: Array<string | undefined>) {
+  const seen = new Set<string>()
+  const output: string[] = []
+  for (const value of values) {
+    const clean = (value ?? '').trim().toUpperCase()
+    if (!clean || seen.has(clean)) continue
+    seen.add(clean)
+    output.push(clean)
+  }
+  return output
+}
+
+function decisionInputSymbol(form: AnalysisForm) {
+  const ticker = form.ticker.trim().toUpperCase()
+  if (!ticker) return ''
+  if (ticker.startsWith('^') || ticker.includes(':')) return ticker
+  return `${form.exchange}:${ticker}`
+}
+
+function portfolioSymbolsForSync(snapshot: Snapshot) {
+  const uploadSymbols = snapshot.upload?.symbols ?? []
+  if (uploadSymbols.length) return uniqueSymbols(uploadSymbols)
+  return uniqueSymbols(
+    snapshot.holdings
+      .map(holdingKey)
+      .filter((key) => key && !key.startsWith('UNLISTED:')),
+  )
 }
 
 function mergeHoldingsPrices(holdings: Holding[], quotes: Record<string, MarketQuote>) {
@@ -2894,7 +2921,6 @@ function App() {
   const [cacheState, setCacheState] = useState<CacheState>(() => cacheStateFromProvider((storedWorkspace?.snapshot ?? starterSnapshot).provider))
   const [view, setView] = useState<View>('verdict')
   const [form, setForm] = useState<AnalysisForm>(() => storedWorkspace?.form ?? initialForm)
-  const [symbols, setSymbols] = useState(() => storedWorkspace?.symbols ?? '')
   const [days, setDays] = useState(() => storedWorkspace?.days ?? 730)
   const [includeHoldings, setIncludeHoldings] = useState(() => storedWorkspace?.includeHoldings ?? false)
   const [copied, setCopied] = useState<string | null>(null)
@@ -2951,11 +2977,10 @@ function App() {
       version: 1,
       snapshot,
       form,
-      symbols,
       days,
       includeHoldings,
     })
-  }, [days, form, includeHoldings, snapshot, symbols])
+  }, [days, form, includeHoldings, snapshot])
 
   const activeSnapshot = snapshot
   const missingDataIssues = useMemo(
@@ -2980,6 +3005,12 @@ function App() {
   const loadedHoldingsFilename = activeSnapshot.upload?.filename ?? (hasUploadedHoldingsFeed ? 'Browser cached holdings' : '')
   const loadedHoldingsCount = activeSnapshot.upload?.holdings_count ?? activeSnapshot.holdings.length
   const includeHoldingsInSync = includeHoldings && hasUploadedHoldingsFeed
+  const decisionSymbol = decisionInputSymbol(form)
+  const portfolioSyncSymbols = useMemo(() => portfolioSymbolsForSync(activeSnapshot), [activeSnapshot])
+  const syncTargetSymbols = useMemo(
+    () => uniqueSymbols([decisionSymbol, ...(includeHoldingsInSync ? portfolioSyncSymbols : [])]),
+    [decisionSymbol, includeHoldingsInSync, portfolioSyncSymbols],
+  )
   const isHoldingReview = form.alreadyHold
   const analysis = useMemo(() => buildAnalysis(form, activeSnapshot, cacheState), [activeSnapshot, cacheState, form])
   const portfolio = useMemo(() => portfolioSummary(activeSnapshot), [activeSnapshot])
@@ -2994,8 +3025,9 @@ function App() {
   const publicAppCommand = 'cd react-day1 && npm run preview:lan'
   const freeCliCommand = useMemo(() => {
     const holdingsFlag = includeHoldingsInSync ? '' : ' --no-holdings'
-    return `python3 scripts/market_data_refresh.py --symbols ${symbols.trim()} --days ${days}${holdingsFlag}`
-  }, [days, includeHoldingsInSync, symbols])
+    const cliSymbols = syncTargetSymbols.length ? syncTargetSymbols.join(' ') : '<decision-symbol-or-uploaded-holdings>'
+    return `python3 scripts/market_data_refresh.py --symbols ${cliSymbols} --days ${days}${holdingsFlag}`
+  }, [days, includeHoldingsInSync, syncTargetSymbols])
 
   const quoteRows = Object.entries(activeSnapshot.quotes).map(([symbol, quote]) => {
     const close = quote.ohlc?.close
@@ -3669,9 +3701,22 @@ function App() {
     }
   }
 
-  async function refreshFreeData() {
+  async function refreshFreeData(options: { symbolsOverride?: string[]; includeHoldingsOverride?: boolean; source?: 'decision' | 'data' } = {}) {
+    const requestedSymbols = uniqueSymbols(options.symbolsOverride ?? syncTargetSymbols)
+    const includeHoldingsForRequest = options.includeHoldingsOverride ?? includeHoldingsInSync
+    if (!requestedSymbols.length) {
+      setFreeRefreshState('error')
+      setSyncProgress(0)
+      setSyncCoverage(null)
+      setFreeRefreshMessage('Enter a ticker in Decision Setup or upload a holdings XLSX before syncing market data.')
+      return
+    }
     setFreeRefreshState('refreshing')
-    setFreeRefreshMessage('Syncing EOD prices, candles, fundamentals, and company updates...')
+    setFreeRefreshMessage(
+      options.source === 'decision'
+        ? `Loading ${requestedSymbols[0]} and rebuilding the verdict evidence...`
+        : 'Syncing EOD prices, candles, fundamentals, company updates, and portfolio matches...',
+    )
     setSyncProgress(8)
     setSyncCoverage(null)
     try {
@@ -3680,9 +3725,9 @@ function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          symbols: symbols.trim().split(/\s+/).filter(Boolean),
+          symbols: requestedSymbols,
           days,
-          includeHoldings: includeHoldingsInSync,
+          includeHoldings: includeHoldingsForRequest,
         }),
       })
       const data = await response.json()
@@ -3717,6 +3762,18 @@ function App() {
       setSyncCoverage(null)
       setFreeRefreshMessage(bridgeFailureMessage(error, 'Market-data sync failed.'))
     }
+  }
+
+  async function loadDecisionData() {
+    if (!decisionSymbol) {
+      setFreeRefreshState('error')
+      setSyncProgress(0)
+      setSyncCoverage(null)
+      setFreeRefreshMessage('Enter a ticker before loading analysis data.')
+      return
+    }
+    await refreshFreeData({ symbolsOverride: [decisionSymbol], includeHoldingsOverride: false, source: 'decision' })
+    setView('verdict')
   }
 
   function updateMappingDraft(symbol: string, field: keyof SymbolMappingDraft, value: string) {
@@ -3800,15 +3857,18 @@ function App() {
 
   function markSymbolUnsupported(symbol: string) {
     const normalized = symbol.trim().toUpperCase()
-    setSymbols((current) =>
+    setSyncCoverage((current) =>
       current
-        .trim()
-        .split(/\s+/)
-        .filter((candidate) => candidate.trim().toUpperCase() !== normalized)
-        .join(' '),
+        ? {
+            fundamentalsLoaded: current.fundamentalsLoaded.filter((candidate) => candidate !== normalized),
+            fundamentalsMissing: current.fundamentalsMissing.filter((candidate) => candidate !== normalized),
+            technicalLoaded: current.technicalLoaded.filter((candidate) => candidate !== normalized),
+            technicalMissing: current.technicalMissing.filter((candidate) => candidate !== normalized),
+          }
+        : current,
     )
     setMappingState('done')
-    setMappingStatus(`${symbol} removed from the sync input. It can stay in holdings, but it will not be requested as a listed quote unless you add it again.`)
+    setMappingStatus(`${symbol} hidden from the current missing-data list. It can stay in holdings, but it needs a valid NSE/BSE mapping before listed analysis.`)
   }
 
   async function uploadHoldingsReport(file: File | undefined) {
@@ -3836,9 +3896,6 @@ function App() {
       setSnapshot(mergedRefresh.snapshot)
       setCacheState(cacheStateFromProvider(mergedRefresh.snapshot.provider))
       setSyncCoverage(buildSyncCoverage(mergedRefresh.snapshot))
-      if (refreshedSnapshot.upload?.symbols.length) {
-        setSymbols(refreshedSnapshot.upload.symbols.join(' '))
-      }
       setIncludeHoldings(true)
       setUploadState('done')
       const fundamentalsMessage = !hasFundamentalScope(mergedRefresh.snapshot)
@@ -3860,12 +3917,6 @@ function App() {
   async function removeUploadedHoldingsFeed() {
     if (!hasUploadedHoldingsFeed) return
     const removedKeys = new Set(activeSnapshot.holdings.map(holdingKey).filter(Boolean))
-    const symbolsToRemove = new Set(
-      [
-        ...(activeSnapshot.upload?.symbols ?? []),
-        ...activeSnapshot.holdings.map(holdingKey).filter((key) => key && !key.startsWith('UNLISTED:')),
-      ].map((symbol) => symbol.trim().toUpperCase()),
-    )
     const nextSnapshot: Snapshot = {
       ...activeSnapshot,
       holdings: [],
@@ -3876,13 +3927,6 @@ function App() {
     setIncludeHoldings(false)
     setUploadState('idle')
     setUploadMessage('Removed the uploaded holdings feed from this browser. You can upload another XLSX now.')
-    setSymbols((current) =>
-      current
-        .trim()
-        .split(/\s+/)
-        .filter((symbol) => symbol && !symbolsToRemove.has(symbol.toUpperCase()))
-        .join(' '),
-    )
     setForm((current) => {
       const currentKey = `${current.exchange}:${current.ticker.trim().toUpperCase()}`
       if (!removedKeys.has(currentKey)) return current
@@ -3986,23 +4030,30 @@ function App() {
         <>
           <CollapsibleSection
             className="parent-section setup-parent"
-            description="Required inputs, optional evidence, and personal filters that shape the verdict."
-            eyebrow="Inputs"
+            defaultOpen
+            description="Start with the instrument and money context. Load its data once, then use the verdict, charts, scenarios, and help cards to make a calmer decision."
+            eyebrow="Decision brief"
             headingClassName="section-heading collapsible-section-heading"
             id="setup-parent-heading"
-            title="Decision Setup"
+            title="Analyse One Fund"
           >
             <section className="input-grid">
             <CollapsibleSection
               action={
-                <button type="button" onClick={() => copyCommand('brief', analysisBrief)}>
-                  {copied === 'brief' ? 'Copied' : 'Copy brief'}
-                </button>
+                <div className="setup-action-row">
+                  <button type="button" onClick={() => void loadDecisionData()} disabled={freeRefreshState === 'refreshing' || serverRestartState === 'restarting' || !decisionSymbol}>
+                    {freeRefreshState === 'refreshing' ? 'Loading...' : 'Load & Analyse'}
+                  </button>
+                  <button className="secondary-action" type="button" onClick={() => copyCommand('brief', analysisBrief)}>
+                    {copied === 'brief' ? 'Copied' : 'Copy brief'}
+                  </button>
+                </div>
               }
               className="panel form-panel"
+              defaultOpen
               eyebrow="Required"
               id="required-heading"
-              title="Analysis Inputs"
+              title="Instrument and Money Context"
             >
               <div className={`position-mode-card ${isHoldingReview ? 'holding-mode' : 'new-mode'}`}>
                 <div>
@@ -4143,9 +4194,25 @@ function App() {
                   {isHoldingReview && <span className="field-note">Percentage mode uses the fresh capital field, not your existing invested amount.</span>}
                 </label>
               </div>
+              {freeRefreshMessage && view === 'verdict' && (
+                <div className={`refresh-message ${freeRefreshState}`}>
+                  <p>{freeRefreshMessage}</p>
+                </div>
+              )}
+              {freeRefreshState === 'refreshing' && view === 'verdict' && (
+                <div className="sync-progress-panel compact-sync-progress" role="status" aria-live="polite">
+                  <div className="sync-progress-top">
+                    <span>Loading analysis evidence</span>
+                    <strong>{syncProgress}%</strong>
+                  </div>
+                  <div className="sync-progress-track" aria-hidden="true">
+                    <span style={{ width: `${syncProgress}%` }} />
+                  </div>
+                </div>
+              )}
             </CollapsibleSection>
 
-            <CollapsibleSection className="panel evidence-panel" eyebrow="Optional" id="optional-heading" title="Evidence and Filters">
+            <CollapsibleSection className="panel evidence-panel" eyebrow="Optional" id="optional-heading" title="Evidence and Guardrails">
 
               <div className="form-grid three">
                 <label className="field">
@@ -5432,7 +5499,7 @@ function App() {
           <CollapsibleSection
             action={
               <div className="data-action-row">
-                <button type="button" onClick={refreshFreeData} disabled={freeRefreshState === 'refreshing' || serverRestartState === 'restarting'}>
+                <button type="button" onClick={() => void refreshFreeData({ source: 'data' })} disabled={freeRefreshState === 'refreshing' || serverRestartState === 'restarting'}>
                   {freeRefreshState === 'refreshing' ? 'Syncing...' : 'Sync Market Data'}
                 </button>
                 <button
@@ -5447,18 +5514,27 @@ function App() {
               </div>
             }
             className="panel command-panel data-first-panel"
-            eyebrow="One button"
+            eyebrow="Data cache"
             id="command-heading"
             title="Market Data Sync"
           >
 
-            <label className="field">
-              Symbols
-              <textarea value={symbols} onChange={(event) => setSymbols(event.target.value)} />
-            </label>
-            <div className="inline-fields">
+            <div className="sync-scope-grid">
+              <article className="sync-scope-card">
+                <span>Decision target</span>
+                <strong>{decisionSymbol || 'Enter ticker in Verdict tab'}</strong>
+                <p>The fund/index currently selected in Decision Setup. Use Load & Analyse there for the primary workflow.</p>
+              </article>
+              <article className="sync-scope-card">
+                <span>Uploaded portfolio</span>
+                <strong>{hasUploadedHoldingsFeed ? `${portfolioSyncSymbols.length} listed symbols` : 'No holdings feed'}</strong>
+                <p>Optional cache refresh for your uploaded holdings file. Unlisted/ISIN rows stay in the portfolio but are skipped for charts.</p>
+              </article>
+            </div>
+
+            <div className="inline-fields data-settings-row">
               <label className="field">
-                Candle days
+                History window
                 <input
                   min="30"
                   max="3000"
@@ -5476,7 +5552,7 @@ function App() {
                   onChange={(event) => setIncludeHoldings(event.target.checked)}
                 />
                 <span className="toggle-copy">
-                  Holdings
+                  Include holdings
                   <HelpTip text={optionalHelp.holdingsRefresh} />
                 </span>
               </label>
