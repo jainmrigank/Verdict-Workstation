@@ -236,10 +236,11 @@ class FreeDataHandler(BaseHTTPRequestHandler):
             module = refresh_module()
             module.write_json(module.HOLDINGS_PATH, holdings)
             snapshot = module.refresh_free_data(symbols=symbols, days=days, include_holdings=True)
+            resolved_symbols = holdings_to_symbols(snapshot.get("holdings") or holdings)
             snapshot["upload"] = {
                 "filename": filename,
                 "holdings_count": len(holdings),
-                "symbols": symbols,
+                "symbols": resolved_symbols or symbols,
             }
             module.write_json(module.CACHE_DIR / "latest.json", snapshot)
             module.write_json(module.APP_SNAPSHOT, snapshot)

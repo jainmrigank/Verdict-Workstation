@@ -1,6 +1,18 @@
 {
   "symbols": [
     {
+      "aliases": [
+        "NSE:ACTIVE",
+        "ACTIVE"
+      ],
+      "exchange": "BSE",
+      "input": "AUTO:ACTIVE",
+      "name": "ACTIVE",
+      "screener": "ACTIVE",
+      "tradingsymbol": "ACTIVE",
+      "yahoo": "ACTIVE.BO"
+    },
+    {
       "input": "NSE:ENGINERSIN",
       "exchange": "NSE",
       "tradingsymbol": "ENGINERSIN",

@@ -49,9 +49,15 @@ def load_symbol_map() -> dict[str, dict[str, str]]:
     payload = read_json(SYMBOL_MAP_PATH, {"symbols": []})
     output: dict[str, dict[str, str]] = {}
     for row in payload.get("symbols", []):
+        if not isinstance(row, dict):
+            continue
         key = row.get("input", "").upper()
         if key:
             output[key] = row
+        for alias in row.get("aliases", []):
+            alias_key = str(alias).strip().upper()
+            if alias_key:
+                output[alias_key] = row
         symbol_key = f"{row.get('exchange', '').upper()}:{row.get('tradingsymbol', '').upper()}"
         if ":" in symbol_key and not symbol_key.endswith(":"):
             output[symbol_key] = row
@@ -70,8 +76,8 @@ def split_symbol(symbol: str) -> tuple[str, str]:
     clean = symbol.strip().upper()
     if ":" in clean:
         exchange, tradingsymbol = clean.split(":", 1)
-        return exchange or "NSE", tradingsymbol
-    return "NSE", clean
+        return exchange or "AUTO", tradingsymbol
+    return "AUTO", clean
 
 
 def yahoo_guess(exchange: str, tradingsymbol: str) -> str:
@@ -95,17 +101,34 @@ def yahoo_candidates(item: dict[str, str]) -> list[str]:
     exchange = item.get("exchange", "NSE").upper()
     tradingsymbol = item.get("tradingsymbol", "").upper()
     configured = item.get("yahoo", "")
-    candidates = [configured, yahoo_guess(exchange, tradingsymbol)]
+    if exchange == "AUTO":
+        candidates = [configured, yahoo_guess("NSE", tradingsymbol), yahoo_guess("BSE", tradingsymbol)]
+    else:
+        candidates = [configured, yahoo_guess(exchange, tradingsymbol)]
     if "-" in tradingsymbol:
-        candidates.append(yahoo_guess(exchange, tradingsymbol.split("-", 1)[0]))
-        candidates.append(yahoo_guess(exchange, tradingsymbol.replace("-", "")))
+        if exchange == "AUTO":
+            for inferred_exchange in ["NSE", "BSE"]:
+                candidates.append(yahoo_guess(inferred_exchange, tradingsymbol.split("-", 1)[0]))
+                candidates.append(yahoo_guess(inferred_exchange, tradingsymbol.replace("-", "")))
+        else:
+            candidates.append(yahoo_guess(exchange, tradingsymbol.split("-", 1)[0]))
+            candidates.append(yahoo_guess(exchange, tradingsymbol.replace("-", "")))
     return unique_candidates(candidates)
+
+
+def exchange_from_yahoo(yahoo_symbol: str) -> str:
+    yahoo_symbol = yahoo_symbol.upper()
+    if yahoo_symbol.endswith(".BO"):
+        return "BSE"
+    if yahoo_symbol.endswith(".NS"):
+        return "NSE"
+    return ""
 
 
 def unsupported_reason(item: dict[str, str]) -> str:
     exchange = item.get("exchange", "").upper()
     tradingsymbol = item.get("tradingsymbol", "").upper()
-    if exchange not in {"NSE", "BSE"}:
+    if exchange not in {"NSE", "BSE", "AUTO"}:
         return "unsupported exchange; only NSE/BSE listed symbols can be auto-fetched"
     if re.fullmatch(r"IN[A-Z0-9]{10}", tradingsymbol):
         return "looks like an ISIN/unlisted holding row, not a directly fetchable NSE/BSE ticker"
@@ -136,10 +159,12 @@ def upsert_symbol_mapping(payload: dict[str, Any]) -> dict[str, str]:
     if not raw_input:
         raise ValueError("Mapping needs an input symbol such as NSE:TCS.")
     input_exchange, input_symbol = split_symbol(raw_input)
-    exchange = str(payload.get("exchange") or input_exchange).strip().upper()
+    yahoo = str(payload.get("yahoo") or "").strip().upper()
+    inferred_exchange = exchange_from_yahoo(yahoo)
+    exchange = str(payload.get("exchange") or inferred_exchange or input_exchange).strip().upper()
     tradingsymbol = str(payload.get("tradingsymbol") or input_symbol).strip().upper()
     if exchange not in {"NSE", "BSE"}:
-        raise ValueError("Only NSE and BSE mappings are supported.")
+        raise ValueError("Only NSE and BSE mappings are supported. Enter a Yahoo code ending in .NS or .BO.")
     if not tradingsymbol:
         raise ValueError("Mapping needs a tradingsymbol.")
 
@@ -149,7 +174,7 @@ def upsert_symbol_mapping(payload: dict[str, Any]) -> dict[str, str]:
         "name": str(payload.get("name") or "").strip(),
         "screener": str(payload.get("screener") or tradingsymbol).strip().upper(),
         "tradingsymbol": tradingsymbol,
-        "yahoo": str(payload.get("yahoo") or yahoo_guess(exchange, tradingsymbol)).strip().upper(),
+        "yahoo": yahoo or yahoo_guess(exchange, tradingsymbol),
     }
     symbol_key = f"{exchange}:{tradingsymbol}"
     existing = read_json(SYMBOL_MAP_PATH, {"symbols": []})
@@ -719,11 +744,18 @@ def quote_from_candles(candles: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def merge_holdings_prices(holdings: list[dict[str, Any]], quotes: dict[str, Any]) -> list[dict[str, Any]]:
+def merge_holdings_prices(holdings: list[dict[str, Any]], quotes: dict[str, Any], aliases: dict[str, str] | None = None) -> list[dict[str, Any]]:
     merged: list[dict[str, Any]] = []
+    aliases = aliases or {}
     for holding in holdings:
         row = dict(holding)
-        key = f"{row.get('exchange', '').upper()}:{row.get('tradingsymbol', '').upper()}"
+        raw_key = f"{row.get('exchange', '').upper()}:{row.get('tradingsymbol', '').upper()}"
+        key = aliases.get(raw_key, raw_key)
+        if ":" in key and key != raw_key:
+            resolved_exchange, resolved_symbol = key.split(":", 1)
+            row["resolved_from_exchange"] = row.get("exchange")
+            row["exchange"] = resolved_exchange
+            row["tradingsymbol"] = resolved_symbol
         quote = quotes.get(key)
         if quote and quote.get("last_price") is not None:
             last_price = quote["last_price"]
@@ -759,6 +791,7 @@ def refresh_free_data(
     quotes: dict[str, Any] = {}
     candles: dict[str, list[dict[str, Any]]] = {}
     fundamentals: dict[str, dict[str, Any]] = {}
+    symbol_aliases: dict[str, str] = {}
     errors: list[str] = []
 
     for item in resolved:
@@ -774,6 +807,13 @@ def refresh_free_data(
         for yahoo_symbol in yahoo_candidates(item):
             try:
                 series = fetch_yahoo_candles(yahoo_symbol, days)
+                inferred_exchange = exchange_from_yahoo(yahoo_symbol)
+                if item.get("exchange") == "AUTO" and inferred_exchange:
+                    item["exchange"] = inferred_exchange
+                    item["kite_key"] = f"{inferred_exchange}:{item.get('tradingsymbol', '').upper()}"
+                key = item["kite_key"]
+                symbol_aliases[str(item.get("input") or "").upper()] = key
+                symbol_aliases[f"AUTO:{item.get('tradingsymbol', '').upper()}"] = key
                 candles[key] = series
                 quotes[key] = quote_from_candles(series)
                 used_yahoo_symbol = yahoo_symbol
@@ -801,7 +841,7 @@ def refresh_free_data(
             errors.append(f"{key}: could not fetch Screener company/fundamental data: {exc}")
         fundamentals[key] = merge_fundamentals(yahoo_fundamentals, screener_fundamentals)
 
-    holdings = merge_holdings_prices(stored_holdings, quotes) if return_holdings and stored_holdings else []
+    holdings = merge_holdings_prices(stored_holdings, quotes, symbol_aliases) if return_holdings and stored_holdings else []
 
     snapshot = {
         "provider": "free_yahoo_eod",

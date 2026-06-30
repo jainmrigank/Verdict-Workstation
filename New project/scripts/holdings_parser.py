@@ -20,7 +20,7 @@ SUFFIX_EXCHANGES = {
     "-ST": "NSE",
     "-EQ": "NSE",
 }
-MARKET_EXCHANGES = {"NSE", "BSE"}
+MARKET_EXCHANGES = {"NSE", "BSE", "AUTO"}
 ISIN_LIKE_RE = re.compile(r"IN[A-Z0-9]{10}")
 
 
@@ -48,7 +48,7 @@ def coerce_number(value: Any) -> float | None:
 
 def clean_symbol(raw_symbol: str) -> tuple[str, str]:
     symbol = raw_symbol.strip().upper()
-    exchange = "NSE"
+    exchange = "AUTO"
     for suffix, suffix_exchange in SUFFIX_EXCHANGES.items():
         if symbol.endswith(suffix):
             symbol = symbol[: -len(suffix)]
