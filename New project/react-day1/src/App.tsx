@@ -1014,7 +1014,7 @@ function canonicalCoverageSymbol(snapshot: Snapshot, symbol: string, aliases: Ma
   return normalized
 }
 
-function orderedSnapshotSymbols(snapshot: Snapshot) {
+function orderedSnapshotSymbols(snapshot: Snapshot, options: { includeCachedFundamentals?: boolean } = {}) {
   const seen = new Set<string>()
   const symbols: string[] = []
   const aliases = coverageAliasMap(snapshot)
@@ -1027,9 +1027,16 @@ function orderedSnapshotSymbols(snapshot: Snapshot) {
     symbols.push(canonical)
   }
   snapshot.symbols.forEach((symbol) => add(symbol.kite_key || symbol.input))
+  snapshot.upload?.symbols.forEach(add)
+  snapshot.holdings.forEach((holding) => {
+    const key = holdingKey(holding)
+    if (key && !key.startsWith('UNLISTED:')) add(key)
+  })
   Object.keys(snapshot.quotes).forEach(add)
   Object.keys(snapshot.candles).forEach(add)
-  Object.keys(snapshot.fundamentals ?? {}).forEach(add)
+  if (options.includeCachedFundamentals) {
+    Object.keys(snapshot.fundamentals ?? {}).forEach(add)
+  }
   return symbols
 }
 
@@ -1130,10 +1137,15 @@ function buildMissingDataIssues(snapshot: Snapshot, coverage: SyncCoverage): Mis
   })
 }
 
-function mergeFundamentals(refreshedSnapshot: Snapshot, previousSnapshot: Snapshot) {
+function currentSnapshotSymbolSet(snapshot: Snapshot) {
+  return new Set(orderedSnapshotSymbols(snapshot).map((symbol) => symbol.toUpperCase()))
+}
+
+function mergeFundamentals(refreshedSnapshot: Snapshot, previousSnapshot: Snapshot, options: { retainAllPrevious?: boolean } = {}) {
   const merged: Record<string, CompanyFundamentals> = {}
+  const currentSymbols = options.retainAllPrevious ? null : currentSnapshotSymbolSet(refreshedSnapshot)
   for (const [key, fundamentals] of Object.entries(previousSnapshot.fundamentals ?? {})) {
-    if (Object.keys(fundamentals ?? {}).length > 0) {
+    if (Object.keys(fundamentals ?? {}).length > 0 && (options.retainAllPrevious || currentSymbols?.has(key.toUpperCase()))) {
       merged[key] = fundamentals
     }
   }
@@ -1159,7 +1171,7 @@ function uniqueMessages(messages: string[]) {
 function mergeRefreshedSnapshot(refreshedSnapshot: Snapshot, previousSnapshot: Snapshot, options: { retainMarketData?: boolean } = {}) {
   const refreshedCount = filledFundamentalsCount(refreshedSnapshot)
   const previousCount = filledFundamentalsCount(previousSnapshot)
-  const fundamentals = mergeFundamentals(refreshedSnapshot, previousSnapshot)
+  const fundamentals = mergeFundamentals(refreshedSnapshot, previousSnapshot, { retainAllPrevious: Boolean(options.retainMarketData) })
   const retainedCount = filledFundamentalsRecordCount(fundamentals)
   const quotes = options.retainMarketData
     ? { ...(previousSnapshot.quotes ?? {}), ...(refreshedSnapshot.quotes ?? {}) }
