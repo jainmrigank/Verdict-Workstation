@@ -297,6 +297,7 @@ type AnalysisForm = {
 type AnalysisResult = {
   verdict: string
   verdictClass: 'needs-data' | 'avoid' | 'reduce' | 'watch' | 'hold' | 'buy'
+  decisionMode: 'fresh-entry' | 'holding-review'
   score: number
   confidence: number
   confidenceLabel: string
@@ -306,8 +307,14 @@ type AnalysisResult = {
   positionPnlPct?: number
   portfolioWeight?: number
   riskCapital?: number
+  defaultRiskPercent?: number
+  capitalShares?: number
+  starterShares?: number
   suggestedShares?: number
   suggestedDeployment?: number
+  suggestedQuantityLabel: string
+  entryPlan: string
+  exitPlan: string
   missing: string[]
   actions: string[]
   positives: string[]
@@ -1970,6 +1977,20 @@ function scoreMetric(value: number | undefined, scoreForValue: (value: number) =
   return value === undefined ? missingScore : scoreForValue(value)
 }
 
+function defaultRiskPercentForProfile(profile: RiskProfile) {
+  if (profile === 'conservative') return 1
+  if (profile === 'balanced_aggressive') return 2
+  if (profile === 'aggressive') return 3
+  return 1.5
+}
+
+function starterFractionForProfile(profile: RiskProfile) {
+  if (profile === 'conservative') return 0.25
+  if (profile === 'balanced_aggressive') return 0.4
+  if (profile === 'aggressive') return 0.5
+  return 0.33
+}
+
 function latestStatementNumber(fundamentals: CompanyFundamentals | undefined, key: string) {
   return fundamentals?.statement_summary?.[key]?.numeric
 }
@@ -2268,7 +2289,18 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
   const maxRisk = parseNumber(form.maxRisk)
   const invalidationPrice = parseNumber(form.invalidationPrice)
   const targetPrice = parseNumber(form.targetPrice)
-  const riskCapital = capital && maxRisk ? (form.riskMode === 'percent' ? capital * (maxRisk / 100) : maxRisk) : undefined
+  const decisionMode: AnalysisResult['decisionMode'] = form.alreadyHold ? 'holding-review' : 'fresh-entry'
+  const defaultRiskPercent = defaultRiskPercentForProfile(form.riskProfile)
+  const fallbackRiskCapital = capital ? capital * (defaultRiskPercent / 100) : undefined
+  const riskCapital = capital
+    ? maxRisk
+      ? form.riskMode === 'percent'
+        ? capital * (maxRisk / 100)
+        : maxRisk
+      : fallbackRiskCapital
+    : undefined
+  const capitalShares = capital && ltp ? Math.floor(capital / ltp) : undefined
+  const starterShares = capitalShares ? Math.max(1, Math.floor(capitalShares * starterFractionForProfile(form.riskProfile))) : undefined
   const needsFreshCapital = !form.alreadyHold
   const riskPlanDefined = Boolean(invalidationPrice && (form.alreadyHold || riskCapital))
 
@@ -2623,8 +2655,20 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
   })
 
   const riskSignals: AdaptiveSignal[] = []
-  addSignal(riskSignals, 'Risk', 'Position drawdown', formatPercent(positionPnlPct), scoreMetric(positionPnlPct, (value) => (value > 12 ? 70 : value > -8 ? 56 : value > -20 ? 42 : value > -50 ? 28 : 18)), 1, 'Deep drawdowns reduce the score because breakeven needs a large recovery and averaging down becomes dangerous.')
-  addSignal(riskSignals, 'Risk', 'Portfolio weight', formatPercent(portfolioWeight), scoreMetric(portfolioWeight, (value) => (value <= 8 ? 70 : value <= 12 ? 58 : value <= 20 ? 42 : 28)), 0.9, 'Concentration controls how much one company-specific error can hurt the full portfolio.')
+  if (decisionMode === 'fresh-entry') {
+    addSignal(
+      riskSignals,
+      'Risk',
+      'Fresh quantity discipline',
+      capitalShares === undefined ? '-' : `${formatNumber(starterShares)} starter / ${formatNumber(capitalShares)} max`,
+      capitalShares === undefined ? 38 : starterShares !== undefined && starterShares < capitalShares ? 66 : 50,
+      1,
+      'Fresh-entry risk starts with not oversizing. The app favours staged buying unless the setup has a complete risk plan.',
+    )
+  } else {
+    addSignal(riskSignals, 'Risk', 'Position drawdown', formatPercent(positionPnlPct), scoreMetric(positionPnlPct, (value) => (value > 12 ? 70 : value > -8 ? 56 : value > -20 ? 42 : value > -50 ? 28 : 18)), 1, 'Deep drawdowns reduce the score because breakeven needs a large recovery and averaging down becomes dangerous.')
+    addSignal(riskSignals, 'Risk', 'Portfolio weight', formatPercent(portfolioWeight), scoreMetric(portfolioWeight, (value) => (value <= 8 ? 70 : value <= 12 ? 58 : value <= 20 ? 42 : 28)), 0.9, 'Concentration controls how much one company-specific error can hurt the full portfolio.')
+  }
   const riskPerShareForScore = ltp && invalidationPrice && invalidationPrice < ltp ? ltp - invalidationPrice : undefined
   const rewardRiskForScore = targetPrice && ltp && riskPerShareForScore && targetPrice > ltp ? (targetPrice - ltp) / riskPerShareForScore : undefined
   addSignal(riskSignals, 'Risk', 'Reward/risk', rewardRiskForScore === undefined ? '-' : `${rewardRiskForScore.toFixed(1)}x`, scoreMetric(rewardRiskForScore, (value) => (value >= 2 ? 74 : value >= 1.5 ? 60 : value > 0 ? 36 : 28), 40), 0.9, 'Reward/risk decides whether the potential upside justifies the defined downside.')
@@ -2674,7 +2718,16 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
     { label: 'Technical structure', score: Math.round(technicalScore), weight: normalisedWeights.technical, tone: toneFromScore(technicalScore), rationale: 'Trend, moving averages, RSI, MACD, ATR, VWAP, Bollinger position, patterns, and liquidity.' },
     { label: 'Fundamental quality', score: Math.round(fundamentalScore), weight: normalisedWeights.fundamental, tone: toneFromScore(fundamentalScore), rationale: 'All 19 ratio-card metrics, including valuation, profitability, debt, growth, and cash flow.' },
     { label: 'Statement flow', score: Math.round(statementScore), weight: normalisedWeights.statements, tone: toneFromScore(statementScore), rationale: 'Sales, PAT, CFO, EPS, reserves, borrowings, and cash-flow evidence.' },
-    { label: 'Risk and portfolio', score: Math.round(riskScore), weight: normalisedWeights.risk, tone: toneFromScore(riskScore), rationale: 'Drawdown, concentration, reward/risk, invalidation, risk budget, and the legacy checklist.' },
+    {
+      label: decisionMode === 'fresh-entry' ? 'Risk and entry plan' : 'Risk and portfolio',
+      score: Math.round(riskScore),
+      weight: normalisedWeights.risk,
+      tone: toneFromScore(riskScore),
+      rationale:
+        decisionMode === 'fresh-entry'
+          ? 'Capital, starter quantity, reward/risk, invalidation, risk budget, and the legacy checklist.'
+          : 'Drawdown, concentration, reward/risk, invalidation, risk budget, and the legacy checklist.',
+    },
     { label: 'Updates and events', score: Math.round(newsScore), weight: normalisedWeights.news, tone: toneFromScore(newsScore), rationale: 'Top company/exchange updates and event tone.' },
   ]
   const adaptiveSignals = [...technicalSignals, ...fundamentalSignals, ...statementSignals, ...riskSignals, ...newsSignals]
@@ -2700,21 +2753,40 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
   let verdictClass: AnalysisResult['verdictClass'] = 'needs-data'
 
   if (missing.length === 0) {
-    if (finalScore >= 75) {
-      verdict = 'Buy/Add Candidate'
-      verdictClass = 'buy'
-    } else if (finalScore >= 62) {
-      verdict = 'Hold or Add on Dips'
-      verdictClass = 'hold'
-    } else if (finalScore >= 48) {
-      verdict = 'Hold and Watch'
-      verdictClass = 'watch'
-    } else if (finalScore >= 32) {
-      verdict = 'Reduce Risk'
-      verdictClass = 'reduce'
+    if (decisionMode === 'fresh-entry') {
+      if (finalScore >= 75) {
+        verdict = 'Buy Candidate'
+        verdictClass = 'buy'
+      } else if (finalScore >= 62) {
+        verdict = 'Buy on Pullback'
+        verdictClass = 'hold'
+      } else if (finalScore >= 48) {
+        verdict = 'Watchlist: Wait for Entry'
+        verdictClass = 'watch'
+      } else if (finalScore >= 32) {
+        verdict = 'Avoid Fresh Buy for Now'
+        verdictClass = 'reduce'
+      } else {
+        verdict = 'Do Not Buy'
+        verdictClass = 'avoid'
+      }
     } else {
-      verdict = 'Avoid or Exit Review'
-      verdictClass = 'avoid'
+      if (finalScore >= 75) {
+        verdict = 'Add / Continue Holding'
+        verdictClass = 'buy'
+      } else if (finalScore >= 62) {
+        verdict = 'Hold or Add on Dips'
+        verdictClass = 'hold'
+      } else if (finalScore >= 48) {
+        verdict = 'Hold and Watch'
+        verdictClass = 'watch'
+      } else if (finalScore >= 32) {
+        verdict = 'Reduce Risk'
+        verdictClass = 'reduce'
+      } else {
+        verdict = 'Exit Review'
+        verdictClass = 'avoid'
+      }
     }
   }
 
@@ -2738,42 +2810,106 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
   const riskPerShare = ltp && invalidationPrice && invalidationPrice < ltp ? ltp - invalidationPrice : undefined
   const rewardRisk =
     targetPrice && ltp && riskPerShare && targetPrice > ltp ? (targetPrice - ltp) / riskPerShare : undefined
-
-  const doItems = [
-    missing.length > 0
-      ? `Complete the missing inputs first: ${missing.join(', ')}. The score stays at zero until the app has enough data for a fair read.`
-      : `Treat this as a ${verdict.toLowerCase()} setup, not a blind order. Confirm price, corporate announcements, and the latest results before acting.`,
-    invalidationPrice && ltp && invalidationPrice < ltp
-      ? `Use ${formatInr(invalidationPrice)} as the current invalidation reference. If price breaks it, the thesis needs a fresh review instead of emotional averaging.`
-      : form.alreadyHold
-        ? 'Set an invalidation level for the existing holding. It gives you a clear review point even if you are not adding fresh capital.'
-        : 'Set an invalidation price before adding capital. Without it, the app cannot tell how much money is actually at risk.',
+  const riskBudgetSourceText = maxRisk
+    ? form.riskMode === 'percent'
+      ? formatPlainPercent(maxRisk)
+      : formatInr(maxRisk)
+    : `${riskProfileLabels[form.riskProfile]} default of ${formatPlainPercent(defaultRiskPercent)}`
+  const suggestedQuantityLabel =
     suggestedShares !== undefined && suggestedShares > 0
-      ? `Cap any fresh risk-sized deployment near ${formatNumber(suggestedShares)} shares, about ${formatInr(suggestedDeployment)}, unless you deliberately change the risk budget.`
-      : form.alreadyHold && !capital
-        ? 'Because this is a holding review with no fresh capital entered, focus on hold/reduce/exit discipline rather than add-more sizing.'
-        : 'Keep sizing conservative until target, invalidation, and capital risk are fully defined.',
-    marketCapCr === undefined || debtEquity === undefined || roce === undefined || pe === undefined || form.profitTrend === 'unknown'
-      ? 'Add the missing fundamentals from annual reports or a trusted screener: market cap, debt/equity, ROCE, P/E, and profit trend.'
-      : 'Cross-check the supplied fundamentals against the latest annual report, quarterly results, and exchange filings.',
-  ]
+      ? `${formatNumber(suggestedShares)} risk-sized`
+      : starterShares !== undefined && decisionMode === 'fresh-entry'
+        ? `${formatNumber(starterShares)} starter / ${formatNumber(capitalShares)} max by capital`
+        : '-'
+  const entryPlan =
+    missing.length > 0
+      ? `Complete the missing inputs first: ${missing.join(', ')}.`
+      : decisionMode === 'fresh-entry'
+        ? finalScore >= 75
+          ? `Fresh buy candidate. Prefer staged entry: start with about ${formatNumber(starterShares)} shares, then add only if price confirms strength and fundamentals remain intact.`
+          : finalScore >= 62
+            ? `Do not chase immediately. Keep it on the buy list and prefer a pullback near support/VWAP/20-EMA, or a strong close above resistance with volume confirmation.`
+            : finalScore >= 48
+              ? 'Watchlist only. Wait for a cleaner entry trigger: improving trend, stronger reward/risk, and no negative company update.'
+              : 'No fresh buy yet. The current evidence is not strong enough to justify deploying capital.'
+        : finalScore >= 62
+          ? 'Existing holding can be continued, but additions need a fresh entry trigger and risk budget.'
+          : finalScore >= 48
+            ? 'Hold only with discipline. Watch the invalidation level, company updates, and whether technical structure improves.'
+            : 'Review whether to reduce or exit. Weak evidence should not be protected only because the position already exists.'
+  const exitPlan =
+    missing.length > 0
+      ? 'Exit planning will appear after price and risk inputs are available.'
+      : invalidationPrice && ltp && invalidationPrice < ltp
+        ? `Risk line: review or exit if price closes below ${formatInr(invalidationPrice)}. This is the point where the thesis needs to be considered wrong or delayed.`
+        : verdictAtr && ltp
+          ? `No invalidation entered. A rough ATR-based review zone is near ${formatInr(Math.max(0, ltp - verdictAtr * 2))}; replace this with your actual support/invalidation level before buying.`
+          : 'Set an invalidation level before buying. Without a defined exit line, quantity and risk are guesswork.'
+
+  const doItems =
+    decisionMode === 'fresh-entry'
+      ? [
+          missing.length > 0
+            ? `Complete the missing inputs first: ${missing.join(', ')}. The score stays at zero until the app has enough data for a fair read.`
+            : entryPlan,
+          suggestedShares !== undefined && suggestedShares > 0
+            ? `Quantity plan: cap the risk-sized buy near ${formatNumber(suggestedShares)} shares, about ${formatInr(suggestedDeployment)}. This uses ${formatInr(riskCapital)} risk budget and ${formatInr(riskPerShare)} risk per share.`
+            : starterShares !== undefined
+              ? `Quantity plan: full capital can buy about ${formatNumber(capitalShares)} shares at current LTP. For a calmer first entry, consider only about ${formatNumber(starterShares)} shares until invalidation and reward/risk are defined.`
+              : 'Quantity plan needs capital and LTP. Enter capital and sync data to calculate a practical share count.',
+          exitPlan,
+          rewardRisk !== undefined
+            ? rewardRisk >= 2
+              ? `Reward/risk is ${rewardRisk.toFixed(1)}x, which is acceptable for a planned entry if the chart trigger confirms.`
+              : `Reward/risk is only ${rewardRisk.toFixed(1)}x. Prefer waiting for a better entry price or a more realistic target before buying.`
+            : 'Enter target and invalidation to convert the idea into a clear reward/risk setup.',
+          marketCapCr === undefined || debtEquity === undefined || roce === undefined || pe === undefined || form.profitTrend === 'unknown'
+            ? 'Fill missing fundamentals before committing larger capital: market cap, debt/equity, ROCE, P/E, and profit trend.'
+            : 'Cross-check fundamentals against annual report, quarterly results, and exchange filings before deploying larger capital.',
+        ]
+      : [
+          missing.length > 0
+            ? `Complete the missing inputs first: ${missing.join(', ')}. The score stays at zero until the app has enough data for a fair read.`
+            : entryPlan,
+          invalidationPrice && ltp && invalidationPrice < ltp
+            ? `Use ${formatInr(invalidationPrice)} as the current invalidation reference. If price breaks it, the thesis needs a fresh review instead of emotional averaging.`
+            : 'Set an invalidation level for the existing holding. It gives you a clear review point even if you are not adding fresh capital.',
+          suggestedShares !== undefined && suggestedShares > 0
+            ? `If adding more, cap the fresh risk-sized deployment near ${formatNumber(suggestedShares)} shares, about ${formatInr(suggestedDeployment)}, unless you deliberately change the risk budget.`
+            : !capital
+              ? 'Because this is a holding review with no fresh capital entered, focus on hold/reduce/exit discipline rather than add-more sizing.'
+              : 'Keep any add-more sizing conservative until target, invalidation, and capital risk are fully defined.',
+          marketCapCr === undefined || debtEquity === undefined || roce === undefined || pe === undefined || form.profitTrend === 'unknown'
+            ? 'Add the missing fundamentals from annual reports or a trusted screener: market cap, debt/equity, ROCE, P/E, and profit trend.'
+            : 'Cross-check the supplied fundamentals against the latest annual report, quarterly results, and exchange filings.',
+        ]
 
   if (positionPnlPct !== undefined && positionPnlPct < -15) {
     doItems.push('Re-underwrite the position from zero: ask whether you would buy it today at the current price if you did not already own it.')
   }
-  if (rewardRisk !== undefined && rewardRisk < 1.5) {
+  if (decisionMode === 'holding-review' && rewardRisk !== undefined && rewardRisk < 1.5) {
     doItems.push('Wait for a better entry or a clearer upside trigger because the current reward/risk is not attractive enough.')
   }
   if (portfolioWeight !== undefined && portfolioWeight > 12) {
     doItems.push('Check concentration before adding. A single stock already has meaningful influence on the whole portfolio.')
   }
 
-  const dontItems = [
-    'Do not average down only because your buy price is higher. Averaging is justified only when fundamentals, price structure, and risk/reward all improve.',
-    'Do not use F&O to recover losses from a weak cash position. Use derivatives only when the purpose is explicitly hedging or risk reduction.',
-    'Do not ignore liquidity. A stock can look cheap on paper but still be hard to exit if traded volume is thin.',
-    'Do not treat the score as a prediction. It is a checklist output that helps control process risk, not a guarantee of future price movement.',
-  ]
+  const dontItems =
+    decisionMode === 'fresh-entry'
+      ? [
+          'Do not buy just because the company is famous or the score is above 50. A fresh buy still needs an entry trigger, quantity plan, and exit line.',
+          'Do not deploy the full capital in one shot unless invalidation, reward/risk, liquidity, and company updates all support that level of risk.',
+          'Do not chase a sharp green candle after the move has already happened. Prefer planned entries near support, VWAP/EMA reclaim, or confirmed breakout levels.',
+          'Do not use F&O for a new idea unless the purpose is a defined hedge. Leverage can turn a normal wrong idea into a damaging mistake.',
+          'Do not ignore liquidity. A stock can look attractive on paper but still be hard to exit if traded volume is thin.',
+          'Do not treat the score as a price prediction. It is a checklist output that helps control process risk.',
+        ]
+      : [
+          'Do not average down only because your buy price is higher. Averaging is justified only when fundamentals, price structure, and risk/reward all improve.',
+          'Do not use F&O to recover losses from a weak cash position. Use derivatives only when the purpose is explicitly hedging or risk reduction.',
+          'Do not ignore liquidity. A stock can look cheap on paper but still be hard to exit if traded volume is thin.',
+          'Do not treat the score as a prediction. It is a checklist output that helps control process risk, not a guarantee of future price movement.',
+        ]
 
   if (form.constraints.avoidHighDebt) {
     dontItems.push('Do not relax the high-debt rule without a strong reason, because leverage can turn a temporary business slowdown into permanent capital damage.')
@@ -2789,9 +2925,11 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
       : confidence >= 50
         ? 'Confidence is medium because the app has workable market data but still benefits from more company-level evidence.'
         : 'Confidence is low because important quote, candle, holding, or fundamental evidence is missing.',
-    positionPnlPct !== undefined && positionPnlPct < -20
+    decisionMode === 'holding-review' && positionPnlPct !== undefined && positionPnlPct < -20
       ? 'The position drawdown is a major drag because deep losses need very large percentage gains to recover.'
-      : 'The position drawdown is not the dominant negative input from the current data.',
+      : decisionMode === 'holding-review'
+        ? 'The position drawdown is not the dominant negative input from the current data.'
+        : `Fresh-entry sizing is based on deployable capital and a ${riskBudgetSourceText} risk budget, not on any old buy price.`,
     recentTrendPct !== undefined
       ? `The recent price trend is ${formatPercent(recentTrendPct)}, so technical evidence is ${recentTrendPct >= 0 ? 'supportive' : 'not yet supportive'}.`
       : 'Trend evidence is incomplete because there are not enough cached candles.',
@@ -2809,34 +2947,44 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
         : 'No cached quote was found, so the verdict needs either a manual LTP or a successful market-data sync.',
     },
     {
-      title: '2. Position math',
+      title: decisionMode === 'fresh-entry' ? '2. Fresh buy sizing' : '2. Position math',
       plainEnglish: form.alreadyHold
         ? `Quantity ${formatNumber(quantity)}, average ${formatInr(avgPrice)}, unrealized P&L ${formatInr(positionPnl)} (${formatPercent(positionPnlPct)}).`
-        : 'No current holding was marked, so the verdict treats this as a fresh entry decision.',
+        : `No current holding was marked, so this is a fresh buy decision. At ${formatInr(ltp)}, ${formatInr(capital)} can buy about ${formatNumber(capitalShares)} shares; a calmer starter tranche is about ${formatNumber(starterShares)} shares.`,
       formula: form.alreadyHold
         ? `Cost = quantity x average price = ${positionCostText}. Value = quantity x LTP = ${positionValueText}. P&L = value - cost.`
-        : 'Fresh-entry mode ignores old average price and focuses on whether the current price is attractive for a new position.',
+        : `Maximum shares = capital / LTP. Starter tranche = maximum shares x risk-profile fraction. Risk-sized shares need invalidation and risk per share.`,
       rationale:
-        'A loss is not automatically a reason to sell, and a profit is not automatically a reason to hold. The important question is whether the business and price still justify fresh capital today.',
+        form.alreadyHold
+          ? 'A loss is not automatically a reason to sell, and a profit is not automatically a reason to hold. The important question is whether the business and price still justify fresh capital today.'
+          : 'For a fresh buy, the first job is not to predict perfectly. It is to avoid oversizing before the entry trigger and exit line are clear.',
       takeaway:
-        breakevenMove !== undefined && breakevenMove > 0
-          ? `The stock needs roughly ${formatPlainPercent(breakevenMove)} upside from the current price just to reach your average price.`
-          : 'The position is not below breakeven based on the current inputs.',
+        form.alreadyHold
+          ? breakevenMove !== undefined && breakevenMove > 0
+            ? `The stock needs roughly ${formatPlainPercent(breakevenMove)} upside from the current price just to reach your average price.`
+            : 'The position is not below breakeven based on the current inputs.'
+          : entryPlan,
     },
     {
-      title: '3. Portfolio risk',
+      title: decisionMode === 'fresh-entry' ? '3. Capital at risk' : '3. Portfolio risk',
       plainEnglish: form.alreadyHold
         ? `This stock is currently about ${formatPercent(portfolioWeight)} of the portfolio value shown in the app. ${capital ? `Fresh add-more risk budget is ${formatInr(riskCapital)}.` : 'No fresh capital was entered, so this is treated as a holding review.'}`
-        : `This is being treated as a new position. Your risk budget is ${formatInr(riskCapital)}.`,
+        : `This is being treated as a new position. Your risk budget is ${formatInr(riskCapital)}, using ${riskBudgetSourceText}.`,
       formula: form.alreadyHold
         ? 'Portfolio weight = position value / total portfolio value. Fresh risk budget is calculated only if additional capital is supplied.'
-        : 'Risk budget = capital x max-risk % or fixed rupee risk.',
+        : 'Risk budget = capital x max-risk %. If max risk is blank, the app uses a conservative profile-based default.',
       rationale:
-        'Concentration matters because one company-specific problem can damage the whole portfolio. A high weight deserves stricter evidence before adding more.',
+        form.alreadyHold
+          ? 'Concentration matters because one company-specific problem can damage the whole portfolio. A high weight deserves stricter evidence before adding more.'
+          : 'Capital tells us how much you can deploy, but risk budget tells us how much you can afford to be wrong by. That is the number that controls quantity.',
       takeaway:
-        portfolioWeight !== undefined && portfolioWeight > 20
-          ? 'This is a high-concentration position, so the app penalises aggressive adding.'
-          : 'The current concentration is not extreme based on the loaded portfolio.',
+        form.alreadyHold
+          ? portfolioWeight !== undefined && portfolioWeight > 20
+            ? 'This is a high-concentration position, so the app penalises aggressive adding.'
+            : 'The current concentration is not extreme based on the loaded portfolio.'
+          : suggestedShares !== undefined
+            ? `Risk-sized quantity is ${formatNumber(suggestedShares)} shares from the current inputs.`
+            : 'Enter invalidation to convert the capital amount into a true risk-sized quantity.',
     },
     {
       title: '4. Price behaviour and liquidity',
@@ -2866,7 +3014,9 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
         riskPerShare !== undefined
           ? riskCapital
             ? `If invalidation is ${formatInr(invalidationPrice)}, the risk per share is ${formatInr(riskPerShare)} and the suggested risk-sized quantity is ${formatNumber(suggestedShares)} shares.`
-            : `If invalidation is ${formatInr(invalidationPrice)}, the existing holding has a clear review level. Add fresh capital only if you want risk-sized add-more quantity.`
+            : form.alreadyHold
+              ? `If invalidation is ${formatInr(invalidationPrice)}, the existing holding has a clear review level. Add fresh capital only if you want risk-sized add-more quantity.`
+              : `If invalidation is ${formatInr(invalidationPrice)}, the app can define risk per share, but capital/risk budget is still needed for exact quantity.`
           : 'No invalidation price is entered, so the app cannot compute proper risk-sized quantity.',
       formula: form.alreadyHold && !riskCapital
         ? 'Existing holding review = check invalidation, drawdown, concentration, and thesis quality. Add-more sizing needs fresh capital plus max risk.'
@@ -2891,6 +3041,7 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
   return {
     verdict,
     verdictClass,
+    decisionMode,
     score: finalScore,
     confidence,
     confidenceLabel,
@@ -2900,8 +3051,14 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
     positionPnlPct,
     portfolioWeight,
     riskCapital,
+    defaultRiskPercent,
+    capitalShares,
+    starterShares,
     suggestedShares,
     suggestedDeployment,
+    suggestedQuantityLabel,
+    entryPlan,
+    exitPlan,
     missing,
     actions,
     positives,
@@ -3015,6 +3172,7 @@ function App() {
   const analysis = useMemo(() => buildAnalysis(form, activeSnapshot, cacheState), [activeSnapshot, cacheState, form])
   const portfolio = useMemo(() => portfolioSummary(activeSnapshot), [activeSnapshot])
   const portfolioReturn = portfolio.cost ? (portfolio.pnl / portfolio.cost) * 100 : 0
+  const capitalNum = parseNumber(form.capital)
 
   const marketDataUrl = useMemo(() => marketDataBaseUrl(), [])
   const marketDataDisplayUrl = marketDataUrl || 'Set VITE_MARKET_DATA_BASE_URL to your HTTPS data bridge'
@@ -4182,7 +4340,9 @@ function App() {
                   <FieldLabel help={requiredHelp.maxRisk}>{isHoldingReview ? 'Fresh max risk' : 'Max risk'}</FieldLabel>
                   <input inputMode="decimal" value={form.maxRisk} onChange={(event) => updateForm('maxRisk', event.target.value)} />
                   <span className="field-note">
-                    {isHoldingReview ? 'Optional unless you are planning an add-more trade.' : 'Used with capital and invalidation to estimate risk-sized quantity.'}
+                    {isHoldingReview
+                      ? 'Optional unless you are planning an add-more trade.'
+                      : `Optional. If blank, the app uses the ${riskProfileLabels[form.riskProfile]} default of ${formatPlainPercent(analysis.defaultRiskPercent)}.`}
                   </span>
                 </label>
                 <label className="field">
@@ -4299,9 +4459,19 @@ function App() {
           >
 
             <p className="verdict-summary">
-              The app reads this as <strong>{analysis.verdict}</strong> with {analysis.confidenceLabel.toLowerCase()} confidence. It is using{' '}
-              {formatInr(analysis.ltp)} as the analysis price, {formatPercent(analysis.positionPnlPct)} position P&L, and{' '}
-              {formatPercent(analysis.portfolioWeight)} portfolio weight.
+              {isHoldingReview ? (
+                <>
+                  The app reads this existing position as <strong>{analysis.verdict}</strong> with {analysis.confidenceLabel.toLowerCase()} confidence.
+                  It is using {formatInr(analysis.ltp)} as the analysis price, {formatPercent(analysis.positionPnlPct)} position P&L, and{' '}
+                  {formatPercent(analysis.portfolioWeight)} portfolio weight.
+                </>
+              ) : (
+                <>
+                  This is a fresh buy decision. The app reads it as <strong>{analysis.verdict}</strong> with {analysis.confidenceLabel.toLowerCase()}{' '}
+                  confidence. It is using {formatInr(analysis.ltp)} as the analysis price, {formatInr(capitalNum)} deployable capital, and{' '}
+                  {formatInr(analysis.riskCapital)} risk budget.
+                </>
+              )}
             </p>
 
             <div className="metric-grid compact-metrics">
@@ -4310,30 +4480,70 @@ function App() {
                 <strong>{analysis.quoteKey}</strong>
               </div>
               <div className="metric tone-neutral">
-                <span>Quantity</span>
-                <strong>{formatNumber(quantityNum)}</strong>
-              </div>
-              <div className="metric tone-neutral">
                 <span>LTP</span>
                 <strong>{formatInr(analysis.ltp)}</strong>
               </div>
-              <div className={`metric ${pnlTone}`}>
-                <span>P&L</span>
-                <strong className={(analysis.positionPnl ?? 0) >= 0 ? 'positive' : 'negative'}>{formatInr(analysis.positionPnl)}</strong>
-              </div>
-              <div className={`metric ${pnlPercentTone}`}>
-                <span>P&L %</span>
-                <strong className={(analysis.positionPnl ?? 0) >= 0 ? 'positive' : 'negative'}>{formatPercent(analysis.positionPnlPct)}</strong>
-              </div>
-              <div className={`metric tone-${portfolioWeightTone}`}>
-                <span>Weight</span>
-                <strong>{formatPercent(analysis.portfolioWeight)}</strong>
-              </div>
+              {isHoldingReview ? (
+                <>
+                  <div className="metric tone-neutral">
+                    <span>Quantity</span>
+                    <strong>{formatNumber(quantityNum)}</strong>
+                  </div>
+                  <div className={`metric ${pnlTone}`}>
+                    <span>P&L</span>
+                    <strong className={(analysis.positionPnl ?? 0) >= 0 ? 'positive' : 'negative'}>{formatInr(analysis.positionPnl)}</strong>
+                  </div>
+                  <div className={`metric ${pnlPercentTone}`}>
+                    <span>P&L %</span>
+                    <strong className={(analysis.positionPnl ?? 0) >= 0 ? 'positive' : 'negative'}>{formatPercent(analysis.positionPnlPct)}</strong>
+                  </div>
+                  <div className={`metric tone-${portfolioWeightTone}`}>
+                    <span>Weight</span>
+                    <strong>{formatPercent(analysis.portfolioWeight)}</strong>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="metric tone-neutral">
+                    <span>Capital</span>
+                    <strong>{formatInr(capitalNum)}</strong>
+                  </div>
+                  <div className={analysis.suggestedShares ? 'metric tone-positive' : 'metric tone-neutral'}>
+                    <span>Quantity plan</span>
+                    <strong>{analysis.suggestedQuantityLabel}</strong>
+                  </div>
+                  <div className={analysis.riskCapital ? 'metric tone-neutral' : 'metric tone-negative'}>
+                    <span>Risk budget</span>
+                    <strong>{formatInr(analysis.riskCapital)}</strong>
+                  </div>
+                  <div className={invalidationPriceNum ? 'metric tone-neutral' : 'metric tone-negative'}>
+                    <span>Exit line</span>
+                    <strong>{formatInr(invalidationPriceNum)}</strong>
+                  </div>
+                  <div className={rewardRisk === undefined ? 'metric tone-neutral' : rewardRisk >= 2 ? 'metric tone-positive' : 'metric tone-negative'}>
+                    <span>Reward/risk</span>
+                    <strong>{rewardRisk === undefined ? '-' : `${rewardRisk.toFixed(1)}x`}</strong>
+                  </div>
+                </>
+              )}
               <div className={`metric tone-${confidenceTone}`}>
                 <span>Confidence</span>
                 <strong>{analysis.confidenceLabel}</strong>
               </div>
             </div>
+
+            {!isHoldingReview && (
+              <div className="fresh-plan-grid">
+                <article className="fresh-plan-card tone-positive">
+                  <span>Buy Plan</span>
+                  <p>{analysis.entryPlan}</p>
+                </article>
+                <article className="fresh-plan-card tone-negative">
+                  <span>Exit Discipline</span>
+                  <p>{analysis.exitPlan}</p>
+                </article>
+              </div>
+            )}
 
             <section className="verdict-evidence-box" aria-label="Verdict evidence and missing metrics">
               <div className="verdict-evidence-heading">
@@ -4354,8 +4564,9 @@ function App() {
                   <strong>What is being used in the verdict?</strong>
                   <p>
                     The score blends price/OHLCV, RSI, MACD, ATR, VWAP, Bollinger Bands, moving averages, trend, liquidity, candlestick patterns,
-                    all 19 ratio cards, sales, EPS, CFO vs PAT, reserves, borrowings, cash flow, top company updates, portfolio weight, drawdown,
-                    reward/risk, personal constraints, risk profile, and horizon-specific weights.
+                    all 19 ratio cards, sales, EPS, CFO vs PAT, reserves, borrowings, cash flow, top company updates,{' '}
+                    {isHoldingReview ? 'portfolio weight, drawdown,' : 'capital, risk budget, entry quantity,'} reward/risk, personal constraints,
+                    risk profile, and horizon-specific weights.
                   </p>
                 </article>
               </div>
@@ -4411,12 +4622,18 @@ function App() {
             </CollapsibleSection>
 
             <div className="guidance-grid">
-              <CollapsibleSection className="guidance-card do-card nested-collapse" headingClassName="subsection-heading" headingLevel={3} id="do-next-heading" title="Steps to Do Next">
+              <CollapsibleSection
+                className="guidance-card do-card nested-collapse"
+                headingClassName="subsection-heading"
+                headingLevel={3}
+                id="do-next-heading"
+                title={isHoldingReview ? 'Steps to Do Next' : 'Buy, Quantity, and Exit Plan'}
+              >
                 <ul>
                   {analysis.doItems.map((item) => (
                     <li key={item}>{item}</li>
                   ))}
-                  {analysis.suggestedShares !== undefined && (
+                  {isHoldingReview && analysis.suggestedShares !== undefined && (
                     <li>
                       Suggested deployment: {formatNumber(analysis.suggestedShares)} shares, about {formatInr(analysis.suggestedDeployment)}.
                     </li>
@@ -4440,7 +4657,7 @@ function App() {
             </div>
 
             <div className="verdict-columns">
-              <CollapsibleSection className="sub-panel nested-collapse" headingClassName="subsection-heading" headingLevel={3} id="raw-action-heading" title="Raw Action Signals">
+              <CollapsibleSection className="sub-panel nested-collapse" headingClassName="subsection-heading" headingLevel={3} id="raw-action-heading" title={isHoldingReview ? 'Raw Action Signals' : 'Entry and Exit Signals'}>
                 <ul>
                   {analysis.actions.map((item) => (
                     <li key={item}>{item}</li>
