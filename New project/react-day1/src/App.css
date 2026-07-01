@@ -363,7 +363,22 @@ input:disabled {
 }
 
 .subsection-card-grid {
-  grid-template-columns: repeat(3, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr));
+}
+
+.technical-card-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
+  align-items: stretch;
+}
+
+.technical-card-grid .visual-card {
+  height: 100%;
+}
+
+@media (min-width: 1280px) {
+  .technical-card-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 
 .fundamental-quality-grid {
@@ -389,6 +404,11 @@ input:disabled {
 
 .fundamental-empty-card {
   grid-column: 1 / -1;
+}
+
+.fundamental-subgrid {
+  grid-template-columns: minmax(0, 1fr);
+  width: 100%;
 }
 
 .tone-positive {
@@ -972,6 +992,60 @@ select {
   margin: 12px 0 16px;
 }
 
+.varsity-layer-panel {
+  display: grid;
+  gap: 12px;
+  margin: 12px 0 16px;
+}
+
+.varsity-layer-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.varsity-lesson-card {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-left-width: 4px;
+  border-radius: 8px;
+  padding: 13px;
+}
+
+.varsity-lesson-card span {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.varsity-lesson-card strong {
+  color: var(--text-primary);
+  font-size: 0.96rem;
+}
+
+.varsity-lesson-card p,
+.varsity-lesson-card small {
+  margin: 0;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.varsity-lesson-card small {
+  font-size: 0.78rem;
+}
+
+.varsity-lesson-card a {
+  color: var(--accent);
+  font-size: 0.78rem;
+  font-weight: 900;
+  text-decoration: none;
+}
+
 .component-score-grid,
 .adaptive-signal-grid {
   display: grid;
@@ -1108,6 +1182,22 @@ select {
   grid-template-columns: repeat(auto-fit, minmax(min(250px, 100%), 1fr));
   gap: 14px;
   min-width: 0;
+}
+
+.visual-grid.fundamental-subgrid {
+  grid-template-columns: minmax(0, 1fr);
+  width: 100%;
+}
+
+.visual-grid.technical-card-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
+  align-items: stretch;
+}
+
+@media (min-width: 1024px) {
+  .visual-grid.technical-card-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 
 .visual-card {
@@ -1414,6 +1504,13 @@ select {
 
 .company-profile-card {
   grid-column: span 2;
+}
+
+.fundamental-subgrid .company-profile-card,
+.fundamental-subgrid .company-ratio-card,
+.fundamental-subgrid .company-updates-card {
+  grid-column: 1 / -1;
+  width: 100%;
 }
 
 .company-ratio-card {
@@ -1808,8 +1905,8 @@ li {
 }
 
 .data-settings-row {
-  grid-template-columns: minmax(180px, 280px) minmax(180px, auto);
-  align-items: end;
+  grid-template-columns: minmax(180px, max-content);
+  align-items: center;
 }
 
 .sync-scope-grid {
@@ -3523,6 +3620,7 @@ td {
   .guidance-grid,
   .verdict-evidence-grid,
   .fresh-plan-grid,
+  .varsity-layer-grid,
   .component-score-grid,
   .adaptive-signal-grid,
   .sync-scope-grid,
@@ -3626,6 +3724,7 @@ td {
   .guidance-grid,
   .verdict-evidence-grid,
   .fresh-plan-grid,
+  .varsity-layer-grid,
   .component-score-grid,
   .adaptive-signal-grid,
   .sync-scope-grid,

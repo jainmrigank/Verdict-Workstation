@@ -57,7 +57,7 @@ type ReasoningStep = {
   takeaway: string
 }
 
-type SignalGroup = 'Technical' | 'Fundamental' | 'Statements' | 'News' | 'Risk'
+type SignalGroup = 'Technical' | 'Fundamental' | 'Statements' | 'News' | 'Risk' | 'Varsity'
 
 type AdaptiveSignal = {
   group: SignalGroup
@@ -75,6 +75,23 @@ type ScoreComponent = {
   weight: number
   tone: SignalTone
   rationale: string
+}
+
+type VarsityLesson = {
+  module: 'Innerworth' | 'Sector Analysis' | 'SSE' | 'NPS'
+  title: string
+  source: string
+  tone: SignalTone
+  text: string
+  action: string
+}
+
+type SectorRule = {
+  label: string
+  match: string[]
+  metrics: string[]
+  source: string
+  text: string
 }
 
 type SyncCoverage = {
@@ -325,6 +342,7 @@ type AnalysisResult = {
   steps: ReasoningStep[]
   adaptiveSignals: AdaptiveSignal[]
   scoreComponents: ScoreComponent[]
+  varsityLessons: VarsityLesson[]
 }
 
 const starterSnapshot: Snapshot = {
@@ -553,6 +571,79 @@ const optionalHelp = {
     'When checked, sync refreshes every listed ticker from the uploaded holdings file along with the current decision ticker. Your imported portfolio table stays loaded either way.',
   serverRestart: 'Restarts the local Python data bridge on port 8787. If an older bridge is already running, manually restart it once; after that this button can restart it from the app.',
 }
+
+const varsitySourceLinks = {
+  innerworth: 'https://zerodha.com/varsity/module/innerworth/',
+  sector: 'https://zerodha.com/varsity/module/sector-analysis/',
+  sse: 'https://zerodha.com/varsity/module/social-stock-exchanges-sses/',
+  nps: 'https://zerodha.com/varsity/module/national-pension-scheme/',
+}
+
+const sectorRules: SectorRule[] = [
+  {
+    label: 'Automobiles',
+    match: ['auto', 'automobile', 'vehicle', 'passenger car', 'utility vehicle', 'two wheeler', 'car manufacturer'],
+    metrics: ['volume growth', 'market share', 'realisation', 'raw-material cost', 'dealer inventory', 'working capital'],
+    source: varsitySourceLinks.sector,
+    text: 'Automobile analysis needs more than P/E. Demand cycles, model mix, raw-material pressure, inventory, and market share can change the quality of earnings quickly.',
+  },
+  {
+    label: 'Banking and lenders',
+    match: ['bank', 'finance', 'nbfc', 'lender', 'housing finance', 'credit'],
+    metrics: ['loan growth', 'asset quality', 'NPA trend', 'capital adequacy', 'net interest margin', 'provisioning'],
+    source: varsitySourceLinks.sector,
+    text: 'Lenders should be judged with asset quality and capital strength first. Normal industrial ratios can mislead when credit losses or leverage are the real risk.',
+  },
+  {
+    label: 'Information Technology',
+    match: ['information technology', 'software', 'it services', 'technology', 'digital services'],
+    metrics: ['revenue growth', 'client concentration', 'margin trend', 'deal wins', 'currency exposure', 'employee costs'],
+    source: varsitySourceLinks.sector,
+    text: 'IT businesses need growth, margin, client, currency, and execution checks. A good balance sheet is not enough if growth visibility or margins are weakening.',
+  },
+  {
+    label: 'Cement',
+    match: ['cement', 'building material'],
+    metrics: ['capacity utilisation', 'realisation per tonne', 'power/fuel cost', 'freight cost', 'regional demand', 'debt/capex'],
+    source: varsitySourceLinks.sector,
+    text: 'Cement is cyclical and cost-sensitive. Capacity, utilisation, regional pricing, energy costs, and leverage deserve as much attention as headline profit.',
+  },
+  {
+    label: 'Insurance',
+    match: ['insurance', 'life insurance', 'general insurance'],
+    metrics: ['premium growth', 'persistency', 'claims ratio', 'combined ratio', 'solvency', 'distribution mix'],
+    source: varsitySourceLinks.sector,
+    text: 'Insurance analysis needs operating quality metrics such as persistency, claims, solvency, and distribution mix because reported profit can hide underwriting quality.',
+  },
+  {
+    label: 'Steel and metals',
+    match: ['steel', 'metal', 'iron', 'ferrous', 'mining'],
+    metrics: ['spread', 'commodity cycle', 'capacity utilisation', 'raw-material linkage', 'debt', 'global price trend'],
+    source: varsitySourceLinks.sector,
+    text: 'Steel and metals are cycle-heavy. The verdict should be cautious when commodity prices, spreads, debt, or global demand are not understood.',
+  },
+  {
+    label: 'Hotels and hospitality',
+    match: ['hotel', 'hospitality', 'resort', 'travel accommodation'],
+    metrics: ['occupancy', 'ARR', 'RevPAR', 'room additions', 'seasonality', 'debt service'],
+    source: varsitySourceLinks.sector,
+    text: 'Hotel quality depends on occupancy, pricing power, room economics, seasonality, and debt service rather than only revenue growth.',
+  },
+  {
+    label: 'Retail',
+    match: ['retail', 'store', 'supermarket', 'apparel', 'consumer retail'],
+    metrics: ['same-store sales', 'gross margin', 'inventory turns', 'store economics', 'working capital', 'lease costs'],
+    source: varsitySourceLinks.sector,
+    text: 'Retail needs store-level discipline: sales per store, margins, inventory turns, working capital, and expansion quality decide whether growth is healthy.',
+  },
+  {
+    label: 'Real Estate',
+    match: ['real estate', 'developer', 'property', 'construction', 'housing'],
+    metrics: ['pre-sales', 'collections', 'project pipeline', 'net debt', 'inventory', 'cash-flow timing'],
+    source: varsitySourceLinks.sector,
+    text: 'Real-estate analysis must separate bookings from cash collections. Project inventory, debt, execution, and cash-flow timing drive risk.',
+  },
+]
 
 const forecastHelp = {
   horizon: 'How far into the future the scenario range should extend. Short horizons rely more on volatility and technicals; long horizons rely more on fundamentals and valuation assumptions.',
@@ -2021,6 +2112,107 @@ function compactSignalText(text: string | undefined, limit = 130) {
   return compacted.length > limit ? `${compacted.slice(0, limit - 1)}...` : compacted
 }
 
+function searchableCompanyText(fundamentals: CompanyFundamentals | undefined, quoteKey: string) {
+  return [
+    quoteKey,
+    fundamentals?.name,
+    fundamentals?.sector,
+    fundamentals?.industry,
+    fundamentals?.business_summary,
+    fundamentals?.meta_description,
+    fundamentals?.key_points,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+}
+
+function findSectorRule(fundamentals: CompanyFundamentals | undefined, quoteKey: string) {
+  const haystack = searchableCompanyText(fundamentals, quoteKey)
+  return sectorRules.find((rule) => rule.match.some((term) => haystack.includes(term)))
+}
+
+function isSseLikeInstrument(fundamentals: CompanyFundamentals | undefined, quoteKey: string) {
+  const haystack = searchableCompanyText(fundamentals, quoteKey)
+  return ['social stock', 'zczp', 'zero coupon zero principal', 'non profit', 'npo ', 'development impact', 'donation'].some((term) =>
+    haystack.includes(term),
+  )
+}
+
+function processDisciplineScore(form: AnalysisForm, riskPlanDefined: boolean, rewardRisk: number | undefined) {
+  let score = 42
+  if (form.ticker.trim()) score += 5
+  if (form.alreadyHold || parseNumber(form.capital)) score += 8
+  if (parseNumber(form.maxRisk)) score += 8
+  if (riskPlanDefined) score += 14
+  if (parseNumber(form.targetPrice)) score += 6
+  if (rewardRisk !== undefined) score += rewardRisk >= 2 ? 10 : rewardRisk >= 1.5 ? 5 : -7
+  if (form.thesis.trim().length > 30) score += 5
+  if (!form.alreadyHold && !parseNumber(form.capital)) score -= 12
+  return clamp(score)
+}
+
+function buildVarsityLessons(
+  form: AnalysisForm,
+  fundamentals: CompanyFundamentals | undefined,
+  riskPlanDefined: boolean,
+  rewardRisk: number | undefined,
+  sectorRule: SectorRule | undefined,
+  sseLike: boolean,
+): VarsityLesson[] {
+  const processScore = processDisciplineScore(form, riskPlanDefined, rewardRisk)
+  const lessons: VarsityLesson[] = [
+    {
+      module: 'Innerworth',
+      title: 'Process before emotion',
+      source: varsitySourceLinks.innerworth,
+      tone: toneFromScore(processScore),
+      text:
+        processScore >= 62
+          ? 'Your setup has enough process structure to reduce impulsive decisions: symbol, money context, risk budget, and thesis controls are mostly visible.'
+          : 'The process layer is still incomplete. That raises the chance of acting from fear, regret, excitement, or the urge to be right instead of following a plan.',
+      action: riskPlanDefined
+        ? 'Keep the invalidation line visible and do not change it after price moves against you unless the thesis genuinely changes.'
+        : 'Before buying, define the invalidation line, target zone, and maximum rupee loss. Without those, quantity is only a guess.',
+    },
+    {
+      module: 'Sector Analysis',
+      title: sectorRule ? `${sectorRule.label} lens applied` : 'Sector lens pending',
+      source: sectorRule?.source ?? varsitySourceLinks.sector,
+      tone: sectorRule && fundamentals ? 'positive' : 'neutral',
+      text: sectorRule
+        ? `${sectorRule.text} The app should cross-check: ${sectorRule.metrics.join(', ')}.`
+        : 'The company did not map cleanly to one of the loaded sector modules. The verdict still uses ratios, statements, price action, and updates, but sector-specific operating metrics should be checked manually.',
+      action: sectorRule
+        ? 'Use the generic score as a first pass, then read this sector checklist before increasing position size.'
+        : 'If this is a sector with special metrics, add them in the thesis field or verify them from filings before treating the verdict as high conviction.',
+    },
+    {
+      module: 'NPS',
+      title: 'Goal money separation',
+      source: varsitySourceLinks.nps,
+      tone: 'neutral',
+      text:
+        'Retirement and long-lock-in money should not be treated like trading capital. The NPS module is used here as a guardrail: do not risk money meant for retirement, tax planning, emergency needs, or near-term obligations.',
+      action:
+        'Use the capital field only for deployable market capital. Keep retirement allocations, emergency funds, and fixed-goal money outside this decision unless you deliberately mark them as investable risk capital.',
+    },
+    {
+      module: 'SSE',
+      title: sseLike ? 'SSE-style instrument caution' : 'SSE filter not triggered',
+      source: varsitySourceLinks.sse,
+      tone: sseLike ? 'negative' : 'neutral',
+      text: sseLike
+        ? 'This looks related to social-impact fundraising or a non-standard SSE-style instrument. Normal buy/sell/hold stock logic may not apply.'
+        : 'The symbol does not look like an SSE/ZCZP/social-impact fundraising instrument, so the normal NSE/BSE equity workflow remains applicable.',
+      action: sseLike
+        ? 'Do not use chart patterns or ordinary valuation ratios alone. Confirm instrument type, liquidity, redemption terms, disclosures, and whether financial return is even the right objective.'
+        : 'No special SSE handling is needed for this instrument from the current data.',
+    },
+  ]
+  return lessons
+}
+
 function dailyVolatilityPct(candles: Candle[], lookback = 90) {
   const window = candles.slice(-lookback).filter((candle) => candle.close > 0)
   if (window.length < 3) return undefined
@@ -2263,6 +2455,8 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
   const recentTrendPct = candleTrendPct(candles, 30)
   const avgVolume20 = averageVolume(candles, 20)
   const companyFundamentals = snapshot.fundamentals?.[quoteKey]
+  const sectorRule = findSectorRule(companyFundamentals, quoteKey)
+  const sseLikeInstrument = isSseLikeInstrument(companyFundamentals, quoteKey)
   const companyMarketCap = numberFrom(companyFundamentals?.market_cap)
   const companyDebtEquity = normaliseDebtEquity(companyFundamentals?.debt_to_equity)
   const companyTrailingPe = numberFrom(companyFundamentals?.trailing_pe)
@@ -2323,6 +2517,12 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
   if (candleCount === 0) cautions.push('No historical candles are cached yet, so the technical view is incomplete.')
   if (!companyFundamentals || Object.keys(companyFundamentals).length === 0) {
     cautions.push('Fundamental data is missing. The verdict treats this as lower confidence and incomplete evidence, not as proof that the company is weak.')
+  }
+  if (sectorRule) {
+    positives.push(`Sector Analysis lens applied: ${sectorRule.label} needs checks such as ${sectorRule.metrics.slice(0, 3).join(', ')}.`)
+  }
+  if (sseLikeInstrument) {
+    cautions.push('SSE/social-impact instrument filter triggered. Normal listed-equity buy/sell logic may not apply without checking instrument terms and disclosures.')
   }
 
   if (form.riskProfile === 'conservative') score -= 5
@@ -2595,6 +2795,17 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
   )
 
   const fundamentalSignals: AdaptiveSignal[] = []
+  addSignal(
+    fundamentalSignals,
+    'Varsity',
+    'Sector-specific checklist',
+    sectorRule ? sectorRule.label : 'Pending',
+    sectorRule && companyFundamentals ? 62 : sectorRule ? 54 : 47,
+    0.55,
+    sectorRule
+      ? `Sector Analysis lens: ${sectorRule.text} Check ${sectorRule.metrics.join(', ')} before treating the ratio score as complete.`
+      : 'Sector Analysis lens: the app could not map this company to a loaded sector module, so any sector-specific operating metrics need manual review.',
+  )
   addSignal(fundamentalSignals, 'Fundamental', 'Market cap', marketCapCr === undefined ? '-' : `${formatNumber(marketCapCr)} cr`, scoreMetric(marketCapCr, (value) => (value >= 10000 ? 74 : value >= 1000 ? 56 : value >= 500 ? 42 : 30)), 0.8, 'Company size influences disclosure depth, liquidity, and fragility.')
   addSignal(fundamentalSignals, 'Fundamental', 'Trailing P/E', formatNumber(companyTrailingPe), scoreMetric(companyTrailingPe, (value) => (value > 8 && value < 30 ? 66 : value >= 30 && value <= 55 ? 50 : value > 55 ? 34 : value > 0 ? 42 : 35)), 0.75, 'P/E is valuation context and must be read with growth and earnings quality.')
   addSignal(fundamentalSignals, 'Fundamental', 'Forward P/E', formatNumber(companyForwardPe), scoreMetric(companyForwardPe, (value) => (value > 8 && value < 28 ? 66 : value >= 28 && value <= 50 ? 50 : value > 50 ? 34 : value > 0 ? 42 : 35)), 0.55, 'Forward P/E is useful when estimates are credible, but optimism deserves caution.')
@@ -2683,6 +2894,36 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
       ? 'For an existing holding, a clear invalidation level is the key risk-control input; fresh capital is only needed if you plan to add more.'
       : 'For a new position, defined invalidation plus a capital/risk budget turn opinion into a controllable trade plan.',
   )
+  const innerworthProcessScore = processDisciplineScore(form, riskPlanDefined, rewardRiskForScore)
+  addSignal(
+    riskSignals,
+    'Varsity',
+    'Innerworth process discipline',
+    innerworthProcessScore >= 62 ? 'Structured' : 'Incomplete',
+    innerworthProcessScore,
+    0.8,
+    'Innerworth psychology lessons are applied as process checks: define risk before action, avoid regret trades, keep goals realistic, and stand aside when the plan is incomplete.',
+  )
+  addSignal(
+    riskSignals,
+    'Varsity',
+    'NPS capital guardrail',
+    capital ? 'Deployable capital entered' : 'No deployable capital',
+    capital ? 56 : decisionMode === 'holding-review' ? 54 : 44,
+    0.25,
+    'The NPS module is used as a personal-finance guardrail: retirement, emergency, tax-planning, or locked-goal money should not be mixed with trade capital.',
+  )
+  if (sseLikeInstrument) {
+    addSignal(
+      riskSignals,
+      'Varsity',
+      'SSE applicability',
+      'Special instrument caution',
+      22,
+      1,
+      'The SSE module warns that social-impact and ZCZP-style instruments may not behave like ordinary listed equities; normal chart and valuation rules should be downgraded until instrument terms are verified.',
+    )
+  }
   addSignal(riskSignals, 'Risk', 'Legacy checklist', `${Math.round(clamp(score))}/100`, clamp(score), 1, 'This preserves the earlier checklist logic for constraints, holding state, liquidity, and supplied evidence.')
 
   const profileWeights =
@@ -2730,6 +2971,7 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
     },
     { label: 'Updates and events', score: Math.round(newsScore), weight: normalisedWeights.news, tone: toneFromScore(newsScore), rationale: 'Top company/exchange updates and event tone.' },
   ]
+  const varsityLessons = buildVarsityLessons(form, companyFundamentals, riskPlanDefined, rewardRiskForScore, sectorRule, sseLikeInstrument)
   const adaptiveSignals = [...technicalSignals, ...fundamentalSignals, ...statementSignals, ...riskSignals, ...newsSignals]
   const adaptiveScore =
     technicalScore * normalisedWeights.technical +
@@ -2893,6 +3135,12 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
   if (portfolioWeight !== undefined && portfolioWeight > 12) {
     doItems.push('Check concentration before adding. A single stock already has meaningful influence on the whole portfolio.')
   }
+  if (sectorRule) {
+    doItems.push(`Before increasing conviction, check the ${sectorRule.label} sector drivers: ${sectorRule.metrics.join(', ')}.`)
+  }
+  if (sseLikeInstrument) {
+    doItems.push('Verify whether this is an SSE/social-impact instrument before using ordinary equity valuation or chart signals.')
+  }
 
   const dontItems =
     decisionMode === 'fresh-entry'
@@ -2917,6 +3165,10 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
   if (form.constraints.avoidSmallCaps) {
     dontItems.push('Do not force a small-cap exception unless you are comfortable with lower liquidity, higher volatility, and weaker disclosure depth.')
   }
+  dontItems.push('Do not use retirement, emergency, tax-planning, or fixed-goal money as trade capital. Keep deployable market capital separate.')
+  if (sseLikeInstrument) {
+    dontItems.push('Do not treat an SSE/ZCZP/social-impact instrument like a normal equity trade unless instrument terms, return objective, and liquidity are clear.')
+  }
 
   const whyItems = [
     `Adaptive hybrid score is ${finalScore}/100 after weighing ${scoreComponents.map((component) => `${component.label} ${Math.round(component.weight * 100)}%`).join(', ')}.`,
@@ -2933,6 +3185,10 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
     recentTrendPct !== undefined
       ? `The recent price trend is ${formatPercent(recentTrendPct)}, so technical evidence is ${recentTrendPct >= 0 ? 'supportive' : 'not yet supportive'}.`
       : 'Trend evidence is incomplete because there are not enough cached candles.',
+    sectorRule
+      ? `Sector Analysis adds a ${sectorRule.label} lens, so the verdict asks you to verify sector drivers instead of relying only on generic ratios.`
+      : 'Sector Analysis did not find a specialised sector mapping, so the verdict stays more dependent on generic ratios, statements, price action, and updates.',
+    `Innerworth psychology checks the quality of your process. Current process discipline is ${Math.round(innerworthProcessScore)}/100, based on risk budget, invalidation, target, thesis, and whether you are acting from a defined plan.`,
   ]
 
   const steps = [
@@ -3029,7 +3285,19 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
           : 'Enter both target and invalidation to judge whether the payoff is worth the risk.',
     },
     {
-      title: '7. Verdict synthesis',
+      title: '7. Varsity knowledge layer',
+      plainEnglish: sectorRule
+        ? `The sector lens is ${sectorRule.label}. The process layer score is ${Math.round(innerworthProcessScore)}/100. ${sseLikeInstrument ? 'The SSE filter is active, so normal equity logic is downgraded.' : 'The SSE filter is not active, so normal listed-equity logic applies.'}`
+        : `No specialised sector lens was matched. The process layer score is ${Math.round(innerworthProcessScore)}/100. ${sseLikeInstrument ? 'The SSE filter is active, so normal equity logic is downgraded.' : 'The SSE filter is not active, so normal listed-equity logic applies.'}`,
+      formula: 'Varsity layer = psychology/process checks + sector-specific operating checklist + capital-segregation guardrail + SSE applicability check.',
+      rationale:
+        'This layer is not a price predictor. It makes the analysis behave more like a careful mentor: check the right sector metrics, define the risk before acting, avoid emotional decisions, and keep retirement or goal money separate from trade capital.',
+      takeaway: sectorRule
+        ? `Before acting, verify these ${sectorRule.label} drivers: ${sectorRule.metrics.join(', ')}.`
+        : 'Before acting, add any special sector drivers you know in the thesis field or check filings manually.',
+    },
+    {
+      title: '8. Verdict synthesis',
       plainEnglish: `The final verdict is ${verdict} with a score of ${finalScore}/100 and ${confidenceLabel.toLowerCase()} confidence.`,
       formula: `Adaptive score = technical ${Math.round(normalisedWeights.technical * 100)}% + ratios ${Math.round(normalisedWeights.fundamental * 100)}% + statements ${Math.round(normalisedWeights.statements * 100)}% + risk ${Math.round(normalisedWeights.risk * 100)}% + updates ${Math.round(normalisedWeights.news * 100)}%.`,
       rationale:
@@ -3069,6 +3337,7 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
     steps,
     adaptiveSignals,
     scoreComponents,
+    varsityLessons,
   }
 }
 
@@ -4245,6 +4514,17 @@ function App() {
                     <option value="BSE">BSE</option>
                   </select>
                 </label>
+                <label className="field">
+                  <FieldLabel help="How many daily candles to request when you click Load & Analyse or Sync Market Data. Longer windows improve long-term trend and support/resistance context, but take longer to refresh.">History window</FieldLabel>
+                  <input
+                    min="30"
+                    max="3000"
+                    step="30"
+                    type="number"
+                    value={days}
+                    onChange={(event) => setDays(Number(event.target.value))}
+                  />
+                </label>
                 {!isHoldingReview && (
                   <label className="field">
                     <FieldLabel help={requiredHelp.capital}>Capital to deploy</FieldLabel>
@@ -4566,7 +4846,7 @@ function App() {
                     The score blends price/OHLCV, RSI, MACD, ATR, VWAP, Bollinger Bands, moving averages, trend, liquidity, candlestick patterns,
                     all 19 ratio cards, sales, EPS, CFO vs PAT, reserves, borrowings, cash flow, top company updates,{' '}
                     {isHoldingReview ? 'portfolio weight, drawdown,' : 'capital, risk budget, entry quantity,'} reward/risk, personal constraints,
-                    risk profile, and horizon-specific weights.
+                    risk profile, horizon-specific weights, Innerworth process discipline, Sector Analysis checklists, NPS capital segregation, and SSE applicability.
                   </p>
                 </article>
               </div>
@@ -4619,6 +4899,30 @@ function App() {
                   ))}
                 </div>
               </CollapsibleSection>
+            </CollapsibleSection>
+
+            <CollapsibleSection
+              className="varsity-layer-panel sub-panel nested-collapse"
+              headingClassName="subsection-heading"
+              headingLevel={3}
+              id="varsity-layer-heading"
+              title="Varsity Knowledge Applied"
+            >
+              <div className="varsity-layer-grid">
+                {analysis.varsityLessons.map((lesson) => (
+                  <article className={`varsity-lesson-card tone-${lesson.tone}`} key={`${lesson.module}-${lesson.title}`}>
+                    <div>
+                      <span>{lesson.module}</span>
+                      <strong>{lesson.title}</strong>
+                    </div>
+                    <p>{lesson.text}</p>
+                    <small>{lesson.action}</small>
+                    <a href={lesson.source} target="_blank" rel="noreferrer">
+                      Source module
+                    </a>
+                  </article>
+                ))}
+              </div>
             </CollapsibleSection>
 
             <div className="guidance-grid">
@@ -5284,7 +5588,7 @@ function App() {
                 id="technical-risk-heading"
                 title="Position, Risk, Range, and Liquidity"
               >
-                <div className="visual-grid subsection-card-grid">
+                <div className="visual-grid subsection-card-grid technical-card-grid">
               <article className={`visual-card price-story tone-${trendTone}`}>
                 <div className="visual-card-heading">
                   <div>
@@ -5750,17 +6054,6 @@ function App() {
             </div>
 
             <div className="inline-fields data-settings-row">
-              <label className="field">
-                History window
-                <input
-                  min="30"
-                  max="3000"
-                  step="30"
-                  type="number"
-                  value={days}
-                  onChange={(event) => setDays(Number(event.target.value))}
-                />
-              </label>
               <label className="toggle-field">
                 <input
                   checked={includeHoldingsInSync}
