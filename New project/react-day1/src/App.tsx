@@ -14,7 +14,7 @@ type RiskProfile = 'conservative' | 'balanced' | 'balanced_aggressive' | 'aggres
 type Horizon = '3-6m' | '6-12m' | '1-3y' | '3y+'
 type TradeAccess = 'delivery' | 'fo_context' | 'hedging'
 type ProfitTrend = 'unknown' | 'growing' | 'stable' | 'declining' | 'loss_making'
-type View = 'verdict' | 'data'
+type View = 'setup' | 'verdict' | 'technicals' | 'fundamentals' | 'reasoning' | 'data'
 type CacheState = 'loading' | 'live' | 'free' | 'sample'
 type RefreshState = 'idle' | 'refreshing' | 'done' | 'error'
 type UploadState = 'idle' | 'uploading' | 'done' | 'error'
@@ -39,6 +39,15 @@ type IndicatorKey =
   | 'macd'
   | 'atr'
   | 'patterns'
+
+const workspaceTabs: Array<{ id: View; label: string; caption: string }> = [
+  { id: 'setup', label: 'Setup', caption: 'Inputs' },
+  { id: 'verdict', label: 'Decision', caption: 'Verdict' },
+  { id: 'technicals', label: 'Charts', caption: 'Technicals' },
+  { id: 'fundamentals', label: 'Company', caption: 'Fundamentals' },
+  { id: 'reasoning', label: 'Reasoning', caption: 'Why' },
+  { id: 'data', label: 'Data Hub', caption: 'Sync' },
+]
 type PatternBias = 'bullish' | 'bearish' | 'neutral'
 type SignalTone = 'positive' | 'negative' | 'neutral'
 
@@ -633,6 +642,7 @@ function CollapsibleSection({
   headingClassName = 'panel-heading',
   headingLevel = 2,
   id,
+  staticOpen = false,
   title,
 }: {
   action?: ReactNode
@@ -645,25 +655,30 @@ function CollapsibleSection({
   headingClassName?: string
   headingLevel?: 2 | 3 | 4
   id: string
+  staticOpen?: boolean
   title: string
 }) {
   const [openState, setOpenState] = useState({ id, isOpen: defaultOpen })
-  const isOpen = openState.id === id ? openState.isOpen : defaultOpen
+  const isOpen = staticOpen ? true : openState.id === id ? openState.isOpen : defaultOpen
   const HeadingTag = headingLevel === 3 ? 'h3' : headingLevel === 4 ? 'h4' : 'h2'
   const bodyId = `${id}-body`
 
   return (
-    <section className={`${className} collapsible-section ${isOpen ? 'is-open' : 'is-collapsed'}`} aria-labelledby={id}>
+    <section className={`${className} collapsible-section ${staticOpen ? 'static-section' : ''} ${isOpen ? 'is-open' : 'is-collapsed'}`} aria-labelledby={id}>
       <div className={`${headingClassName} collapsible-heading`}>
         <div>
           {eyebrow && <p className="eyebrow">{eyebrow}</p>}
           <HeadingTag id={id}>
-            <button className="collapse-title-button" type="button" aria-controls={bodyId} aria-expanded={isOpen} onClick={() => setOpenState({ id, isOpen: !isOpen })}>
-              <span className="collapse-icon" aria-hidden="true">
-                {isOpen ? '-' : '+'}
-              </span>
-              <span>{title}</span>
-            </button>
+            {staticOpen ? (
+              <span className="static-section-title">{title}</span>
+            ) : (
+              <button className="collapse-title-button" type="button" aria-controls={bodyId} aria-expanded={isOpen} onClick={() => setOpenState({ id, isOpen: !isOpen })}>
+                <span className="collapse-icon" aria-hidden="true">
+                  {isOpen ? '-' : '+'}
+                </span>
+                <span>{title}</span>
+              </button>
+            )}
           </HeadingTag>
           {description && <p className="collapse-description">{description}</p>}
         </div>
@@ -3417,7 +3432,7 @@ function App() {
   const [storedWorkspace] = useState<BrowserWorkspace | null>(() => readBrowserWorkspace())
   const [snapshot, setSnapshot] = useState<Snapshot>(() => storedWorkspace?.snapshot ?? starterSnapshot)
   const [cacheState, setCacheState] = useState<CacheState>(() => cacheStateFromProvider((storedWorkspace?.snapshot ?? starterSnapshot).provider))
-  const [view, setView] = useState<View>('verdict')
+  const [view, setView] = useState<View>('setup')
   const [form, setForm] = useState<AnalysisForm>(() => storedWorkspace?.form ?? initialForm)
   const [days, setDays] = useState(() => storedWorkspace?.days ?? 730)
   const [includeHoldings, setIncludeHoldings] = useState(() => storedWorkspace?.includeHoldings ?? false)
@@ -3542,6 +3557,12 @@ function App() {
   const activeQuote = activeSnapshot.quotes[analysis.quoteKey]
   const activeFundamentals = activeSnapshot.fundamentals?.[analysis.quoteKey]
   const activeCandles = activeSnapshot.candles[analysis.quoteKey] ?? emptyCandles
+  const activeTickerDisplay = decisionSymbol || 'No ticker selected'
+  const activeInstrumentName = activeFundamentals?.name || (form.ticker.trim() ? 'Company data pending' : 'Choose a fund or index')
+  const activeInstrumentSector = [activeFundamentals?.sector, activeFundamentals?.industry].filter(Boolean).join(' - ')
+  const activeChangePct =
+    activeQuote?.ohlc?.close && activeQuote.last_price ? ((activeQuote.last_price - activeQuote.ohlc.close) / activeQuote.ohlc.close) * 100 : undefined
+  const activePriceTone: SignalTone = activeChangePct === undefined ? 'neutral' : activeChangePct >= 0 ? 'positive' : 'negative'
   const sparkline = useMemo(() => buildSparkline(activeCandles), [activeCandles])
   const forecastProjection = useMemo(
     () => buildScenarioForecast(activeCandles, analysis, activeFundamentals, forecastSettings),
@@ -4548,18 +4569,41 @@ function App() {
             <span>{cacheLabel(cacheState)}</span>
             <strong>{cacheAge(activeSnapshot.generated_at)}</strong>
           </div>
-          <div className="tabs" role="tablist" aria-label="Workspace view">
-            <button className={view === 'verdict' ? 'active' : ''} type="button" onClick={() => setView('verdict')}>
-              Verdict
-            </button>
-            <button className={view === 'data' ? 'active' : ''} type="button" onClick={() => setView('data')}>
-              Data
-            </button>
-          </div>
         </div>
       </header>
 
-      {view === 'verdict' ? (
+      <nav className="workspace-nav" aria-label="Analysis workspace">
+        <div className="active-instrument-strip">
+          <div className="instrument-identity">
+            <span>Analysing now</span>
+            <strong>{activeTickerDisplay}</strong>
+            <p>{activeInstrumentName}</p>
+            {activeInstrumentSector && <small>{activeInstrumentSector}</small>}
+          </div>
+          <div className={`instrument-ltp tone-${activePriceTone}`}>
+            <span>LTP</span>
+            <strong>{formatInr(analysis.ltp)}</strong>
+            <small>{activeChangePct === undefined ? 'Change pending' : formatPercent(activeChangePct)}</small>
+          </div>
+        </div>
+        <div className="tabs workspace-tabs" role="tablist" aria-label="Workspace sections">
+          {workspaceTabs.map((tab) => (
+            <button
+              aria-selected={view === tab.id}
+              className={view === tab.id ? 'active' : ''}
+              key={tab.id}
+              role="tab"
+              type="button"
+              onClick={() => setView(tab.id)}
+            >
+              <span>{tab.label}</span>
+              <small>{tab.caption}</small>
+            </button>
+          ))}
+        </div>
+      </nav>
+
+      {view === 'setup' ? (
         <>
           <CollapsibleSection
             className="parent-section setup-parent"
@@ -4568,6 +4612,7 @@ function App() {
             eyebrow="Decision brief"
             headingClassName="section-heading collapsible-section-heading"
             id="setup-parent-heading"
+            staticOpen
             title="Analyse One Fund"
           >
             <section className="input-grid">
@@ -4740,12 +4785,12 @@ function App() {
                   {isHoldingReview && <span className="field-note">Percentage mode uses the fresh capital field, not your existing invested amount.</span>}
                 </label>
               </div>
-              {freeRefreshMessage && view === 'verdict' && (
+              {freeRefreshMessage && view === 'setup' && (
                 <div className={`refresh-message ${freeRefreshState}`}>
                   <p>{freeRefreshMessage}</p>
                 </div>
               )}
-              {freeRefreshState === 'refreshing' && view === 'verdict' && (
+              {freeRefreshState === 'refreshing' && view === 'setup' && (
                 <div className="sync-progress-panel compact-sync-progress" role="status" aria-live="polite">
                   <div className="sync-progress-top">
                     <span>Loading analysis evidence</span>
@@ -4856,7 +4901,11 @@ function App() {
             </CollapsibleSection>
             </section>
           </CollapsibleSection>
+        </>
+      ) : null}
 
+      {view === 'verdict' ? (
+        <>
           <CollapsibleSection
             action={
               <div className="score-box">
@@ -4869,6 +4918,7 @@ function App() {
             eyebrow="Verdict"
             headingClassName="verdict-heading"
             id="verdict-heading"
+            staticOpen
             title={analysis.verdict}
           >
 
@@ -5125,13 +5175,18 @@ function App() {
               </div>
             )}
           </CollapsibleSection>
+        </>
+      ) : null}
 
+      {view === 'technicals' ? (
+        <>
           <CollapsibleSection
             className="parent-section technical-section"
             description="Price action, chart indicators, position economics, portfolio exposure, risk, liquidity, and setup quality."
             eyebrow="Technical analysis"
             headingClassName="section-heading collapsible-section-heading"
             id="technical-heading"
+            staticOpen
             title="Technical Analysis"
           >
 
@@ -5910,13 +5965,18 @@ function App() {
               </CollapsibleSection>
             </div>
           </CollapsibleSection>
+        </>
+      ) : null}
 
+      {view === 'fundamentals' ? (
+        <>
           <CollapsibleSection
             className="parent-section fundamental-section"
             description="Company profile, ratios, statement summaries, important updates, business quality, and due-diligence checks."
             eyebrow="Fundamental analysis"
             headingClassName="section-heading collapsible-section-heading"
             id="fundamental-heading"
+            staticOpen
             title="Fundamental Analysis"
           >
             <div className="visual-grid fundamental-grid">
@@ -6114,9 +6174,13 @@ function App() {
               </CollapsibleSection>
             </div>
           </CollapsibleSection>
+        </>
+      ) : null}
 
+      {view === 'reasoning' ? (
+        <>
           <section className="reasoning-grid lower-grid">
-            <CollapsibleSection className="panel parent-section reasoning-parent" eyebrow="Reasoning trace" id="steps-heading" title="Agent Reasoning">
+            <CollapsibleSection className="panel parent-section reasoning-parent" eyebrow="Reasoning trace" id="steps-heading" staticOpen title="Agent Reasoning">
 
               <div className="steps-list detailed-steps">
                 {analysis.steps.map((step, index) => (
@@ -6157,7 +6221,9 @@ function App() {
             </CollapsibleSection>
           </section>
         </>
-      ) : (
+      ) : null}
+
+      {view === 'data' ? (
         <>
           <CollapsibleSection
             action={
@@ -6179,13 +6245,14 @@ function App() {
             className="panel command-panel data-first-panel"
             eyebrow="Data cache"
             id="command-heading"
+            staticOpen
             title="Market Data Sync"
           >
 
             <div className="sync-scope-grid">
               <article className="sync-scope-card">
                 <span>Decision target</span>
-                <strong>{decisionSymbol || 'Enter ticker in Verdict tab'}</strong>
+                <strong>{decisionSymbol || 'Enter ticker in Setup'}</strong>
                 <p>The fund/index currently selected in Decision Setup. Use Load & Analyse there for the primary workflow.</p>
               </article>
               <article className="sync-scope-card">
@@ -6520,7 +6587,7 @@ function App() {
             </CollapsibleSection>
           </section>
         </>
-      )}
+      ) : null}
     </main>
   )
 }
