@@ -563,11 +563,11 @@ const optionalHelp = {
   manualLtp: 'Overrides cached price when you want to analyse from a specific current or planned entry price.',
   invalidationPrice: 'The price where the thesis is considered wrong. Required for proper risk-based sizing.',
   targetPrice: 'Expected upside price. Used with invalidation to calculate reward/risk.',
-  marketCapCr: 'Company size in crore. Very small companies are penalised when small-cap avoidance is enabled.',
-  debtEquity: 'Debt compared with equity. Higher debt reduces score when you prefer cleaner balance sheets.',
-  roce: 'Return on capital employed. Higher ROCE usually means the business uses capital more efficiently.',
-  pe: 'Price-to-earnings ratio. Very high P/E can mean expensive; very low P/E can mean cyclicality or hidden risk.',
-  profitTrend: 'Direction of recent profits. Growing/stable profits improve confidence; declining/loss-making hurts it.',
+  marketCapCr: 'Manual override only. Normally this is auto-filled from refreshed company data; type here only when data is missing or you want to test a scenario.',
+  debtEquity: 'Manual override only. Normally this is auto-filled from company fundamentals; use this when fetched debt data is missing or clearly stale.',
+  roce: 'Manual override only. Normally this is auto-filled from fundamentals. Higher ROCE usually means the business uses capital more efficiently.',
+  pe: 'Manual override only. Normally this comes from fetched valuation data. Very high P/E can mean expensive; very low P/E can mean cyclicality or hidden risk.',
+  profitTrend: 'Manual override only. Use this when fetched statements are unavailable or you want to force a conservative scenario.',
   constraints: 'Personal rules. Enabled filters penalise companies or setups that violate your preferences.',
   thesis: 'Your notes do not auto-score yet, but they keep the decision checklist anchored to your actual investment reason.',
   holdingsRefresh:
@@ -2433,6 +2433,21 @@ function normaliseDebtEquity(value?: unknown) {
   return numeric > 10 ? numeric / 100 : numeric
 }
 
+function inferProfitTrend(earningsGrowth?: number, revenueGrowth?: number, netProfit?: number): ProfitTrend {
+  if (netProfit !== undefined && netProfit < 0) return 'loss_making'
+  if (earningsGrowth !== undefined) {
+    if (earningsGrowth > 0.08) return 'growing'
+    if (earningsGrowth < -0.08) return 'declining'
+    return netProfit !== undefined && netProfit > 0 ? 'stable' : 'unknown'
+  }
+  if (revenueGrowth !== undefined) {
+    if (revenueGrowth > 0.08) return 'growing'
+    if (revenueGrowth < -0.08) return 'declining'
+    return netProfit !== undefined && netProfit > 0 ? 'stable' : 'unknown'
+  }
+  return netProfit !== undefined && netProfit > 0 ? 'stable' : 'unknown'
+}
+
 function findQuote(snapshot: Snapshot, exchange: Exchange, ticker: string) {
   const cleanTicker = ticker.trim().toUpperCase()
   const exactKey = `${exchange}:${cleanTicker}`
@@ -2503,6 +2518,8 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
   const companyDividendYield = numberFrom(companyFundamentals?.dividend_yield)
   const companyRevenueGrowth = numberFrom(companyFundamentals?.revenue_growth)
   const companyEarningsGrowth = numberFrom(companyFundamentals?.earnings_growth)
+  const inferredProfitTrend = inferProfitTrend(companyEarningsGrowth, companyRevenueGrowth, companyNetProfit)
+  const effectiveProfitTrend = form.profitTrend === 'unknown' ? inferredProfitTrend : form.profitTrend
   const marketCapCr = parseNumber(form.marketCapCr) ?? (companyMarketCap === undefined ? undefined : companyMarketCap / 10000000)
   const debtEquity = parseNumber(form.debtEquity) ?? companyDebtEquity
   const roce = parseNumber(form.roce) ?? companyRoce
@@ -2632,21 +2649,21 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
     }
   }
 
-  if (form.profitTrend === 'growing') {
+  if (effectiveProfitTrend === 'growing') {
     score += 8
-    positives.push('Profit trend is marked as growing.')
+    positives.push(form.profitTrend === 'unknown' ? 'Profit trend is inferred as growing from fetched company data.' : 'Profit trend is marked as growing.')
   }
-  if (form.profitTrend === 'declining') {
+  if (effectiveProfitTrend === 'declining') {
     score -= 8
-    cautions.push('Profit trend is declining.')
+    cautions.push(form.profitTrend === 'unknown' ? 'Profit trend is inferred as declining from fetched company data.' : 'Profit trend is declining.')
   }
-  if (form.profitTrend === 'loss_making') {
+  if (effectiveProfitTrend === 'loss_making') {
     score -= 15
-    cautions.push('Loss-making status is a major quality red flag.')
+    cautions.push(form.profitTrend === 'unknown' ? 'Fetched company data indicates loss-making status, which is a major quality red flag.' : 'Loss-making status is a major quality red flag.')
   }
-  if (form.profitTrend === 'stable') {
+  if (effectiveProfitTrend === 'stable') {
     score += 2
-    positives.push('Profit trend is stable.')
+    positives.push(form.profitTrend === 'unknown' ? 'Profit trend is inferred as stable from fetched company data.' : 'Profit trend is stable.')
   }
 
   if (form.constraints.avoidLowLiquidity && quote?.volume !== undefined && quote.volume > 0 && quote.volume < 25000) {
@@ -3094,7 +3111,7 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
   if (candleCount >= 180) confidence += 14
   else if (candleCount > 0) confidence += 7
   confidence += Math.min(evidenceSignals * 1.25, 30)
-  if (form.profitTrend !== 'unknown') confidence += 6
+  if (effectiveProfitTrend !== 'unknown') confidence += 6
   confidence = clamp(confidence)
   const confidenceLabel = confidence >= 75 ? 'High' : confidence >= 50 ? 'Medium' : 'Low'
 
@@ -3160,8 +3177,8 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
               ? `Reward/risk is ${rewardRisk.toFixed(1)}x, which is acceptable for a planned entry if the chart trigger confirms.`
               : `Reward/risk is only ${rewardRisk.toFixed(1)}x. Prefer waiting for a better entry price or a more realistic target before buying.`
             : 'Enter target and invalidation to convert the idea into a clear reward/risk setup.',
-          marketCapCr === undefined || debtEquity === undefined || roce === undefined || pe === undefined || form.profitTrend === 'unknown'
-            ? 'Fill missing fundamentals before committing larger capital: market cap, debt/equity, ROCE, P/E, and profit trend.'
+          marketCapCr === undefined || debtEquity === undefined || roce === undefined || pe === undefined || effectiveProfitTrend === 'unknown'
+            ? 'Refresh company data or add manual overrides only for the missing fundamentals before committing larger capital: market cap, debt/equity, ROCE, P/E, and profit trend.'
             : 'Cross-check fundamentals against annual report, quarterly results, and exchange filings before deploying larger capital.',
         ]
       : [
@@ -3176,8 +3193,8 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
             : !capital
               ? 'Because this is a holding review with no fresh capital entered, focus on hold/reduce/exit discipline rather than add-more sizing.'
               : 'Keep any add-more sizing conservative until target, invalidation, and capital risk are fully defined.',
-          marketCapCr === undefined || debtEquity === undefined || roce === undefined || pe === undefined || form.profitTrend === 'unknown'
-            ? 'Add the missing fundamentals from annual reports or a trusted screener: market cap, debt/equity, ROCE, P/E, and profit trend.'
+          marketCapCr === undefined || debtEquity === undefined || roce === undefined || pe === undefined || effectiveProfitTrend === 'unknown'
+            ? 'Refresh company data or add manual overrides only for the missing fundamentals: market cap, debt/equity, ROCE, P/E, and profit trend.'
             : 'Cross-check the supplied fundamentals against the latest annual report, quarterly results, and exchange filings.',
         ]
 
@@ -3310,14 +3327,14 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
     },
     {
       title: '5. Business quality and valuation',
-      plainEnglish: `The optional quality inputs are market cap ${formatNumber(marketCapCr)} cr, debt/equity ${formatNumber(debtEquity)}, ROCE ${formatPercent(roce)}, P/E ${formatNumber(pe)}, and profit trend ${profitTrendLabels[form.profitTrend]}.`,
+      plainEnglish: `The quality evidence used is market cap ${formatNumber(marketCapCr)} cr, debt/equity ${formatNumber(debtEquity)}, ROCE ${formatPercent(roce)}, P/E ${formatNumber(pe)}, and profit trend ${profitTrendLabels[effectiveProfitTrend]}. Manual fields only override missing or stale fetched data.`,
       formula: 'Quality score adjusts upward for stronger ROCE, manageable debt, sufficient market cap, sensible valuation, and improving/stable profit trend.',
       rationale:
         'Price can move for many reasons, but over a non-intraday horizon the business matters. A weak balance sheet, poor capital efficiency, or falling profits reduces the margin of safety.',
       takeaway:
-        marketCapCr === undefined && debtEquity === undefined && roce === undefined && pe === undefined && form.profitTrend === 'unknown'
-          ? 'Add fundamentals to make the verdict much stronger.'
-          : 'The supplied fundamentals are included in the score, but filings should still be checked before committing more capital.',
+        marketCapCr === undefined && debtEquity === undefined && roce === undefined && pe === undefined && effectiveProfitTrend === 'unknown'
+          ? 'Refresh fundamentals first; use manual overrides only if the data source cannot fetch the company.'
+          : 'Fetched fundamentals and any explicit overrides are included in the score, but filings should still be checked before committing more capital.',
     },
     {
       title: '6. Risk plan',
@@ -3627,16 +3644,18 @@ function App() {
   const companyDividendYield = numberFrom(activeFundamentals?.dividend_yield)
   const companyRevenueGrowth = numberFrom(activeFundamentals?.revenue_growth)
   const companyEarningsGrowth = numberFrom(activeFundamentals?.earnings_growth)
+  const inferredProfitTrend = inferProfitTrend(companyEarningsGrowth, companyRevenueGrowth, companyNetProfit)
+  const effectiveProfitTrend = form.profitTrend === 'unknown' ? inferredProfitTrend : form.profitTrend
   const marketCapCr = parseNumber(form.marketCapCr) ?? (companyMarketCap === undefined ? undefined : companyMarketCap / 10000000)
   const debtEquity = parseNumber(form.debtEquity) ?? companyDebtEquity
   const roce = parseNumber(form.roce) ?? companyRoce
   const pe = parseNumber(form.pe) ?? companyTrailingPe
   const profitStatus =
-    form.profitTrend === 'growing' || form.profitTrend === 'stable'
+    effectiveProfitTrend === 'growing' || effectiveProfitTrend === 'stable'
       ? 'strong'
-      : form.profitTrend === 'declining'
+      : effectiveProfitTrend === 'declining'
         ? 'watch'
-        : form.profitTrend === 'loss_making'
+        : effectiveProfitTrend === 'loss_making'
           ? 'weak'
           : 'needs data'
   const qualityFactors = [
@@ -3666,9 +3685,41 @@ function App() {
     },
     {
       label: 'Profit trend',
-      value: profitTrendLabels[form.profitTrend],
+      value: profitTrendLabels[effectiveProfitTrend],
       status: profitStatus,
       caption: 'Improving or stable profit trend reduces the chance of a value trap.',
+    },
+  ]
+  const companyEvidenceCards = [
+    {
+      label: 'Market cap',
+      value: marketCapCr === undefined ? 'Missing' : `${formatNumber(marketCapCr)} cr`,
+      source: parseNumber(form.marketCapCr) !== undefined ? 'Manual override' : companyMarketCap !== undefined ? 'Auto-filled' : 'Missing',
+      tone: toneFromNumber(marketCapCr, (value) => value >= 10000, (value) => value < 500),
+    },
+    {
+      label: 'Debt/equity',
+      value: formatNumber(debtEquity),
+      source: parseNumber(form.debtEquity) !== undefined ? 'Manual override' : companyDebtEquity !== undefined ? 'Auto-filled' : 'Missing',
+      tone: toneFromNumber(debtEquity, (value) => value <= 0.5, (value) => value > 1.5),
+    },
+    {
+      label: 'ROCE',
+      value: formatPercent(roce),
+      source: parseNumber(form.roce) !== undefined ? 'Manual override' : companyRoce !== undefined ? 'Auto-filled' : 'Missing',
+      tone: toneFromNumber(roce, (value) => value >= 18, (value) => value < 8),
+    },
+    {
+      label: 'P/E',
+      value: formatNumber(pe),
+      source: parseNumber(form.pe) !== undefined ? 'Manual override' : companyTrailingPe !== undefined ? 'Auto-filled' : 'Missing',
+      tone: toneFromNumber(pe, (value) => value > 8 && value < 30, (value) => value > 55),
+    },
+    {
+      label: 'Profit trend',
+      value: profitTrendLabels[effectiveProfitTrend],
+      source: form.profitTrend !== 'unknown' ? 'Manual override' : effectiveProfitTrend !== 'unknown' ? 'Auto-derived' : 'Missing',
+      tone: effectiveProfitTrend === 'growing' || effectiveProfitTrend === 'stable' ? 'positive' : effectiveProfitTrend === 'declining' || effectiveProfitTrend === 'loss_making' ? 'negative' : 'neutral',
     },
   ]
 
@@ -4722,33 +4773,61 @@ function App() {
                   <FieldLabel help={optionalHelp.targetPrice}>Target price</FieldLabel>
                   <input inputMode="decimal" value={form.targetPrice} onChange={(event) => updateForm('targetPrice', event.target.value)} />
                 </label>
-                <label className="field">
-                  <FieldLabel help={optionalHelp.marketCapCr}>Market cap, cr</FieldLabel>
-                  <input inputMode="decimal" value={form.marketCapCr} onChange={(event) => updateForm('marketCapCr', event.target.value)} />
-                </label>
-                <label className="field">
-                  <FieldLabel help={optionalHelp.debtEquity}>Debt/equity</FieldLabel>
-                  <input inputMode="decimal" value={form.debtEquity} onChange={(event) => updateForm('debtEquity', event.target.value)} />
-                </label>
-                <label className="field">
-                  <FieldLabel help={optionalHelp.roce}>ROCE %</FieldLabel>
-                  <input inputMode="decimal" value={form.roce} onChange={(event) => updateForm('roce', event.target.value)} />
-                </label>
-                <label className="field">
-                  <FieldLabel help={optionalHelp.pe}>P/E</FieldLabel>
-                  <input inputMode="decimal" value={form.pe} onChange={(event) => updateForm('pe', event.target.value)} />
-                </label>
-                <label className="field">
-                  <FieldLabel help={optionalHelp.profitTrend}>Profit trend</FieldLabel>
-                  <select value={form.profitTrend} onChange={(event) => updateForm('profitTrend', event.target.value as ProfitTrend)}>
-                    {Object.entries(profitTrendLabels).map(([value, label]) => (
-                      <option key={value} value={value}>
-                        {label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
               </div>
+
+              <div className="auto-evidence-panel">
+                <div>
+                  <span className="eyebrow">Auto-filled company evidence</span>
+                  <p>These values are pulled from refreshed market/company data when available. Manual entries below only override missing or stale data.</p>
+                </div>
+                <div className="auto-evidence-grid">
+                  {companyEvidenceCards.map((card) => (
+                    <article className={`auto-evidence-card tone-${card.tone}`} key={card.label}>
+                      <span>{card.label}</span>
+                      <strong>{card.value}</strong>
+                      <small>{card.source}</small>
+                    </article>
+                  ))}
+                </div>
+              </div>
+
+              <CollapsibleSection
+                className="manual-overrides-panel nested-collapse"
+                headingClassName="subsection-heading"
+                headingLevel={3}
+                id="manual-company-overrides-heading"
+                title="Manual company-data overrides"
+                description="Use only when the refreshed data is missing, stale, or you want to test a conservative scenario."
+              >
+                <div className="form-grid three">
+                  <label className="field">
+                    <FieldLabel help={optionalHelp.marketCapCr}>Override market cap, cr</FieldLabel>
+                    <input inputMode="decimal" value={form.marketCapCr} onChange={(event) => updateForm('marketCapCr', event.target.value)} />
+                  </label>
+                  <label className="field">
+                    <FieldLabel help={optionalHelp.debtEquity}>Override debt/equity</FieldLabel>
+                    <input inputMode="decimal" value={form.debtEquity} onChange={(event) => updateForm('debtEquity', event.target.value)} />
+                  </label>
+                  <label className="field">
+                    <FieldLabel help={optionalHelp.roce}>Override ROCE %</FieldLabel>
+                    <input inputMode="decimal" value={form.roce} onChange={(event) => updateForm('roce', event.target.value)} />
+                  </label>
+                  <label className="field">
+                    <FieldLabel help={optionalHelp.pe}>Override P/E</FieldLabel>
+                    <input inputMode="decimal" value={form.pe} onChange={(event) => updateForm('pe', event.target.value)} />
+                  </label>
+                  <label className="field">
+                    <FieldLabel help={optionalHelp.profitTrend}>Override profit trend</FieldLabel>
+                    <select value={form.profitTrend} onChange={(event) => updateForm('profitTrend', event.target.value as ProfitTrend)}>
+                      {Object.entries(profitTrendLabels).map(([value, label]) => (
+                        <option key={value} value={value}>
+                          {label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+              </CollapsibleSection>
 
               <div className="segmented-label filters-label">
                 Personal filters
