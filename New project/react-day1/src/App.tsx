@@ -555,7 +555,7 @@ const requiredHelp = {
   ticker: 'Company symbol to analyse. It controls which quote, candles, and holding row the app matches.',
   exchange: 'NSE or BSE route for the ticker. The wrong exchange can fetch the wrong security or no data.',
   capital:
-    'For a new position, this is the cash you are willing to deploy and is required for sizing. For an existing holding, it is optional fresh/additional capital only if you are considering adding more.',
+    'For a new position, this is the cash you are willing to deploy and is required for sizing. It should be deployable market capital only, not emergency money, fixed-goal money, or retirement/NPS-style capital. For an existing holding, it is optional fresh/additional capital only if you are considering adding more.',
   horizon: 'Your intended holding period. Longer horizons give more weight to fundamentals and less to short-term noise.',
   alreadyHold: 'Turn this on when the stock is already in your portfolio. It makes average price, drawdown, and portfolio weight affect the verdict.',
   boughtOn: 'Reference date for your original entry. It is useful context for reviewing whether the thesis has had enough time to work.',
@@ -3529,6 +3529,11 @@ function App() {
   const portfolio = useMemo(() => portfolioSummary(activeSnapshot), [activeSnapshot])
   const portfolioReturn = portfolio.cost ? (portfolio.pnl / portfolio.cost) * 100 : 0
   const capitalNum = parseNumber(form.capital)
+  const maxRiskNum = parseNumber(form.maxRisk)
+  const riskSliderMax = form.riskMode === 'percent' ? 10 : Math.max(5000, Math.ceil((capitalNum || 100000) * 0.12))
+  const riskSliderStep = form.riskMode === 'percent' ? 0.25 : 500
+  const riskSliderValue = clamp(maxRiskNum ?? (form.riskMode === 'percent' ? 2.5 : 2500), form.riskMode === 'percent' ? 0.25 : 500, riskSliderMax)
+  const riskSliderDisplay = form.riskMode === 'percent' ? `${riskSliderValue.toFixed(2)}%` : formatInr(riskSliderValue)
 
   const marketDataUrl = useMemo(() => marketDataBaseUrl(), [])
   const marketDataDisplayUrl = marketDataUrl || 'Set VITE_MARKET_DATA_BASE_URL to your HTTPS data bridge'
@@ -4653,14 +4658,14 @@ function App() {
                 </ul>
               </div>
 
-              <div className="form-grid two">
+              <div className="form-grid setup-primary-grid">
                 <label className="field">
                   <FieldLabel help={requiredHelp.ticker}>Ticker</FieldLabel>
-                  <input required value={form.ticker} onChange={(event) => updateForm('ticker', event.target.value.toUpperCase())} />
+                  <input aria-label="Ticker" required value={form.ticker} onChange={(event) => updateForm('ticker', event.target.value.toUpperCase())} />
                 </label>
                 <label className="field">
                   <FieldLabel help={requiredHelp.exchange}>Exchange</FieldLabel>
-                  <select value={form.exchange} onChange={(event) => updateForm('exchange', event.target.value as Exchange)}>
+                  <select aria-label="Exchange" value={form.exchange} onChange={(event) => updateForm('exchange', event.target.value as Exchange)}>
                     <option value="NSE">NSE</option>
                     <option value="BSE">BSE</option>
                   </select>
@@ -4672,6 +4677,7 @@ function App() {
                     max="3000"
                     step="30"
                     type="number"
+                    aria-label="History window"
                     value={days}
                     onChange={(event) => setDays(Number(event.target.value))}
                   />
@@ -4679,13 +4685,12 @@ function App() {
                 {!isHoldingReview && (
                   <label className="field">
                     <FieldLabel help={requiredHelp.capital}>Capital to deploy</FieldLabel>
-                    <input inputMode="decimal" value={form.capital} onChange={(event) => updateForm('capital', event.target.value)} />
-                    <span className="field-note">Required for a new position because sizing and risk budget need a capital base.</span>
+                    <input aria-label="Capital to deploy" inputMode="decimal" value={form.capital} onChange={(event) => updateForm('capital', event.target.value)} />
                   </label>
                 )}
                 <label className="field">
                   <FieldLabel help={requiredHelp.horizon}>Horizon</FieldLabel>
-                  <select value={form.horizon} onChange={(event) => updateForm('horizon', event.target.value as Horizon)}>
+                  <select aria-label="Horizon" value={form.horizon} onChange={(event) => updateForm('horizon', event.target.value as Horizon)}>
                     {Object.entries(horizonLabels).map(([value, label]) => (
                       <option key={value} value={value}>
                         {label}
@@ -4728,7 +4733,8 @@ function App() {
                 </div>
               )}
 
-              <div className="segmented-block">
+              <div className="setup-control-row">
+              <div className="segmented-block compact-choice">
                 <span className="segmented-label">
                   Risk profile
                   <HelpTip text={requiredHelp.riskProfile} />
@@ -4747,7 +4753,7 @@ function App() {
                 </div>
               </div>
 
-              <div className="segmented-block">
+              <div className="segmented-block compact-choice">
                 <span className="segmented-label">
                   Market access
                   <HelpTip text={requiredHelp.marketAccess} />
@@ -4765,15 +4771,27 @@ function App() {
                   ))}
                 </div>
               </div>
+              </div>
 
-              <div className="form-grid two">
-                <label className="field">
-                  <FieldLabel help={requiredHelp.maxRisk}>{isHoldingReview ? 'Fresh max risk' : 'Max risk'}</FieldLabel>
-                  <input inputMode="decimal" value={form.maxRisk} onChange={(event) => updateForm('maxRisk', event.target.value)} />
-                  <span className="field-note">
-                    {isHoldingReview
-                      ? 'Optional unless you are planning an add-more trade.'
-                      : `Optional. If blank, the app uses the ${riskProfileLabels[form.riskProfile]} default of ${formatPlainPercent(analysis.defaultRiskPercent)}.`}
+              <div className="form-grid risk-grid-row">
+                <label className="field risk-slider-field">
+                  <span className="range-field-heading">
+                    <FieldLabel help={requiredHelp.maxRisk}>{isHoldingReview ? 'Fresh max risk' : 'Max risk'}</FieldLabel>
+                    <output>{riskSliderDisplay}</output>
+                  </span>
+                  <input
+                    aria-label={isHoldingReview ? 'Fresh max risk' : 'Max risk'}
+                    max={riskSliderMax}
+                    min={form.riskMode === 'percent' ? 0.25 : 500}
+                    step={riskSliderStep}
+                    type="range"
+                    value={riskSliderValue}
+                    onInput={(event) => updateForm('maxRisk', event.currentTarget.value)}
+                    onChange={(event) => updateForm('maxRisk', event.target.value)}
+                  />
+                  <span className="range-scale">
+                    <small>{form.riskMode === 'percent' ? '0.25%' : formatInr(500)}</small>
+                    <small>{form.riskMode === 'percent' ? '10%' : formatInr(riskSliderMax)}</small>
                   </span>
                 </label>
                 <label className="field">
@@ -6249,20 +6267,25 @@ function App() {
             title="Market Data Sync"
           >
 
-            <div className="sync-scope-grid">
-              <article className="sync-scope-card">
-                <span>Decision target</span>
-                <strong>{decisionSymbol || 'Enter ticker in Setup'}</strong>
-                <p>The fund/index currently selected in Decision Setup. Use Load & Analyse there for the primary workflow.</p>
+            <div className="data-sync-overview">
+              <article>
+                <span>Current scope</span>
+                <strong>{includeHoldingsInSync ? 'Instrument + holdings' : 'Current instrument'}</strong>
+                <small>{includeHoldingsInSync ? `${portfolioSyncSymbols.length} listed holdings included` : 'Use Setup for the selected fund or index'}</small>
               </article>
-              <article className="sync-scope-card">
-                <span>Uploaded portfolio</span>
-                <strong>{hasUploadedHoldingsFeed ? `${portfolioSyncSymbols.length} listed symbols` : 'No holdings feed'}</strong>
-                <p>Optional cache refresh for your uploaded holdings file. Unlisted/ISIN rows stay in the portfolio but are skipped for charts.</p>
+              <article>
+                <span>History window</span>
+                <strong>{formatNumber(days)} days</strong>
+                <small>Used for candles, indicators, patterns, and forecasts.</small>
+              </article>
+              <article>
+                <span>Cache age</span>
+                <strong>{cacheAge(activeSnapshot.generated_at)}</strong>
+                <small>{providerLabel(activeSnapshot.provider)}</small>
               </article>
             </div>
 
-            <div className="inline-fields data-settings-row">
+            <div className="data-sync-options">
               <label className="toggle-field">
                 <input
                   checked={includeHoldingsInSync}
@@ -6275,6 +6298,9 @@ function App() {
                   <HelpTip text={optionalHelp.holdingsRefresh} />
                 </span>
               </label>
+              <p>
+                Keep this off when you only want to refresh the fund visible in the sticky header. Turn it on after uploading a holdings report to refresh the portfolio cache too.
+              </p>
             </div>
             {freeRefreshMessage && (
               <div className={`refresh-message ${freeRefreshState}`}>
@@ -6312,20 +6338,6 @@ function App() {
                 <p>{serverRestartMessage}</p>
               </div>
             )}
-            <div className="command-stack">
-              <div className="command-row">
-                <code>{freeServerCommand}</code>
-                <button type="button" onClick={() => copyCommand('free-server', freeServerCommand)}>
-                  {copied === 'free-server' ? 'Copied' : 'Copy server'}
-                </button>
-              </div>
-              <div className="command-row">
-                <code>{freeCliCommand}</code>
-                <button type="button" onClick={() => copyCommand('free-cli', freeCliCommand)}>
-                  {copied === 'free-cli' ? 'Copied' : 'Copy CLI'}
-                </button>
-              </div>
-            </div>
           </CollapsibleSection>
 
           <CollapsibleSection
@@ -6561,11 +6573,17 @@ function App() {
               </div>
             </CollapsibleSection>
 
-            <CollapsibleSection className="panel footer-panel" eyebrow="Data sync" headingClassName="panel-heading compact-heading" id="connection-checklist-heading" title="Local Sync Requirements">
+            <CollapsibleSection className="panel footer-panel" defaultOpen eyebrow="Data sync" headingClassName="panel-heading compact-heading" id="connection-checklist-heading" title="Local Sync Requirements">
               <div className="command-row">
                 <code>{freeServerCommand}</code>
                 <button type="button" onClick={() => copyCommand('footer-server', freeServerCommand)}>
                   {copied === 'footer-server' ? 'Copied' : 'Copy server'}
+                </button>
+              </div>
+              <div className="command-row">
+                <code>{freeCliCommand}</code>
+                <button type="button" onClick={() => copyCommand('footer-cli', freeCliCommand)}>
+                  {copied === 'footer-cli' ? 'Copied' : 'Copy CLI'}
                 </button>
               </div>
               <div className="command-row">
