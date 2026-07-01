@@ -1,5 +1,12 @@
 import { type CSSProperties, type FocusEvent, type MouseEvent, type ReactNode, useEffect, useMemo, useState } from 'react'
 import './App.css'
+import {
+  sectorOperatingRules,
+  varsityDerivedRules,
+  varsityModuleCoverage,
+  varsitySourceLinks,
+  type VarsityDerivedRule,
+} from './varsityKnowledge'
 
 type Exchange = 'NSE' | 'BSE'
 type RiskMode = 'percent' | 'amount'
@@ -84,15 +91,11 @@ type VarsityLesson = {
   tone: SignalTone
   text: string
   action: string
+  evidenceChapterCount?: number
+  chapterRefs?: readonly { title: string; url: string }[]
 }
 
-type SectorRule = {
-  label: string
-  match: string[]
-  metrics: string[]
-  source: string
-  text: string
-}
+type SectorRule = (typeof sectorOperatingRules)[number]
 
 type SyncCoverage = {
   technicalLoaded: string[]
@@ -571,79 +574,6 @@ const optionalHelp = {
     'When checked, sync refreshes every listed ticker from the uploaded holdings file along with the current decision ticker. Your imported portfolio table stays loaded either way.',
   serverRestart: 'Restarts the local Python data bridge on port 8787. If an older bridge is already running, manually restart it once; after that this button can restart it from the app.',
 }
-
-const varsitySourceLinks = {
-  innerworth: 'https://zerodha.com/varsity/module/innerworth/',
-  sector: 'https://zerodha.com/varsity/module/sector-analysis/',
-  sse: 'https://zerodha.com/varsity/module/social-stock-exchanges-sses/',
-  nps: 'https://zerodha.com/varsity/module/national-pension-scheme/',
-}
-
-const sectorRules: SectorRule[] = [
-  {
-    label: 'Automobiles',
-    match: ['auto', 'automobile', 'vehicle', 'passenger car', 'utility vehicle', 'two wheeler', 'car manufacturer'],
-    metrics: ['volume growth', 'market share', 'realisation', 'raw-material cost', 'dealer inventory', 'working capital'],
-    source: varsitySourceLinks.sector,
-    text: 'Automobile analysis needs more than P/E. Demand cycles, model mix, raw-material pressure, inventory, and market share can change the quality of earnings quickly.',
-  },
-  {
-    label: 'Banking and lenders',
-    match: ['bank', 'finance', 'nbfc', 'lender', 'housing finance', 'credit'],
-    metrics: ['loan growth', 'asset quality', 'NPA trend', 'capital adequacy', 'net interest margin', 'provisioning'],
-    source: varsitySourceLinks.sector,
-    text: 'Lenders should be judged with asset quality and capital strength first. Normal industrial ratios can mislead when credit losses or leverage are the real risk.',
-  },
-  {
-    label: 'Information Technology',
-    match: ['information technology', 'software', 'it services', 'technology', 'digital services'],
-    metrics: ['revenue growth', 'client concentration', 'margin trend', 'deal wins', 'currency exposure', 'employee costs'],
-    source: varsitySourceLinks.sector,
-    text: 'IT businesses need growth, margin, client, currency, and execution checks. A good balance sheet is not enough if growth visibility or margins are weakening.',
-  },
-  {
-    label: 'Cement',
-    match: ['cement', 'building material'],
-    metrics: ['capacity utilisation', 'realisation per tonne', 'power/fuel cost', 'freight cost', 'regional demand', 'debt/capex'],
-    source: varsitySourceLinks.sector,
-    text: 'Cement is cyclical and cost-sensitive. Capacity, utilisation, regional pricing, energy costs, and leverage deserve as much attention as headline profit.',
-  },
-  {
-    label: 'Insurance',
-    match: ['insurance', 'life insurance', 'general insurance'],
-    metrics: ['premium growth', 'persistency', 'claims ratio', 'combined ratio', 'solvency', 'distribution mix'],
-    source: varsitySourceLinks.sector,
-    text: 'Insurance analysis needs operating quality metrics such as persistency, claims, solvency, and distribution mix because reported profit can hide underwriting quality.',
-  },
-  {
-    label: 'Steel and metals',
-    match: ['steel', 'metal', 'iron', 'ferrous', 'mining'],
-    metrics: ['spread', 'commodity cycle', 'capacity utilisation', 'raw-material linkage', 'debt', 'global price trend'],
-    source: varsitySourceLinks.sector,
-    text: 'Steel and metals are cycle-heavy. The verdict should be cautious when commodity prices, spreads, debt, or global demand are not understood.',
-  },
-  {
-    label: 'Hotels and hospitality',
-    match: ['hotel', 'hospitality', 'resort', 'travel accommodation'],
-    metrics: ['occupancy', 'ARR', 'RevPAR', 'room additions', 'seasonality', 'debt service'],
-    source: varsitySourceLinks.sector,
-    text: 'Hotel quality depends on occupancy, pricing power, room economics, seasonality, and debt service rather than only revenue growth.',
-  },
-  {
-    label: 'Retail',
-    match: ['retail', 'store', 'supermarket', 'apparel', 'consumer retail'],
-    metrics: ['same-store sales', 'gross margin', 'inventory turns', 'store economics', 'working capital', 'lease costs'],
-    source: varsitySourceLinks.sector,
-    text: 'Retail needs store-level discipline: sales per store, margins, inventory turns, working capital, and expansion quality decide whether growth is healthy.',
-  },
-  {
-    label: 'Real Estate',
-    match: ['real estate', 'developer', 'property', 'construction', 'housing'],
-    metrics: ['pre-sales', 'collections', 'project pipeline', 'net debt', 'inventory', 'cash-flow timing'],
-    source: varsitySourceLinks.sector,
-    text: 'Real-estate analysis must separate bookings from cash collections. Project inventory, debt, execution, and cash-flow timing drive risk.',
-  },
-]
 
 const forecastHelp = {
   horizon: 'How far into the future the scenario range should extend. Short horizons rely more on volatility and technicals; long horizons rely more on fundamentals and valuation assumptions.',
@@ -2129,7 +2059,7 @@ function searchableCompanyText(fundamentals: CompanyFundamentals | undefined, qu
 
 function findSectorRule(fundamentals: CompanyFundamentals | undefined, quoteKey: string) {
   const haystack = searchableCompanyText(fundamentals, quoteKey)
-  return sectorRules.find((rule) => rule.match.some((term) => haystack.includes(term)))
+  return sectorOperatingRules.find((rule) => rule.match.some((term) => haystack.includes(term)))
 }
 
 function isSseLikeInstrument(fundamentals: CompanyFundamentals | undefined, quoteKey: string) {
@@ -2152,6 +2082,81 @@ function processDisciplineScore(form: AnalysisForm, riskPlanDefined: boolean, re
   return clamp(score)
 }
 
+function varsityCoverage(moduleId: VarsityDerivedRule['module']) {
+  return varsityModuleCoverage.find((item) => item.id === moduleId)
+}
+
+function varsityRule(ruleId: string) {
+  return varsityDerivedRules.find((rule) => rule.id === ruleId)
+}
+
+function compactRuleValue(rule: VarsityDerivedRule) {
+  return `${rule.moduleLabel} | ${rule.evidenceChapterCount} chapter matches`
+}
+
+function varsityRuleScore(rule: VarsityDerivedRule, processScore: number) {
+  if (rule.module === 'innerworth') {
+    return rule.tone === 'negative' ? Math.min(48, processScore) : Math.max(42, processScore)
+  }
+  if (rule.tone === 'negative') return 34
+  if (rule.tone === 'positive') return 62
+  return 52
+}
+
+function varsityRuleWeight(rule: VarsityDerivedRule) {
+  const chapterWeight = Math.min(0.25, Math.log10(Math.max(1, rule.evidenceChapterCount)) / 5)
+  return Math.round((0.18 + Math.abs(rule.scoreImpact) * 0.35 + chapterWeight) * 100) / 100
+}
+
+function displayVarsityModule(rule: VarsityDerivedRule): VarsityLesson['module'] {
+  if (rule.module === 'sector-analysis') return 'Sector Analysis'
+  if (rule.module === 'sse') return 'SSE'
+  if (rule.module === 'nps') return 'NPS'
+  return 'Innerworth'
+}
+
+function selectVarsityRulesForAnalysis(options: {
+  form: AnalysisForm
+  fundamentals?: CompanyFundamentals
+  riskPlanDefined: boolean
+  rewardRisk?: number
+  sectorRule?: SectorRule
+  sseLike: boolean
+  processScore: number
+}) {
+  const selected: VarsityDerivedRule[] = []
+  const add = (ruleId: string) => {
+    const rule = varsityRule(ruleId)
+    if (rule && !selected.some((item) => item.id === rule.id)) selected.push(rule)
+  }
+
+  add('innerworth_process_before_outcome')
+  if (!options.riskPlanDefined || options.rewardRisk === undefined || options.rewardRisk < 1.5) add('innerworth_accept_risk_loss')
+  if (options.processScore < 58 || !options.form.thesis.trim()) add('innerworth_objectivity_facts')
+  if (!options.form.alreadyHold && !parseNumber(options.form.capital)) add('innerworth_capital_size_matters')
+  if (options.form.riskProfile === 'aggressive' || options.form.riskProfile === 'balanced_aggressive') add('innerworth_impulse_control')
+  if (options.processScore < 52) add('innerworth_flexible_stand_aside')
+  if (options.processScore < 48) add('innerworth_stress_resilience')
+
+  const sectorLabel = options.sectorRule?.label.toLowerCase() ?? ''
+  if (sectorLabel.includes('auto')) add('sector_auto_operating_lens')
+  else if (sectorLabel.includes('bank') || sectorLabel.includes('lender')) add('sector_banking_asset_quality')
+  else if (sectorLabel.includes('information technology')) add('sector_it_margin_client_lens')
+  else if (sectorLabel.includes('cement') || sectorLabel.includes('steel') || sectorLabel.includes('metal')) add('sector_cyclical_cost_capacity')
+  else if (sectorLabel.includes('hotel') || sectorLabel.includes('retail')) add('sector_consumer_store_lens')
+  else if (sectorLabel.includes('real estate')) add('sector_real_estate_cash_flow')
+
+  add('nps_goal_money_separation')
+  if (options.form.horizon === '1-3y' || options.form.horizon === '3y+') add('nps_asset_allocation_horizon')
+  if (!options.form.alreadyHold && parseNumber(options.form.capital)) add('nps_liquidity_tax_lockin')
+  if (options.sseLike) {
+    add('sse_instrument_type_filter')
+    add('sse_zczp_no_normal_return')
+  }
+
+  return selected.slice(0, 9)
+}
+
 function buildVarsityLessons(
   form: AnalysisForm,
   fundamentals: CompanyFundamentals | undefined,
@@ -2159,8 +2164,13 @@ function buildVarsityLessons(
   rewardRisk: number | undefined,
   sectorRule: SectorRule | undefined,
   sseLike: boolean,
+  selectedRules: readonly VarsityDerivedRule[],
 ): VarsityLesson[] {
   const processScore = processDisciplineScore(form, riskPlanDefined, rewardRisk)
+  const innerworthCoverage = varsityCoverage('innerworth')
+  const sectorCoverage = varsityCoverage('sector-analysis')
+  const npsCoverage = varsityCoverage('nps')
+  const sseCoverage = varsityCoverage('sse')
   const lessons: VarsityLesson[] = [
     {
       module: 'Innerworth',
@@ -2169,11 +2179,12 @@ function buildVarsityLessons(
       tone: toneFromScore(processScore),
       text:
         processScore >= 62
-          ? 'Your setup has enough process structure to reduce impulsive decisions: symbol, money context, risk budget, and thesis controls are mostly visible.'
-          : 'The process layer is still incomplete. That raises the chance of acting from fear, regret, excitement, or the urge to be right instead of following a plan.',
+          ? `Your setup has enough process structure to reduce impulsive decisions. The Innerworth layer was built from ${innerworthCoverage?.chaptersRead ?? 0} read chapters and is used here as a behaviour and execution filter.`
+          : `The process layer is still incomplete. The Innerworth layer was built from ${innerworthCoverage?.chaptersRead ?? 0} read chapters and is warning against fear, regret, excitement, or the urge to be right.`,
       action: riskPlanDefined
         ? 'Keep the invalidation line visible and do not change it after price moves against you unless the thesis genuinely changes.'
         : 'Before buying, define the invalidation line, target zone, and maximum rupee loss. Without those, quantity is only a guess.',
+      evidenceChapterCount: innerworthCoverage?.chaptersRead,
     },
     {
       module: 'Sector Analysis',
@@ -2181,11 +2192,12 @@ function buildVarsityLessons(
       source: sectorRule?.source ?? varsitySourceLinks.sector,
       tone: sectorRule && fundamentals ? 'positive' : 'neutral',
       text: sectorRule
-        ? `${sectorRule.text} The app should cross-check: ${sectorRule.metrics.join(', ')}.`
-        : 'The company did not map cleanly to one of the loaded sector modules. The verdict still uses ratios, statements, price action, and updates, but sector-specific operating metrics should be checked manually.',
+        ? `${sectorRule.text} The sector layer was refreshed from ${sectorCoverage?.chaptersRead ?? 0} Sector Analysis chapters. Cross-check: ${sectorRule.metrics.join(', ')}.`
+        : `The company did not map cleanly to one of the loaded sector modules. The ${sectorCoverage?.chaptersRead ?? 0} Sector Analysis chapters still inform the generic checklist, but sector-specific operating metrics should be checked manually.`,
       action: sectorRule
         ? 'Use the generic score as a first pass, then read this sector checklist before increasing position size.'
         : 'If this is a sector with special metrics, add them in the thesis field or verify them from filings before treating the verdict as high conviction.',
+      evidenceChapterCount: sectorCoverage?.chaptersRead,
     },
     {
       module: 'NPS',
@@ -2193,9 +2205,10 @@ function buildVarsityLessons(
       source: varsitySourceLinks.nps,
       tone: 'neutral',
       text:
-        'Retirement and long-lock-in money should not be treated like trading capital. The NPS module is used here as a guardrail: do not risk money meant for retirement, tax planning, emergency needs, or near-term obligations.',
+        `Retirement and long-lock-in money should not be treated like trading capital. The NPS layer was built from ${npsCoverage?.chaptersRead ?? 0} chapters and is used as a guardrail against mixing goal money with market-risk capital.`,
       action:
         'Use the capital field only for deployable market capital. Keep retirement allocations, emergency funds, and fixed-goal money outside this decision unless you deliberately mark them as investable risk capital.',
+      evidenceChapterCount: npsCoverage?.chaptersRead,
     },
     {
       module: 'SSE',
@@ -2208,8 +2221,22 @@ function buildVarsityLessons(
       action: sseLike
         ? 'Do not use chart patterns or ordinary valuation ratios alone. Confirm instrument type, liquidity, redemption terms, disclosures, and whether financial return is even the right objective.'
         : 'No special SSE handling is needed for this instrument from the current data.',
+      evidenceChapterCount: sseCoverage?.chaptersRead,
     },
   ]
+  selectedRules.forEach((rule) => {
+    if (lessons.some((lesson) => lesson.title === rule.title && lesson.module === displayVarsityModule(rule))) return
+    lessons.push({
+      module: displayVarsityModule(rule),
+      title: rule.title,
+      source: rule.source,
+      tone: rule.tone,
+      text: rule.principle,
+      action: `${rule.action} Caution: ${rule.caution}`,
+      evidenceChapterCount: rule.evidenceChapterCount,
+      chapterRefs: rule.chapterRefs,
+    })
+  })
   return lessons
 }
 
@@ -2895,6 +2922,15 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
       : 'For a new position, defined invalidation plus a capital/risk budget turn opinion into a controllable trade plan.',
   )
   const innerworthProcessScore = processDisciplineScore(form, riskPlanDefined, rewardRiskForScore)
+  const selectedVarsityRules = selectVarsityRulesForAnalysis({
+    form,
+    fundamentals: companyFundamentals,
+    riskPlanDefined,
+    rewardRisk: rewardRiskForScore,
+    sectorRule,
+    sseLike: sseLikeInstrument,
+    processScore: innerworthProcessScore,
+  })
   addSignal(
     riskSignals,
     'Varsity',
@@ -2924,6 +2960,17 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
       'The SSE module warns that social-impact and ZCZP-style instruments may not behave like ordinary listed equities; normal chart and valuation rules should be downgraded until instrument terms are verified.',
     )
   }
+  selectedVarsityRules.forEach((rule) => {
+    addSignal(
+      riskSignals,
+      'Varsity',
+      rule.title,
+      compactRuleValue(rule),
+      varsityRuleScore(rule, innerworthProcessScore),
+      varsityRuleWeight(rule),
+      `${rule.principle} Checklist: ${rule.checklist.join(', ')}. ${rule.action}`,
+    )
+  })
   addSignal(riskSignals, 'Risk', 'Legacy checklist', `${Math.round(clamp(score))}/100`, clamp(score), 1, 'This preserves the earlier checklist logic for constraints, holding state, liquidity, and supplied evidence.')
 
   const profileWeights =
@@ -2971,7 +3018,15 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
     },
     { label: 'Updates and events', score: Math.round(newsScore), weight: normalisedWeights.news, tone: toneFromScore(newsScore), rationale: 'Top company/exchange updates and event tone.' },
   ]
-  const varsityLessons = buildVarsityLessons(form, companyFundamentals, riskPlanDefined, rewardRiskForScore, sectorRule, sseLikeInstrument)
+  const varsityLessons = buildVarsityLessons(
+    form,
+    companyFundamentals,
+    riskPlanDefined,
+    rewardRiskForScore,
+    sectorRule,
+    sseLikeInstrument,
+    selectedVarsityRules,
+  )
   const adaptiveSignals = [...technicalSignals, ...fundamentalSignals, ...statementSignals, ...riskSignals, ...newsSignals]
   const adaptiveScore =
     technicalScore * normalisedWeights.technical +
@@ -4916,7 +4971,15 @@ function App() {
                       <strong>{lesson.title}</strong>
                     </div>
                     <p>{lesson.text}</p>
+                    {lesson.evidenceChapterCount !== undefined ? (
+                      <small>{lesson.evidenceChapterCount} read chapter{lesson.evidenceChapterCount === 1 ? '' : 's'} support this rule group.</small>
+                    ) : null}
                     <small>{lesson.action}</small>
+                    {lesson.chapterRefs?.length ? (
+                      <small>
+                        Example matches: {lesson.chapterRefs.slice(0, 2).map((ref) => ref.title).join(' | ')}
+                      </small>
+                    ) : null}
                     <a href={lesson.source} target="_blank" rel="noreferrer">
                       Source module
                     </a>
