@@ -2094,15 +2094,17 @@ function isSseLikeInstrument(fundamentals: CompanyFundamentals | undefined, quot
 }
 
 function processDisciplineScore(form: AnalysisForm, riskPlanDefined: boolean, rewardRisk: number | undefined) {
+  const hasDeployableOrAddMoreCapital = Boolean(parseNumber(form.capital))
+  const maxRiskApplies = !form.alreadyHold || hasDeployableOrAddMoreCapital
   let score = 42
   if (form.ticker.trim()) score += 5
-  if (form.alreadyHold || parseNumber(form.capital)) score += 8
-  if (parseNumber(form.maxRisk)) score += 8
+  if (form.alreadyHold || hasDeployableOrAddMoreCapital) score += 8
+  if (maxRiskApplies && parseNumber(form.maxRisk)) score += 8
   if (riskPlanDefined) score += 14
   if (parseNumber(form.targetPrice)) score += 6
   if (rewardRisk !== undefined) score += rewardRisk >= 2 ? 10 : rewardRisk >= 1.5 ? 5 : -7
   if (form.thesis.trim().length > 30) score += 5
-  if (!form.alreadyHold && !parseNumber(form.capital)) score -= 12
+  if (!form.alreadyHold && !hasDeployableOrAddMoreCapital) score -= 12
   return clamp(score)
 }
 
@@ -2981,14 +2983,23 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
     0.8,
     'Innerworth psychology lessons are applied as process checks: define risk before action, avoid regret trades, keep goals realistic, and stand aside when the plan is incomplete.',
   )
+  const npsCapitalLabel = capital
+    ? decisionMode === 'holding-review'
+      ? 'Add-more capital entered'
+      : 'Deployable capital entered'
+    : decisionMode === 'holding-review'
+      ? 'No add-more capital'
+      : 'No deployable capital'
   addSignal(
     riskSignals,
     'Varsity',
     'NPS capital guardrail',
-    capital ? 'Deployable capital entered' : 'No deployable capital',
+    npsCapitalLabel,
     capital ? 56 : decisionMode === 'holding-review' ? 54 : 44,
     0.25,
-    'The NPS module is used as a personal-finance guardrail: retirement, emergency, tax-planning, or locked-goal money should not be mixed with trade capital.',
+    decisionMode === 'holding-review'
+      ? 'The NPS module is used as a capital-segregation guardrail: existing holdings can be reviewed without new cash; enter add-more capital only when that money is genuinely deployable market capital.'
+      : 'The NPS module is used as a personal-finance guardrail: retirement, emergency, tax-planning, or locked-goal money should not be mixed with trade capital.',
   )
   if (sseLikeInstrument) {
     addSignal(
@@ -3055,7 +3066,9 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
       rationale:
         decisionMode === 'fresh-entry'
           ? 'Capital, starter quantity, reward/risk, invalidation, risk budget, and the legacy checklist.'
-          : 'Drawdown, concentration, reward/risk, invalidation, risk budget, and the legacy checklist.',
+          : capital
+            ? 'Drawdown, concentration, reward/risk, invalidation, add-more risk budget, and the legacy checklist.'
+            : 'Drawdown, concentration, reward/risk, invalidation, and the legacy checklist. Add-more risk budget is ignored until add-more capital is entered.',
     },
     { label: 'Updates and events', score: Math.round(newsScore), weight: normalisedWeights.news, tone: toneFromScore(newsScore), rationale: 'Top company/exchange updates and event tone.' },
   ]
@@ -3109,14 +3122,15 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
         verdictClass = 'avoid'
       }
     } else {
+      const severeDrawdown = positionPnlPct !== undefined && positionPnlPct < -50
       if (finalScore >= 75) {
-        verdict = 'Add / Continue Holding'
+        verdict = severeDrawdown ? 'Continue, Add Only on New Thesis' : 'Add / Continue Holding'
         verdictClass = 'buy'
       } else if (finalScore >= 62) {
-        verdict = 'Hold or Add on Dips'
+        verdict = severeDrawdown ? 'Hold, No Averaging Yet' : 'Hold or Add on Dips'
         verdictClass = 'hold'
       } else if (finalScore >= 48) {
-        verdict = 'Hold and Watch'
+        verdict = severeDrawdown ? 'Hold Under Review' : 'Hold and Watch'
         verdictClass = 'watch'
       } else if (finalScore >= 32) {
         verdict = 'Reduce Risk'
@@ -3172,8 +3186,10 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
               : 'No fresh buy yet. The current evidence is not strong enough to justify deploying capital.'
         : finalScore >= 62
           ? 'Existing holding can be continued, but additions need a fresh entry trigger and risk budget.'
-          : finalScore >= 48
-            ? 'Hold only with discipline. Watch the invalidation level, company updates, and whether technical structure improves.'
+        : finalScore >= 48
+            ? positionPnlPct !== undefined && positionPnlPct < -50
+              ? 'Hold under review, not hold with comfort. Do not average down; watch invalidation, liquidity, profit trend, and whether price can reclaim key averages.'
+              : 'Hold only with discipline. Watch the invalidation level, company updates, and whether technical structure improves.'
             : 'Review whether to reduce or exit. Weak evidence should not be protected only because the position already exists.'
   const exitPlan =
     missing.length > 0
@@ -3284,7 +3300,7 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
     sectorRule
       ? `Sector Analysis adds a ${sectorRule.label} lens, so the verdict asks you to verify sector drivers instead of relying only on generic ratios.`
       : 'Sector Analysis did not find a specialised sector mapping, so the verdict stays more dependent on generic ratios, statements, price action, and updates.',
-    `Innerworth psychology checks the quality of your process. Current process discipline is ${Math.round(innerworthProcessScore)}/100, based on risk budget, invalidation, target, thesis, and whether you are acting from a defined plan.`,
+    `Innerworth psychology checks the quality of your process. Current process discipline is ${Math.round(innerworthProcessScore)}/100, based on ${decisionMode === 'holding-review' && !capital ? 'holding context, invalidation, target, thesis, and whether you are avoiding emotional averaging' : 'risk budget, invalidation, target, thesis, and whether you are acting from a defined plan'}.`,
   ]
 
   const steps = [
@@ -3320,7 +3336,9 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
     {
       title: decisionMode === 'fresh-entry' ? '3. Capital at risk' : '3. Portfolio risk',
       plainEnglish: form.alreadyHold
-        ? `This stock is currently about ${formatPercent(portfolioWeight)} of the portfolio value shown in the app. ${capital ? `Fresh add-more risk budget is ${formatInr(riskCapital)}.` : 'No fresh capital was entered, so this is treated as a holding review.'}`
+        ? portfolioWeight === undefined
+          ? `No holdings file is loaded, so portfolio concentration is unknown. ${capital ? `Fresh add-more risk budget is ${formatInr(riskCapital)}.` : 'No add-more capital was entered, so this is treated as a holding review.'}`
+          : `This stock is currently about ${formatPercent(portfolioWeight)} of the loaded portfolio value. ${capital ? `Fresh add-more risk budget is ${formatInr(riskCapital)}.` : 'No add-more capital was entered, so this is treated as a holding review.'}`
         : `This is being treated as a new position. Your risk budget is ${formatInr(riskCapital)}, using ${riskBudgetSourceText}.`,
       formula: form.alreadyHold
         ? 'Portfolio weight = position value / total portfolio value. Fresh risk budget is calculated only if additional capital is supplied.'
@@ -3331,9 +3349,11 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
           : 'Capital tells us how much you can deploy, but risk budget tells us how much you can afford to be wrong by. That is the number that controls quantity.',
       takeaway:
         form.alreadyHold
-          ? portfolioWeight !== undefined && portfolioWeight > 20
-            ? 'This is a high-concentration position, so the app penalises aggressive adding.'
-            : 'The current concentration is not extreme based on the loaded portfolio.'
+          ? portfolioWeight === undefined
+            ? 'Upload holdings before using concentration as a comfort signal; until then, do not assume the position is small.'
+            : portfolioWeight > 20
+              ? 'This is a high-concentration position, so the app penalises aggressive adding.'
+              : 'The loaded portfolio does not show extreme concentration, but adding still needs a fresh thesis and risk plan.'
           : suggestedShares !== undefined
             ? `Risk-sized quantity is ${formatNumber(suggestedShares)} shares from the current inputs.`
             : 'Enter invalidation to convert the capital amount into a true risk-sized quantity.',
@@ -3537,12 +3557,14 @@ function App() {
   const portfolioReturn = portfolio.cost ? (portfolio.pnl / portfolio.cost) * 100 : 0
   const capitalNum = parseNumber(form.capital)
   const maxRiskNum = parseNumber(form.maxRisk)
+  const addMoreRiskControlsActive = !isHoldingReview || Boolean(capitalNum)
   const riskSliderMax = form.riskMode === 'percent' ? 10 : Math.max(5000, Math.ceil((capitalNum || 100000) * 0.12))
   const riskSliderStep = form.riskMode === 'percent' ? 0.25 : 500
-  const riskSliderValue = clamp(maxRiskNum ?? (form.riskMode === 'percent' ? 2.5 : 2500), form.riskMode === 'percent' ? 0.25 : 500, riskSliderMax)
+  const riskSliderDefault = form.riskMode === 'percent' ? defaultRiskPercentForProfile(form.riskProfile) : 2500
+  const riskSliderValue = clamp(maxRiskNum ?? riskSliderDefault, form.riskMode === 'percent' ? 0.25 : 500, riskSliderMax)
   const riskSliderDisplay = form.riskMode === 'percent' ? `${riskSliderValue.toFixed(2)}%` : formatInr(riskSliderValue)
   const capitalHelpText = isHoldingReview
-    ? 'Optional. Use this only if you are considering adding fresh money to the existing holding. For a plain hold/reduce/exit review, quantity and average price matter more than fresh capital. If you enter fresh capital, the app uses it only for add-more sizing and risk budget.'
+    ? 'Optional. Use this only if you are considering adding more money to the existing holding. For a plain hold/reduce/exit review, quantity and average price matter more than add-more capital. If you enter a value, the app uses it only for add-more sizing and risk budget.'
     : 'Required for a fresh entry. This is the deployable money for the new idea, used to estimate practical quantity, starter tranche, and risk budget. Do not put emergency, retirement, tax, or fixed-goal money here.'
   const boughtOnHelpText =
     'Optional. This date helps judge how long the thesis has had to work before you call it a failure or success. It does not decide the verdict alone.'
@@ -3574,6 +3596,7 @@ function App() {
   const activeQuote = activeSnapshot.quotes[analysis.quoteKey]
   const activeFundamentals = activeSnapshot.fundamentals?.[analysis.quoteKey]
   const activeCandles = activeSnapshot.candles[analysis.quoteKey] ?? emptyCandles
+  const hasPortfolioContext = analysis.portfolioWeight !== undefined
   const activeTickerDisplay = decisionSymbol || 'No ticker selected'
   const activeInstrumentName = activeFundamentals?.name || (form.ticker.trim() ? 'Company data pending' : 'Choose a fund or index')
   const activeInstrumentSector = [activeFundamentals?.sector, activeFundamentals?.industry].filter(Boolean).join(' - ')
@@ -3688,6 +3711,9 @@ function App() {
   const debtEquity = parseNumber(form.debtEquity) ?? companyDebtEquity
   const roce = parseNumber(form.roce) ?? companyRoce
   const pe = parseNumber(form.pe) ?? companyTrailingPe
+  const fundamentalLayerScore = componentScore(analysis, 'Fundamental quality') ?? analysis.score
+  const qualityChecklistTone = toneFromScore(fundamentalLayerScore)
+  const qualityChecklistLabel = fundamentalLayerScore >= 62 ? 'Supportive' : fundamentalLayerScore >= 48 ? 'Mixed' : 'Weak'
   const profitStatus =
     effectiveProfitTrend === 'growing' || effectiveProfitTrend === 'stable'
       ? 'strong'
@@ -3862,7 +3888,9 @@ function App() {
     if (label.includes('fundamental')) return 'Use this layer to decide conviction and position size; weak business quality should shrink capital even when the chart looks tempting.'
     if (label.includes('statement')) return 'Use this layer to check whether profits are backed by sales, cash, reserves, and manageable borrowings.'
     if (label.includes('risk')) return isHoldingReview
-      ? 'Use this layer to decide hold/add/reduce discipline: drawdown, concentration, invalidation, and add-more capital matter most.'
+      ? capitalNum
+        ? 'Use this layer to decide hold/add/reduce discipline: drawdown, concentration, invalidation, and add-more capital matter most.'
+        : 'Use this layer to decide hold/reduce/exit discipline: drawdown, concentration, reward/risk, and invalidation matter most because no add-more capital is active.'
       : 'Use this layer before buying: it converts the idea into quantity, invalidation, and reward/risk.'
     return 'Use this layer as an event-risk check; a fresh filing can temporarily override clean technical or fundamental evidence.'
   }
@@ -4349,7 +4377,7 @@ function App() {
     return [
       `Ticker: ${form.exchange}:${form.ticker.toUpperCase()}`,
       `Verdict: ${analysis.verdict} (${analysis.score}/100, ${analysis.confidenceLabel} confidence)`,
-      `${form.alreadyHold ? 'Fresh capital' : 'Capital to deploy'}: ${formatInr(parseNumber(form.capital))}`,
+      `${form.alreadyHold ? 'Add-more capital' : 'Capital to deploy'}: ${form.alreadyHold && !parseNumber(form.capital) ? 'Not adding' : formatInr(parseNumber(form.capital))}`,
       `Horizon: ${horizonLabels[form.horizon]}`,
       `Risk profile: ${riskProfileLabels[form.riskProfile]}`,
       `Already hold: ${form.alreadyHold ? 'Yes' : 'No'}`,
@@ -4848,7 +4876,7 @@ function App() {
                     <input inputMode="decimal" value={form.averagePrice} onChange={(event) => updateForm('averagePrice', event.target.value)} />
                   </label>
                   <label className="field">
-                    <FieldLabel help={capitalHelpText}>Fresh capital</FieldLabel>
+                    <FieldLabel help={capitalHelpText}>Add-more capital</FieldLabel>
                     <input inputMode="decimal" value={form.capital} onChange={(event) => updateForm('capital', event.target.value)} />
                   </label>
                 </div>
@@ -4894,36 +4922,47 @@ function App() {
               </div>
               </div>
 
-              <div className="form-grid risk-grid-row">
-                <label className="field risk-slider-field">
-                  <span className="range-field-heading">
-                    <FieldLabel help={requiredHelp.maxRisk}>{isHoldingReview ? 'Fresh max risk' : 'Max risk'}</FieldLabel>
-                    <output>{riskSliderDisplay}</output>
-                  </span>
-                  <input
-                    aria-label={isHoldingReview ? 'Fresh max risk' : 'Max risk'}
-                    max={riskSliderMax}
-                    min={form.riskMode === 'percent' ? 0.25 : 500}
-                    step={riskSliderStep}
-                    type="range"
-                    value={riskSliderValue}
-                    onInput={(event) => updateForm('maxRisk', event.currentTarget.value)}
-                    onChange={(event) => updateForm('maxRisk', event.target.value)}
-                  />
-                  <span className="range-scale">
-                    <small>{form.riskMode === 'percent' ? '0.25%' : formatInr(500)}</small>
-                    <small>{form.riskMode === 'percent' ? '10%' : formatInr(riskSliderMax)}</small>
-                  </span>
-                </label>
-                <label className="field">
-                  <FieldLabel help={requiredHelp.riskUnit}>Risk unit</FieldLabel>
-                  <select value={form.riskMode} onChange={(event) => updateForm('riskMode', event.target.value as RiskMode)}>
-                    <option value="percent">% of capital</option>
-                    <option value="amount">Rupee amount</option>
-                  </select>
-                  {isHoldingReview && <span className="field-note">Percentage mode uses the fresh capital field, not your existing invested amount.</span>}
-                </label>
-              </div>
+              {addMoreRiskControlsActive ? (
+                <div className="form-grid risk-grid-row">
+                  <label className="field risk-slider-field">
+                    <span className="range-field-heading">
+                      <FieldLabel help={requiredHelp.maxRisk}>{isHoldingReview ? 'Add-more max risk' : 'Max risk'}</FieldLabel>
+                      <output>{riskSliderDisplay}</output>
+                    </span>
+                    <input
+                      aria-label={isHoldingReview ? 'Add-more max risk' : 'Max risk'}
+                      max={riskSliderMax}
+                      min={form.riskMode === 'percent' ? 0.25 : 500}
+                      step={riskSliderStep}
+                      type="range"
+                      value={riskSliderValue}
+                      onInput={(event) => updateForm('maxRisk', event.currentTarget.value)}
+                      onChange={(event) => updateForm('maxRisk', event.target.value)}
+                    />
+                    <span className="range-scale">
+                      <small>{form.riskMode === 'percent' ? '0.25%' : formatInr(500)}</small>
+                      <small>{form.riskMode === 'percent' ? '10%' : formatInr(riskSliderMax)}</small>
+                    </span>
+                  </label>
+                  <label className="field">
+                    <FieldLabel help={requiredHelp.riskUnit}>Risk unit</FieldLabel>
+                    <select value={form.riskMode} onChange={(event) => updateForm('riskMode', event.target.value as RiskMode)}>
+                      <option value="percent">% of capital</option>
+                      <option value="amount">Rupee amount</option>
+                    </select>
+                    {isHoldingReview && <span className="field-note">Percentage mode uses add-more capital, not your existing invested amount.</span>}
+                  </label>
+                </div>
+              ) : (
+                <div className="risk-idle-panel">
+                  <strong>Add-more sizing is inactive</strong>
+                  <p>
+                    This is an existing-holding review with no add-more capital entered. The verdict focuses on quantity, average price, LTP, P&L,
+                    invalidation, target, company quality, liquidity, and chart structure. Enter add-more capital only if you are actively considering
+                    buying more.
+                  </p>
+                </div>
+              )}
               {freeRefreshMessage && view === 'setup' && (
                 <div className={`refresh-message ${freeRefreshState}`}>
                   <p>{freeRefreshMessage}</p>
@@ -5065,14 +5104,15 @@ function App() {
             <p className="verdict-summary">
               {isHoldingReview ? (
                 <>
-                  The app reads this existing position as <strong>{analysis.verdict}</strong> with {analysis.confidenceLabel.toLowerCase()} confidence.
-                  It is using {formatInr(analysis.ltp)} as the analysis price, {formatPercent(analysis.positionPnlPct)} position P&L, and{' '}
-                  {formatPercent(analysis.portfolioWeight)} portfolio weight.
+                  The app reads this existing position as <strong>{analysis.verdict}</strong> with {analysis.confidenceLabel.toLowerCase()} data
+                  confidence. It is using {formatInr(analysis.ltp)} as the analysis price, {formatPercent(analysis.positionPnlPct)} position P&L, and{' '}
+                  {hasPortfolioContext ? `${formatPercent(analysis.portfolioWeight)} portfolio weight` : 'no portfolio-weight read because no holdings file is loaded'}.
+                  Data confidence means evidence coverage, not certainty of recovery.
                 </>
               ) : (
                 <>
                   This is a fresh buy decision. The app reads it as <strong>{analysis.verdict}</strong> with {analysis.confidenceLabel.toLowerCase()}{' '}
-                  confidence. It is using {formatInr(analysis.ltp)} as the analysis price, {formatInr(capitalNum)} deployable capital, and{' '}
+                  data confidence. It is using {formatInr(analysis.ltp)} as the analysis price, {formatInr(capitalNum)} deployable capital, and{' '}
                   {formatInr(analysis.riskCapital)} risk budget.
                 </>
               )}
@@ -5131,7 +5171,7 @@ function App() {
                 </>
               )}
               <div className={`metric tone-${confidenceTone}`}>
-                <span>Confidence</span>
+                <span>Data confidence</span>
                 <strong>{analysis.confidenceLabel}</strong>
               </div>
             </div>
@@ -5960,16 +6000,18 @@ function App() {
                     <span className="mini-label">Portfolio exposure</span>
                     <h3>Concentration</h3>
                   </div>
-                  <strong>{formatPercent(analysis.portfolioWeight)}</strong>
+                  <strong>{hasPortfolioContext ? formatPercent(analysis.portfolioWeight) : 'Not loaded'}</strong>
                 </div>
                 <div className="donut-wrap">
                   <div className="donut" style={percentStyle(analysis.portfolioWeight, '--weight')}>
-                    <span>{formatPercent(analysis.portfolioWeight)}</span>
+                    <span>{hasPortfolioContext ? formatPercent(analysis.portfolioWeight) : '-'}</span>
                   </div>
                   <div>
-                    <p>One-stock weight in the loaded portfolio.</p>
+                    <p>{hasPortfolioContext ? 'One-stock weight in the loaded portfolio.' : 'Upload holdings to calculate one-stock exposure.'}</p>
                     <p className="caption">
-                      {activeTickerDisplay} is {formatPercent(analysis.portfolioWeight)} of the loaded portfolio. Higher concentration means the app needs stronger proof before suggesting an add; lower concentration gives more room but still needs a risk plan.
+                      {hasPortfolioContext
+                        ? `${activeTickerDisplay} is ${formatPercent(analysis.portfolioWeight)} of the loaded portfolio. Higher concentration means the app needs stronger proof before suggesting an add; lower concentration gives more room but still needs a risk plan.`
+                        : `This manually entered holding can still be analysed, but concentration is unknown until a holdings file is loaded. Do not add more without checking how large this position is versus the full portfolio.`}
                     </p>
                   </div>
                 </div>
@@ -5981,7 +6023,7 @@ function App() {
                     <span className="mini-label">Risk plan</span>
                     <h3>Size and Reward</h3>
                   </div>
-                  <strong>{formatInr(analysis.riskCapital)}</strong>
+                  <strong>{isHoldingReview && !capitalNum ? 'Add-more off' : formatInr(analysis.riskCapital)}</strong>
                 </div>
                 <div className="risk-grid">
                   <span className={invalidationPriceNum ? 'tone-neutral' : 'tone-negative'}>
@@ -5994,7 +6036,7 @@ function App() {
                   </span>
                   <span className={analysis.suggestedShares ? 'tone-positive' : 'tone-negative'}>
                     <b>Suggested shares</b>
-                    {formatNumber(analysis.suggestedShares)}
+                    {isHoldingReview && !capitalNum ? 'Inactive' : formatNumber(analysis.suggestedShares)}
                   </span>
                   <span className={`tone-${riskSetupTone}`}>
                     <b>Reward/risk</b>
@@ -6005,7 +6047,9 @@ function App() {
                   <div className="bar-fill score-fill" style={percentStyle(analysis.score)} />
                 </div>
                 <p className="caption">
-                  The current risk setup {riskPerShare ? `has ${formatInr(riskPerShare)} risk per share` : 'does not yet have a valid risk/share'}. Use this box to decide quantity before emotion takes over; without invalidation, the app cannot give a clean size.
+                  {isHoldingReview && !capitalNum
+                    ? `No add-more capital is active, so this box is a review tool, not a buy-size calculator. Risk/share is ${riskPerShare ? formatInr(riskPerShare) : 'not valid yet'} and reward/risk is ${rewardRisk === undefined ? 'not available' : `${rewardRisk.toFixed(1)}x`}.`
+                    : `The current risk setup ${riskPerShare ? `has ${formatInr(riskPerShare)} risk per share` : 'does not yet have a valid risk/share'}. Use this box to decide quantity before emotion takes over; without invalidation, the app cannot give a clean size.`}
                 </p>
               </article>
 
@@ -6040,13 +6084,13 @@ function App() {
                 </p>
               </article>
 
-              <article className={`visual-card quality-story tone-${confidenceTone}`}>
+              <article className={`visual-card quality-story tone-${qualityChecklistTone}`}>
                 <div className="visual-card-heading">
                   <div>
                     <span className="mini-label">Business filters</span>
                     <h3>Quality Checklist</h3>
                   </div>
-                  <strong>{analysis.confidenceLabel}</strong>
+                  <strong>{qualityChecklistLabel}</strong>
                 </div>
                 <div className="quality-grid">
                   {qualityFactors.map((factor) => (
@@ -6058,7 +6102,7 @@ function App() {
                   ))}
                 </div>
                 <p className="caption">
-                  These filters show whether the company quality is strong enough to support the chart. For {activeTickerDisplay}, missing or weak fundamentals should make you reduce confidence, even if price action looks tempting.
+                  {activeTickerDisplay} scores {Math.round(fundamentalLayerScore)}/100 on business quality. Use this as conviction sizing: weak market cap, ROCE, debt, valuation, or profit trend should reduce add/buy comfort even when the chart gives a short-term bounce.
                 </p>
               </article>
                 </div>
@@ -6484,8 +6528,8 @@ function App() {
             </div>
             <section className="metric-grid portfolio-inline-metrics" aria-label="Portfolio metrics">
               <div className="metric">
-                <span>Snapshot</span>
-                <strong>{providerLabel(activeSnapshot.provider)}</strong>
+                <span>Portfolio snapshot</span>
+                <strong>{hasUploadedHoldingsFeed ? providerLabel(activeSnapshot.provider) : 'No holdings loaded'}</strong>
               </div>
               <div className="metric">
                 <span>Current value</span>
