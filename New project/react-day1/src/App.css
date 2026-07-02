@@ -1273,6 +1273,16 @@ input[type='range'] {
   color: var(--text-primary);
 }
 
+.verdict-inline-warning {
+  max-width: none;
+  margin-top: 0;
+  border: 1px solid color-mix(in srgb, var(--warning) 42%, var(--border));
+  border-left: 4px solid var(--warning);
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--warning) 12%, transparent), transparent 70%), var(--surface-2);
+}
+
 .verdict-evidence-box {
   display: grid;
   gap: 14px;

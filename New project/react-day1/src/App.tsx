@@ -719,11 +719,16 @@ function SymbolCoverageList({ emptyLabel, items, tone }: { emptyLabel: string; i
 }
 
 function SyncCoveragePanel({ coverage }: { coverage: SyncCoverage }) {
+  const technicalMissing = coverage.technicalMissing.filter((symbol) => !isUnsupportedCoverageSymbol(symbol))
+  const fundamentalsMissing = coverage.fundamentalsMissing.filter((symbol) => !isUnsupportedCoverageSymbol(symbol))
+  const excludedSymbols = uniqueSymbols(
+    [...coverage.technicalMissing, ...coverage.fundamentalsMissing].filter((symbol) => isUnsupportedCoverageSymbol(symbol)),
+  )
   return (
     <div className="sync-coverage-panel">
       <div className="sync-coverage-heading">
         <span>Sync coverage</span>
-        <small>Technical means quote plus candle history. Fundamentals means company profile/ratios/statements data was loaded.</small>
+        <small>Technical means quote plus candle history. Fundamentals means company profile/ratios/statements data was loaded. Unlisted or ISIN-only rows stay in the portfolio but are excluded from listed-stock analysis.</small>
       </div>
       <div className="coverage-grid">
         <article className="coverage-card">
@@ -736,9 +741,9 @@ function SyncCoveragePanel({ coverage }: { coverage: SyncCoverage }) {
         <article className="coverage-card">
           <div className="coverage-card-title">
             <span>Technical still missing</span>
-            <strong>{coverage.technicalMissing.length}</strong>
+            <strong>{technicalMissing.length}</strong>
           </div>
-          <SymbolCoverageList emptyLabel="None missing." items={coverage.technicalMissing} tone="negative" />
+          <SymbolCoverageList emptyLabel="None missing." items={technicalMissing} tone="negative" />
         </article>
         <article className="coverage-card">
           <div className="coverage-card-title">
@@ -750,9 +755,16 @@ function SyncCoveragePanel({ coverage }: { coverage: SyncCoverage }) {
         <article className="coverage-card">
           <div className="coverage-card-title">
             <span>Fundamentals still missing</span>
-            <strong>{coverage.fundamentalsMissing.length}</strong>
+            <strong>{fundamentalsMissing.length}</strong>
           </div>
-          <SymbolCoverageList emptyLabel="None missing." items={coverage.fundamentalsMissing} tone="neutral" />
+          <SymbolCoverageList emptyLabel="None missing." items={fundamentalsMissing} tone="neutral" />
+        </article>
+        <article className="coverage-card">
+          <div className="coverage-card-title">
+            <span>Excluded from analysis</span>
+            <strong>{excludedSymbols.length}</strong>
+          </div>
+          <SymbolCoverageList emptyLabel="No unlisted or unsupported rows." items={excludedSymbols} tone="neutral" />
         </article>
       </div>
     </div>
@@ -1171,6 +1183,10 @@ function defaultScreenerSymbol(symbol: string) {
 function isLikelyIsinSymbol(symbol: string) {
   const { tradingsymbol } = splitMarketSymbol(symbol)
   return /^IN[A-Z0-9]{10}$/i.test(tradingsymbol)
+}
+
+function isUnsupportedCoverageSymbol(symbol: string) {
+  return symbol.trim().toUpperCase().startsWith('UNLISTED:') || isLikelyIsinSymbol(symbol)
 }
 
 function syncErrorsForSymbol(snapshot: Snapshot, symbol: string) {
@@ -2050,14 +2066,31 @@ function previousStatementNumber(fundamentals: CompanyFundamentals | undefined, 
   return numericValues.length > 1 ? numericValues[numericValues.length - 2].numeric : undefined
 }
 
+function meaningfulCompanyUpdates(updates: CompanyFundamentals['company_updates'] | undefined) {
+  const junkExactTitles = ['premium', "what's new", 'learn', 'changelog', 'login', 'register']
+  const junkUrlMatches = ['/premium', '/docs/changelog', 'bit.ly/learnscreener', '/login', '/register']
+  return (updates ?? [])
+    .filter((update) => {
+      const title = (update.title ?? '').trim().toLowerCase()
+      const url = (update.url ?? '').trim().toLowerCase()
+      const summary = (update.summary ?? '').trim().toLowerCase()
+      if (!title && !summary) return false
+      if (junkExactTitles.includes(title)) return false
+      if (junkUrlMatches.some((term) => url.includes(term))) return false
+      return true
+    })
+    .slice(0, 3)
+}
+
 function updateToneScore(updates: CompanyFundamentals['company_updates'] | undefined) {
-  if (!updates?.length) return 50
-  const toneScore = updates.slice(0, 3).reduce((sum, update) => {
+  const meaningfulUpdates = meaningfulCompanyUpdates(updates)
+  if (!meaningfulUpdates.length) return 50
+  const toneScore = meaningfulUpdates.reduce((sum, update) => {
     if (update.tone === 'positive') return sum + 68
     if (update.tone === 'negative') return sum + 32
     return sum + 52
   }, 0)
-  return toneScore / Math.min(updates.length, 3)
+  return toneScore / meaningfulUpdates.length
 }
 
 function compactSignalText(text: string | undefined, limit = 130) {
@@ -2091,6 +2124,22 @@ function isSseLikeInstrument(fundamentals: CompanyFundamentals | undefined, quot
   return ['social stock', 'zczp', 'zero coupon zero principal', 'non profit', 'npo ', 'development impact', 'donation'].some((term) =>
     haystack.includes(term),
   )
+}
+
+function isSpecialListedInstrument(fundamentals: CompanyFundamentals | undefined, holding: Holding | undefined, quoteKey: string) {
+  const text = [
+    quoteKey,
+    fundamentals?.name,
+    fundamentals?.business_summary,
+    holding?.tradingsymbol,
+    holding?.sector,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+  const isPartlyPaid = ['partly paid', 'partly-paid', 'partlypaid', '-e1', ' pp'].some((term) => text.includes(term))
+  const isDebtClass = (holding?.sector ?? '').trim().toUpperCase() === 'DEBT'
+  return isPartlyPaid || isDebtClass
 }
 
 function processDisciplineScore(form: AnalysisForm, riskPlanDefined: boolean, rewardRisk: number | undefined) {
@@ -2525,6 +2574,7 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
   const companyFundamentals = snapshot.fundamentals?.[quoteKey]
   const sectorRule = findSectorRule(companyFundamentals, quoteKey)
   const sseLikeInstrument = isSseLikeInstrument(companyFundamentals, quoteKey)
+  const specialListedInstrument = isSpecialListedInstrument(companyFundamentals, holding, quoteKey)
   const companyMarketCap = numberFrom(companyFundamentals?.market_cap)
   const companyDebtEquity = normaliseDebtEquity(companyFundamentals?.debt_to_equity)
   const companyTrailingPe = numberFrom(companyFundamentals?.trailing_pe)
@@ -2593,6 +2643,12 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
   }
   if (sseLikeInstrument) {
     cautions.push('SSE/social-impact instrument filter triggered. Normal listed-equity buy/sell logic may not apply without checking instrument terms and disclosures.')
+  }
+  if (specialListedInstrument) {
+    score -= 8
+    cautions.push(
+      'This looks like a special, partly-paid, or debt-class listed instrument. Ordinary equity chart and valuation signals are downgraded until instrument terms, call-money obligations, liquidity, and entitlement rules are checked.',
+    )
   }
 
   if (form.riskProfile === 'conservative') score -= 5
@@ -3253,6 +3309,9 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
   if (sseLikeInstrument) {
     doItems.push('Verify whether this is an SSE/social-impact instrument before using ordinary equity valuation or chart signals.')
   }
+  if (specialListedInstrument) {
+    doItems.push('Verify the instrument type before acting: check whether it is partly paid, debt-class, rights-linked, or otherwise different from a regular fully paid equity share.')
+  }
 
   const dontItems =
     decisionMode === 'fresh-entry'
@@ -3280,6 +3339,9 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
   dontItems.push('Do not use retirement, emergency, tax-planning, or fixed-goal money as trade capital. Keep deployable market capital separate.')
   if (sseLikeInstrument) {
     dontItems.push('Do not treat an SSE/ZCZP/social-impact instrument like a normal equity trade unless instrument terms, return objective, and liquidity are clear.')
+  }
+  if (specialListedInstrument) {
+    dontItems.push('Do not use ordinary equity valuation or chart signals alone for a special/partly-paid/debt-class holding; first confirm the contract terms and exit liquidity.')
   }
 
   const whyItems = [
@@ -3475,6 +3537,7 @@ function App() {
   const [mappingStatus, setMappingStatus] = useState('')
   const [uploadState, setUploadState] = useState<UploadState>('idle')
   const [uploadMessage, setUploadMessage] = useState('')
+  const [bridgeCacheLoading, setBridgeCacheLoading] = useState(false)
   const [theme, setTheme] = useState<ThemeMode>('dark')
   const [chartTimeframe, setChartTimeframe] = useState<ChartTimeframe>('6M')
   const [chartZoomLevel, setChartZoomLevel] = useState(1)
@@ -3598,6 +3661,7 @@ function App() {
   const activeCandles = activeSnapshot.candles[analysis.quoteKey] ?? emptyCandles
   const hasPortfolioContext = analysis.portfolioWeight !== undefined
   const activeTickerDisplay = decisionSymbol || 'No ticker selected'
+  const specialInstrumentWarning = analysis.cautions.find((item) => /special|partly-paid|partly paid|debt-class|call-money/i.test(item))
   const activeInstrumentName = activeFundamentals?.name || (form.ticker.trim() ? 'Company data pending' : 'Choose a fund or index')
   const activeInstrumentSector = [activeFundamentals?.sector, activeFundamentals?.industry].filter(Boolean).join(' - ')
   const activeChangePct =
@@ -4146,7 +4210,7 @@ function App() {
   ]
   const fetchedPros = activeFundamentals?.pros ?? []
   const fetchedCons = activeFundamentals?.cons ?? []
-  const companyUpdates = activeFundamentals?.company_updates ?? []
+  const companyUpdates = meaningfulCompanyUpdates(activeFundamentals?.company_updates)
   const fundamentalChecklist = [
     {
       title: fetchedPros.length ? 'Fetched strengths' : 'Annual report review',
@@ -4504,6 +4568,77 @@ function App() {
     }
     await refreshFreeData({ symbolsOverride: [decisionSymbol], includeHoldingsOverride: false, source: 'decision' })
     setView('verdict')
+  }
+
+  async function loadLocalBridgeCache() {
+    setBridgeCacheLoading(true)
+    setUploadState('uploading')
+    setUploadMessage('Loading the latest local bridge cache into this browser...')
+    setFreeRefreshMessage('')
+    setSyncCoverage(null)
+    try {
+      const bridgeUrl = requireMarketDataBridge('Local cache load')
+      const response = await fetch(apiUrl(bridgeUrl, '/api/free-data/latest'))
+      const data = await readResponseJson(response)
+      if (!response.ok) {
+        throw new Error(typeof data.error === 'string' ? data.error : 'Could not load the local bridge cache.')
+      }
+      const cachedSnapshot = data as Snapshot
+      const mergedRefresh = mergeRefreshedSnapshot(cachedSnapshot, activeSnapshot, { retainMarketData: true })
+      const nextSnapshot = mergedRefresh.snapshot
+      const coverage = buildSyncCoverage(nextSnapshot)
+      const pricedCount = Object.keys(nextSnapshot.quotes).length
+      const fundamentalsCount = filledFundamentalsCount(nextSnapshot)
+      const holdingsCount = nextSnapshot.holdings.length
+      setSnapshot(nextSnapshot)
+      setCacheState(cacheStateFromProvider(nextSnapshot.provider))
+      setSyncCoverage(coverage)
+      setSyncProgress(100)
+      setFreeRefreshState('done')
+      if (holdingsCount) {
+        setIncludeHoldings(true)
+        setUploadState('done')
+        setUploadMessage(
+          `Loaded ${holdingsCount} holdings from the local bridge cache into this browser. ${quotedHoldingsCount(nextSnapshot)} holdings have refreshed prices. You can remove or replace this browser-local feed any time.`,
+        )
+        setFreeRefreshMessage(`Loaded local bridge cache with ${pricedCount} priced symbols and fundamentals for ${fundamentalsCount} symbols.`)
+      } else {
+        setIncludeHoldings(false)
+        setUploadState('idle')
+        setUploadMessage('The local bridge cache was loaded, but it does not contain an uploaded holdings feed yet.')
+        setFreeRefreshMessage(`Loaded local bridge market cache with ${pricedCount} priced symbols and fundamentals for ${fundamentalsCount} symbols. No holdings feed was found.`)
+      }
+    } catch (error) {
+      setUploadState('error')
+      setFreeRefreshState('error')
+      setSyncProgress(0)
+      setUploadMessage(bridgeFailureMessage(error, 'Could not load the local bridge cache.'))
+    } finally {
+      setBridgeCacheLoading(false)
+    }
+  }
+
+  function clearBrowserWorkspace() {
+    try {
+      window.localStorage.removeItem(browserWorkspaceKey)
+    } catch {
+      // Local storage can be blocked in some private-browser modes; state reset still works for this tab.
+    }
+    setSnapshot(starterSnapshot)
+    setCacheState(cacheStateFromProvider(starterSnapshot.provider))
+    setForm(initialForm)
+    setDays(730)
+    setIncludeHoldings(false)
+    setFreeRefreshState('idle')
+    setFreeRefreshMessage('')
+    setSyncProgress(0)
+    setSyncCoverage(null)
+    setMappingDrafts({})
+    setMappingState('idle')
+    setMappingStatus('')
+    setUploadState('idle')
+    setUploadMessage('Browser workspace cleared. This tab is now back to a fresh private starting point.')
+    setView('setup')
   }
 
   function updateMappingDraft(symbol: string, field: keyof SymbolMappingDraft, value: string) {
@@ -5117,6 +5252,11 @@ function App() {
                 </>
               )}
             </p>
+            {specialInstrumentWarning ? (
+              <p className="verdict-summary verdict-inline-warning">
+                <strong>Special instrument check:</strong> {specialInstrumentWarning}
+              </p>
+            ) : null}
 
             <div className="metric-grid compact-metrics">
               <div className="metric tone-neutral">
@@ -6142,6 +6282,7 @@ function App() {
 
               <CollapsibleSection
                 className="sub-panel nested-collapse analysis-subsection"
+                defaultOpen
                 description="Business profile, valuation ratios, balance-sheet clues, cash-flow clues, and recent exchange/company updates."
                 headingClassName="subsection-heading"
                 headingLevel={3}
@@ -6210,7 +6351,7 @@ function App() {
                     <h3>Top 3 Important Updates</h3>
                     <p className="heading-subtext">Fetched from recent exchange announcements through Screener. Treat as a triage feed, then read the filing.</p>
                   </div>
-                  <strong>{companyUpdates.length ? `${companyUpdates.length}/3` : 'Needed'}</strong>
+                  <strong>{companyUpdates.length ? `${companyUpdates.length}/3` : 'None found'}</strong>
                 </div>
                 {companyUpdates.length ? (
                   <div className="company-updates-list">
@@ -6232,7 +6373,7 @@ function App() {
                   </div>
                 ) : (
                   <p className="company-summary">
-                    No recent update feed is loaded yet. Click Sync Market Data after restarting the local data server so the app can fetch recent exchange announcements.
+                    No meaningful recent company update was found in the fetched feed. Re-sync later and confirm important events from exchange filings before changing size.
                   </p>
                 )}
                 <p className="caption">Caption: this is not a news recommendation engine. It surfaces filings likely to matter: earnings, leadership, orders, corporate actions, and risk disclosures.</p>
@@ -6242,6 +6383,7 @@ function App() {
 
               <CollapsibleSection
                 className="sub-panel nested-collapse analysis-subsection"
+                defaultOpen
                 description="Business-quality score, statement flow, and due-diligence checks adapted from the Varsity fundamental-analysis process."
                 headingClassName="subsection-heading"
                 headingLevel={3}
@@ -6406,8 +6548,28 @@ function App() {
           <CollapsibleSection
             action={
               <div className="data-action-row">
-                <button type="button" onClick={() => void refreshFreeData({ source: 'data' })} disabled={freeRefreshState === 'refreshing'}>
+                <button
+                  className="secondary-action"
+                  type="button"
+                  onClick={() => void loadLocalBridgeCache()}
+                  disabled={freeRefreshState === 'refreshing' || bridgeCacheLoading}
+                >
+                  {bridgeCacheLoading ? 'Loading cache...' : 'Load Local Cache'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void refreshFreeData({ source: 'data' })}
+                  disabled={freeRefreshState === 'refreshing' || bridgeCacheLoading}
+                >
                   {freeRefreshState === 'refreshing' ? 'Syncing...' : 'Sync Market Data'}
+                </button>
+                <button
+                  className="secondary-action danger-action"
+                  type="button"
+                  onClick={clearBrowserWorkspace}
+                  disabled={freeRefreshState === 'refreshing' || bridgeCacheLoading}
+                >
+                  Clear Browser Data
                 </button>
               </div>
             }
@@ -6450,7 +6612,9 @@ function App() {
                 </span>
               </label>
               <p>
-                Keep this off when you only want to refresh the fund visible in the sticky header. Turn it on after uploading a holdings report to refresh the portfolio cache too.
+                {hasUploadedHoldingsFeed
+                  ? 'Keep this off when you only want to refresh the fund visible in the sticky header. Turn it on to refresh the active portfolio cache too.'
+                  : 'No holdings feed is active in this browser yet. Upload a Zerodha XLSX, or click Load Local Cache if your local data bridge already has an uploaded portfolio.'}
               </p>
             </div>
             {freeRefreshMessage && (
@@ -6582,7 +6746,7 @@ function App() {
                               type="button"
                               onClick={() => analyzeHolding(holding)}
                             >
-                              Analyze
+                              {canAnalyze ? 'Analyze' : 'Needs mapping'}
                             </button>
                           </td>
                         </tr>
