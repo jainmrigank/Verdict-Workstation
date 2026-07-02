@@ -18,7 +18,6 @@ type View = 'setup' | 'verdict' | 'technicals' | 'fundamentals' | 'reasoning' | 
 type CacheState = 'loading' | 'live' | 'free' | 'sample'
 type RefreshState = 'idle' | 'refreshing' | 'done' | 'error'
 type UploadState = 'idle' | 'uploading' | 'done' | 'error'
-type ServerRestartState = 'idle' | 'restarting' | 'done' | 'error'
 type ThemeMode = 'dark' | 'light'
 type ChartTimeframe = '1D' | '1M' | '3M' | '6M' | '1Y' | 'ALL'
 type ForecastHorizon = '5D' | '15D' | '1M' | '6M' | '1Y' | '3Y' | '5Y' | '10Y'
@@ -581,8 +580,10 @@ const optionalHelp = {
   thesis: 'Your notes do not auto-score yet, but they keep the decision checklist anchored to your actual investment reason.',
   holdingsRefresh:
     'When checked, sync refreshes every listed ticker from the uploaded holdings file along with the current decision ticker. Your imported portfolio table stays loaded either way.',
-  serverRestart: 'Restarts the local Python data bridge on port 8787. If an older bridge is already running, manually restart it once; after that this button can restart it from the app.',
 }
+
+const verdictLogicHelp =
+  'Unavailable metrics are not invented. Required gaps keep the verdict at Needs Input; optional gaps stay unknown, reduce confidence, or add caution. The score blends OHLCV, RSI, MACD, ATR, VWAP, Bollinger Bands, moving averages, liquidity, patterns, ratios, statements, company updates, portfolio/risk context, constraints, horizon weights, Innerworth process discipline, sector checks, NPS capital segregation, and SSE applicability.'
 
 const forecastHelp = {
   horizon: 'How far into the future the scenario range should extend. Short horizons rely more on volatility and technicals; long horizons rely more on fundamentals and valuation assumptions.',
@@ -644,6 +645,7 @@ function CollapsibleSection({
   id,
   staticOpen = false,
   title,
+  titleAddon,
 }: {
   action?: ReactNode
   bodyClassName?: string
@@ -657,6 +659,7 @@ function CollapsibleSection({
   id: string
   staticOpen?: boolean
   title: string
+  titleAddon?: ReactNode
 }) {
   const [openState, setOpenState] = useState({ id, isOpen: defaultOpen })
   const isOpen = staticOpen ? true : openState.id === id ? openState.isOpen : defaultOpen
@@ -670,13 +673,19 @@ function CollapsibleSection({
           {eyebrow && <p className="eyebrow">{eyebrow}</p>}
           <HeadingTag id={id}>
             {staticOpen ? (
-              <span className="static-section-title">{title}</span>
+              <span className="static-section-title title-with-addon">
+                {title}
+                {titleAddon}
+              </span>
             ) : (
               <button className="collapse-title-button" type="button" aria-controls={bodyId} aria-expanded={isOpen} onClick={() => setOpenState({ id, isOpen: !isOpen })}>
                 <span className="collapse-icon" aria-hidden="true">
                   {isOpen ? '-' : '+'}
                 </span>
-                <span>{title}</span>
+                <span className="title-with-addon">
+                  {title}
+                  {titleAddon}
+                </span>
               </button>
             )}
           </HeadingTag>
@@ -3444,8 +3453,6 @@ function App() {
   const [mappingDrafts, setMappingDrafts] = useState<Record<string, SymbolMappingDraft>>({})
   const [mappingState, setMappingState] = useState<MappingSaveState>('idle')
   const [mappingStatus, setMappingStatus] = useState('')
-  const [serverRestartState, setServerRestartState] = useState<ServerRestartState>('idle')
-  const [serverRestartMessage, setServerRestartMessage] = useState('')
   const [uploadState, setUploadState] = useState<UploadState>('idle')
   const [uploadMessage, setUploadMessage] = useState('')
   const [theme, setTheme] = useState<ThemeMode>('dark')
@@ -3534,6 +3541,11 @@ function App() {
   const riskSliderStep = form.riskMode === 'percent' ? 0.25 : 500
   const riskSliderValue = clamp(maxRiskNum ?? (form.riskMode === 'percent' ? 2.5 : 2500), form.riskMode === 'percent' ? 0.25 : 500, riskSliderMax)
   const riskSliderDisplay = form.riskMode === 'percent' ? `${riskSliderValue.toFixed(2)}%` : formatInr(riskSliderValue)
+  const capitalHelpText = isHoldingReview
+    ? 'Optional. Use this only if you are considering adding fresh money to the existing holding. For a plain hold/reduce/exit review, quantity and average price matter more than fresh capital. If you enter fresh capital, the app uses it only for add-more sizing and risk budget.'
+    : 'Required for a fresh entry. This is the deployable money for the new idea, used to estimate practical quantity, starter tranche, and risk budget. Do not put emergency, retirement, tax, or fixed-goal money here.'
+  const boughtOnHelpText =
+    'Optional. This date helps judge how long the thesis has had to work before you call it a failure or success. It does not decide the verdict alone.'
 
   const marketDataUrl = useMemo(() => marketDataBaseUrl(), [])
   const marketDataDisplayUrl = marketDataUrl || 'Set VITE_MARKET_DATA_BASE_URL to your HTTPS data bridge'
@@ -3810,6 +3822,137 @@ function App() {
       visible: chartIndicators.patterns,
     },
   ].filter((item) => item.visible)
+
+  function scoreBand(score: number) {
+    if (score >= 70) return 'strong'
+    if (score >= 55) return 'workable'
+    if (score >= 40) return 'mixed'
+    return 'weak'
+  }
+
+  function scoreAction(score: number, area: string) {
+    if (score >= 70) return `Use this as supportive evidence for ${isHoldingReview ? 'continuing the holding' : 'a planned entry'}, while still waiting for price and risk confirmation.`
+    if (score >= 55) return `Treat this as usable but not decisive; let ${area} support the decision only when the other evidence agrees.`
+    if (score >= 40) return `Treat this as a caution zone; avoid increasing size until the weak inputs behind ${area} improve.`
+    return `Do not let this area support a buy/add decision right now; first fix the data gaps or wait for clear improvement.`
+  }
+
+  function signalHasUsefulValue(signal: AdaptiveSignal) {
+    return Boolean(signal.value && signal.value !== '-' && signal.value !== 'None loaded' && signal.value !== 'Pending')
+  }
+
+  function compactDriver(signal: AdaptiveSignal) {
+    const value = signalHasUsefulValue(signal) ? ` ${signal.value}` : ' missing'
+    return `${signal.label}${value} (${signal.score}/100)`
+  }
+
+  function componentSignals(component: ScoreComponent) {
+    const label = component.label.toLowerCase()
+    if (label.includes('technical')) return analysis.adaptiveSignals.filter((signal) => signal.group === 'Technical')
+    if (label.includes('fundamental')) return analysis.adaptiveSignals.filter((signal) => signal.group === 'Fundamental' || signal.label === 'Sector-specific checklist')
+    if (label.includes('statement')) return analysis.adaptiveSignals.filter((signal) => signal.group === 'Statements')
+    if (label.includes('risk')) return analysis.adaptiveSignals.filter((signal) => signal.group === 'Risk' || (signal.group === 'Varsity' && signal.label !== 'Sector-specific checklist'))
+    if (label.includes('updates')) return analysis.adaptiveSignals.filter((signal) => signal.group === 'News')
+    return []
+  }
+
+  function componentTradingUse(component: ScoreComponent) {
+    const label = component.label.toLowerCase()
+    if (label.includes('technical')) return `Use this layer for timing: ${isHoldingReview ? 'continue only while price structure holds' : 'enter only after a clean trigger'}, not as a standalone reason to act.`
+    if (label.includes('fundamental')) return 'Use this layer to decide conviction and position size; weak business quality should shrink capital even when the chart looks tempting.'
+    if (label.includes('statement')) return 'Use this layer to check whether profits are backed by sales, cash, reserves, and manageable borrowings.'
+    if (label.includes('risk')) return isHoldingReview
+      ? 'Use this layer to decide hold/add/reduce discipline: drawdown, concentration, invalidation, and add-more capital matter most.'
+      : 'Use this layer before buying: it converts the idea into quantity, invalidation, and reward/risk.'
+    return 'Use this layer as an event-risk check; a fresh filing can temporarily override clean technical or fundamental evidence.'
+  }
+
+  function componentNarrative(component: ScoreComponent) {
+    const drivers = componentSignals(component)
+    const supports = drivers
+      .filter((signal) => signal.score >= 62 && signalHasUsefulValue(signal))
+      .sort((a, b) => b.weight - a.weight)
+      .slice(0, 2)
+    const drags = drivers
+      .filter((signal) => signal.score <= 48 || !signalHasUsefulValue(signal))
+      .sort((a, b) => b.weight - a.weight)
+      .slice(0, 2)
+    const supportText = supports.length ? `Supports: ${supports.map(compactDriver).join('; ')}.` : 'No strong support is loaded in this layer yet.'
+    const dragText = drags.length ? `Drags/gaps: ${drags.map(compactDriver).join('; ')}.` : 'No major drag is visible in this layer.'
+    return `${activeTickerDisplay}: ${component.score}/100, ${scoreBand(component.score)}. ${supportText} ${dragText} ${componentTradingUse(component)}`
+  }
+
+  function componentDefinition(component: ScoreComponent) {
+    return `Weight in final verdict: ${Math.round(component.weight * 100)}%. ${component.rationale}`
+  }
+
+  function signalReason(signal: AdaptiveSignal) {
+    const label = signal.label.toLowerCase()
+    if (!signalHasUsefulValue(signal)) return 'the app does not have a reliable value for it yet'
+    if (label.includes('30-day trend')) return signal.score >= 62 ? 'recent price is advancing enough to support momentum' : signal.score <= 42 ? 'recent price action is weak or falling' : 'recent price action is not decisive'
+    if (label.includes('moving-average')) return signal.score >= 62 ? 'price has reclaimed most key trend averages' : signal.score <= 42 ? 'price is still below too many watched averages' : 'price is only partially aligned with key averages'
+    if (label.includes('rsi')) return signal.score >= 62 ? 'momentum is positive without being extremely stretched' : signal.score <= 42 ? 'momentum is either weak or too stretched to chase' : 'momentum is usable but not clean'
+    if (label.includes('macd')) return signal.score >= 62 ? 'MACD is confirming improving momentum' : signal.score <= 42 ? 'MACD is not confirming the move' : 'MACD gives partial confirmation only'
+    if (label.includes('atr')) return signal.score >= 62 ? 'volatility is manageable for position sizing' : signal.score <= 42 ? 'volatility is high enough to demand smaller size or wider stops' : 'volatility needs normal caution'
+    if (label.includes('vwap')) return signal.score >= 62 ? 'price is accepted above the volume-weighted reference' : signal.score <= 42 ? 'price is below the volume-weighted reference' : 'VWAP is not giving a clear edge'
+    if (label.includes('bollinger')) return signal.score >= 62 ? 'price is holding in a healthier part of its volatility band' : signal.score <= 42 ? 'price is sitting in a weak band location' : 'band location is only mildly supportive'
+    if (label.includes('candlestick') || label.startsWith('pattern')) return signal.score >= 62 ? 'recent candles lean bullish' : signal.score <= 42 ? 'recent candles warn about supply or failed demand' : 'the candle setup is mixed or only an alert'
+    if (label.includes('liquidity')) return signal.score >= 62 ? 'traded volume gives more practical entry and exit comfort' : signal.score <= 42 ? 'thin volume can make exits harder' : 'liquidity is only adequate'
+    if (label.includes('debt')) return signal.score >= 62 ? 'leverage looks manageable under the current rule' : signal.score <= 42 ? 'leverage is a meaningful business-risk drag' : 'leverage is not clearly good or bad'
+    if (label.includes('roce') || label.includes('roe')) return signal.score >= 62 ? 'return on capital is supportive' : signal.score <= 42 ? 'return on capital is too weak for high conviction' : 'return on capital is only middling'
+    if (label.includes('p/e') || label.includes('price/book')) return signal.score >= 62 ? 'valuation is inside the app comfort band' : signal.score <= 42 ? 'valuation asks for stronger growth or a better entry price' : 'valuation is not cheap enough to drive action alone'
+    if (label.includes('cfo') || label.includes('cash')) return signal.score >= 62 ? 'cash generation supports reported profits' : signal.score <= 42 ? 'cash conversion is weak or missing' : 'cash evidence is incomplete'
+    if (label.includes('risk plan')) return signal.score >= 62 ? 'the downside-control plan is defined' : 'the risk plan is incomplete'
+    if (label.includes('reward/risk')) return signal.score >= 62 ? 'upside justifies the defined downside better' : signal.score <= 42 ? 'payoff is not attractive enough yet' : 'payoff is only partly acceptable'
+    if (label.includes('update')) return signal.score >= 62 ? 'recent updates are not hurting the setup' : signal.score <= 42 ? 'recent updates add event risk' : 'recent updates are neutral or unresolved'
+    return signal.score >= 62 ? 'the current read is supportive under its scoring rule' : signal.score <= 42 ? 'the current read is a drag under its scoring rule' : 'the current read is mixed under its scoring rule'
+  }
+
+  function signalTradingUse(signal: AdaptiveSignal) {
+    if (signal.score >= 62) return isHoldingReview ? 'It can support holding, but add only if risk and price confirm.' : 'It can support a planned entry, but do not buy without a trigger and invalidation.'
+    if (signal.score <= 42) return isHoldingReview ? 'Use it to tighten review discipline or reduce add-more enthusiasm.' : 'Use it as a reason to wait or demand a better setup.'
+    return 'Keep it as context; let stronger evidence decide.'
+  }
+
+  function signalNarrative(signal: AdaptiveSignal) {
+    const valueText = signalHasUsefulValue(signal) ? signal.value : 'missing'
+    const impact = signal.score >= 62 ? 'lifts' : signal.score <= 42 ? 'drags down' : 'keeps mixed'
+    return `${signal.label}: ${valueText}. This ${impact} the ${signal.group.toLowerCase()} layer because ${signalReason(signal)}. ${signalTradingUse(signal)}`
+  }
+
+  function signalDefinition(signal: AdaptiveSignal) {
+    return `Group: ${signal.group}. Weight inside its group: ${signal.weight.toFixed(2)}. Rule used: ${signal.rationale}`
+  }
+
+  function indicatorDefinition(label: string) {
+    if (label.startsWith('RSI')) return 'RSI measures momentum from 0 to 100. Above 70 can be stretched; below 30 can be oversold; confirmation matters more than the number alone.'
+    if (label === 'MACD') return 'MACD compares fast and slow moving averages. Above the signal line leans bullish; below it leans cautious.'
+    if (label.startsWith('ATR')) return 'ATR estimates the stock’s average daily movement. It helps set practical stops and position sizes.'
+    if (label === 'VWAP') return 'VWAP is the volume-weighted average price for the displayed window. Price above it suggests stronger buyer acceptance.'
+    return 'Pattern count is only a prompt to inspect the actual candle setup. Patterns need location, volume, trend, and next-candle confirmation.'
+  }
+
+  function indicatorNarrative(item: { label: string; text: string; tone: string; value: string }) {
+    if (item.label.startsWith('RSI')) {
+      return `${activeTickerDisplay} has RSI at ${item.value}. ${item.tone === 'positive' ? 'Momentum is healthy enough to support the setup, but it is not a buy signal by itself.' : item.tone === 'negative' ? 'Momentum is either weak or stretched, so avoid chasing and wait for confirmation.' : 'Momentum is not giving a clear edge, so lean on trend, volume, and risk levels.'}`
+    }
+    if (item.label === 'MACD') {
+      return `${activeTickerDisplay} has MACD at ${item.value}. ${item.tone === 'positive' ? 'Momentum is confirming the price move, which helps a hold or planned entry.' : item.tone === 'negative' ? 'Momentum is not confirming the move, so reduce excitement until MACD improves.' : 'MACD is incomplete or neutral, so do not use it as the main decision input.'}`
+    }
+    if (item.label.startsWith('ATR')) {
+      return `${activeTickerDisplay} has ATR around ${item.value}. This tells you how much daily movement is normal; use it to keep stops and quantity realistic instead of reacting to ordinary noise.`
+    }
+    if (item.label === 'VWAP') {
+      return `${activeTickerDisplay} has VWAP near ${item.value}. ${item.tone === 'positive' ? 'Price is above the volume-weighted reference, so buyers are accepting higher prices in this window.' : item.tone === 'negative' ? 'Price is below the volume-weighted reference, so demand has not fully reclaimed control.' : 'VWAP is not loaded clearly enough to influence the decision.'}`
+    }
+    if (item.label === 'Patterns') {
+      return recentPatternSignals.length
+        ? `${activeTickerDisplay} has ${recentPatternSignals.length} recent candle pattern alert${recentPatternSignals.length === 1 ? '' : 's'}. Read the pattern findings below; use them only with location, volume, and next-candle confirmation.`
+        : `${activeTickerDisplay} has no major recent candlestick pattern in this window, so patterns should not influence the current decision.`
+    }
+    return `${activeTickerDisplay}: ${item.text}`
+  }
+
   const patternFindings = recentPatternSignals.map((signal) => {
     const candle = chartWindowCandles[signal.index]
     return {
@@ -4150,6 +4293,58 @@ function App() {
     },
   ]
 
+  function ratioNarrative(fact: { label: string; value: string; tone: SignalTone }) {
+    if (fact.value === '-') return `${activeTickerDisplay} does not have a reliable ${fact.label.toLowerCase()} value loaded yet, so this metric should reduce confidence rather than drive action.`
+    const label = fact.label.toLowerCase()
+    if (label.includes('market cap')) {
+      return `${activeTickerDisplay} has market cap of ${fact.value}. ${fact.tone === 'positive' ? 'Size and liquidity comfort are supportive, but this does not prove the stock is cheap.' : fact.tone === 'negative' ? 'The company-size filter is weak, so keep position size smaller and demand stronger evidence.' : 'Size is only moderate, so check liquidity and disclosures before relying on the score.'}`
+    }
+    if (label.includes('p/e')) {
+      return `${activeTickerDisplay} trades at ${fact.value} ${fact.label}. ${fact.tone === 'negative' ? 'This is expensive under the app rule, so the stock needs strong growth, cash flow, and a better entry price to justify buying.' : fact.tone === 'positive' ? 'Valuation is inside the comfort band, but still compare with peers and growth.' : 'Valuation is not decisive; let earnings quality and chart structure decide whether the price is justified.'}`
+    }
+    if (label.includes('price/book')) {
+      return `${activeTickerDisplay} has price/book of ${fact.value}. Use this mainly with asset-heavy businesses; if it is high, demand better ROE/ROCE and growth proof.`
+    }
+    if (label.includes('roe') || label.includes('roce') || label.includes('roa')) {
+      return `${activeTickerDisplay} shows ${fact.label} of ${fact.value}. ${fact.tone === 'positive' ? 'Return quality supports conviction because the business is earning better on capital.' : fact.tone === 'negative' ? 'Return quality is weak, so avoid paying premium valuation or adding aggressively.' : 'Return quality is middling, so treat it as a watch item rather than a green flag.'}`
+    }
+    if (label.includes('margin')) {
+      return `${activeTickerDisplay} has ${fact.label.toLowerCase()} of ${fact.value}. ${fact.tone === 'positive' ? 'Margins support the business-quality case, but confirm they are stable across cycles.' : fact.tone === 'negative' ? 'Margin pressure is a drag; check raw-material, pricing, and operating-cost trends.' : 'Margins are not strong enough to drive the decision alone.'}`
+    }
+    if (label.includes('debt') || label.includes('current ratio')) {
+      return `${activeTickerDisplay} has ${fact.label.toLowerCase()} of ${fact.value}. ${fact.tone === 'positive' ? 'Balance-sheet risk looks manageable, which gives more room for business volatility.' : fact.tone === 'negative' ? 'Balance-sheet risk is a caution; check interest coverage, repayment schedule, and cash generation before adding.' : 'Balance-sheet evidence is mixed or incomplete, so keep risk conservative.'}`
+    }
+    if (label.includes('cash') || label.includes('fcf')) {
+      return `${activeTickerDisplay} shows ${fact.label.toLowerCase()} of ${fact.value}. ${fact.tone === 'positive' ? 'Cash generation supports reported profits and improves comfort.' : fact.tone === 'negative' ? 'Cash conversion is weak, so profits need deeper verification before buying or adding.' : 'Cash evidence is incomplete, so do not treat accounting profit as fully proven.'}`
+    }
+    if (label.includes('growth') || label.includes('revenue') || label.includes('profit')) {
+      return `${activeTickerDisplay} shows ${fact.label.toLowerCase()} of ${fact.value}. ${fact.tone === 'positive' ? 'Growth supports the thesis if margins and cash flow are also healthy.' : fact.tone === 'negative' ? 'Growth is weak or declining, so avoid assuming a quick turnaround.' : 'Growth is not decisive, so compare with peers and recent quarters.'}`
+    }
+    if (fact.tone === 'positive') return `${activeTickerDisplay} is supportive on ${fact.label.toLowerCase()} at ${fact.value}; use it as one green flag, then confirm with peers, history, cash flow, and price structure.`
+    if (fact.tone === 'negative') return `${activeTickerDisplay} is weak on ${fact.label.toLowerCase()} at ${fact.value}; treat this as a reason to wait, demand better reward/risk, or reduce add-more size.`
+    return `${activeTickerDisplay} is mixed on ${fact.label.toLowerCase()} at ${fact.value}; keep it in the checklist, but do not let this metric alone decide buy/sell/hold.`
+  }
+
+  function pillarNarrative(pillar: { label: string; score: number; value: string }) {
+    const label = pillar.label.toLowerCase()
+    if (label.includes('business')) {
+      return `${activeTickerDisplay} scores ${pillar.score}/100 for business context. ${pillar.value === 'Profile loaded' ? 'The app has enough company profile context to read ratios with sector/business background.' : 'Business description is incomplete, so conviction should stay lower until the model is clear.'}`
+    }
+    if (label.includes('profitability')) {
+      return `${activeTickerDisplay} scores ${pillar.score}/100 on profitability with ROCE at ${pillar.value}. Stronger ROCE means the business earns more on total capital; weak ROCE reduces add/buy confidence.`
+    }
+    if (label.includes('balance')) {
+      return `${activeTickerDisplay} scores ${pillar.score}/100 on balance sheet with debt/equity at ${pillar.value}. Use this to decide how much room the company has to survive a bad cycle.`
+    }
+    if (label.includes('valuation')) {
+      return `${activeTickerDisplay} scores ${pillar.score}/100 on valuation with P/E at ${pillar.value}. A high score helps entry comfort; a weak score means you need either growth proof or a better price.`
+    }
+    if (label.includes('cash')) {
+      return `${activeTickerDisplay} scores ${pillar.score}/100 on cash conversion with ${pillar.value}. Profit backed by cash is more reliable than profit trapped in receivables or capex.`
+    }
+    return `${activeTickerDisplay} scores ${pillar.score}/100 on ${pillar.label.toLowerCase()}. ${scoreAction(pillar.score, pillar.label.toLowerCase())}`
+  }
+
   const analysisBrief = useMemo(() => {
     return [
       `Ticker: ${form.exchange}:${form.ticker.toUpperCase()}`,
@@ -4206,58 +4401,6 @@ function App() {
       ? `Start the local server with: ${freeServerCommand}`
       : 'Set VITE_MARKET_DATA_BASE_URL to a reachable HTTPS data bridge, or use local/LAN mode.'
     return `${message}. ${hint}`
-  }
-
-  async function waitForFreeDataServer(previousStartedAt?: string) {
-    const bridgeUrl = requireMarketDataBridge('Server restart')
-    const deadline = Date.now() + 12000
-    while (Date.now() < deadline) {
-      await new Promise((resolve) => window.setTimeout(resolve, 650))
-      try {
-        const response = await fetch(apiUrl(bridgeUrl, '/health'), { cache: 'no-store' })
-        const data = await readResponseJson(response)
-        const startedAt = typeof data.started_at === 'string' ? data.started_at : undefined
-        if (response.ok && data.ok === true && (!previousStartedAt || (startedAt && startedAt !== previousStartedAt))) {
-          return true
-        }
-      } catch {
-        // The old process may be down while the replacement is starting.
-      }
-    }
-    return false
-  }
-
-  async function restartFreeDataServer() {
-    setServerRestartState('restarting')
-    setServerRestartMessage('Restarting the local data server...')
-    try {
-      const bridgeUrl = requireMarketDataBridge('Server restart')
-      const response = await fetch(apiUrl(bridgeUrl, '/api/server/restart'), { method: 'POST' })
-      const data = await readResponseJson(response)
-      if (response.status === 404) {
-        throw new Error(
-          `The running data server is too old for one-click restart. Stop it once with Ctrl+C, start ${freeServerCommand}, then this button will work going forward.`,
-        )
-      }
-      if (!response.ok) {
-        throw new Error(typeof data.error === 'string' ? data.error : 'Server restart failed.')
-      }
-      const previousStartedAt = typeof data.started_at === 'string' ? data.started_at : undefined
-      setServerRestartMessage('Restart request accepted. Waiting for the local data server to come back...')
-      const restarted = await waitForFreeDataServer(previousStartedAt)
-      if (!restarted) {
-        throw new Error(`Restart request was accepted, but the server did not come back yet. Start it with: ${freeServerCommand}`)
-      }
-      setServerRestartState('done')
-      setServerRestartMessage('Local data server restarted. Click Sync Market Data to fetch quotes, candles, fundamentals, and company updates.')
-    } catch (error) {
-      setServerRestartState('error')
-      setServerRestartMessage(
-        error instanceof Error
-          ? error.message
-          : `Could not restart the local data server. Start it manually with: ${freeServerCommand}`,
-      )
-    }
   }
 
   async function refreshFreeData(options: { symbolsOverride?: string[]; includeHoldingsOverride?: boolean; source?: 'decision' | 'data' } = {}) {
@@ -4525,6 +4668,7 @@ function App() {
       ticker: holding.tradingsymbol ?? current.ticker,
       exchange,
       alreadyHold: true,
+      capital: '',
       quantity: String(holding.quantity ?? ''),
       averagePrice: String(holding.average_price ?? ''),
     }))
@@ -4579,16 +4723,18 @@ function App() {
 
       <nav className="workspace-nav" aria-label="Analysis workspace">
         <div className="active-instrument-strip">
-          <div className="instrument-identity">
+          <div className={`instrument-identity tone-${activePriceTone}`}>
+            <div>
             <span>Analysing now</span>
             <strong>{activeTickerDisplay}</strong>
             <p>{activeInstrumentName}</p>
             {activeInstrumentSector && <small>{activeInstrumentSector}</small>}
-          </div>
-          <div className={`instrument-ltp tone-${activePriceTone}`}>
-            <span>LTP</span>
-            <strong>{formatInr(analysis.ltp)}</strong>
-            <small>{activeChangePct === undefined ? 'Change pending' : formatPercent(activeChangePct)}</small>
+            </div>
+            <div className="instrument-ltp-inline">
+              <span>LTP</span>
+              <strong>{formatInr(analysis.ltp)}</strong>
+              <small>{activeChangePct === undefined ? 'Change pending' : formatPercent(activeChangePct)}</small>
+            </div>
           </div>
         </div>
         <div className="tabs workspace-tabs" role="tablist" aria-label="Workspace sections">
@@ -4624,7 +4770,7 @@ function App() {
             <CollapsibleSection
               action={
                 <div className="setup-action-row">
-                  <button type="button" onClick={() => void loadDecisionData()} disabled={freeRefreshState === 'refreshing' || serverRestartState === 'restarting' || !decisionSymbol}>
+                  <button type="button" onClick={() => void loadDecisionData()} disabled={freeRefreshState === 'refreshing' || !decisionSymbol}>
                     {freeRefreshState === 'refreshing' ? 'Loading...' : 'Load & Analyse'}
                   </button>
                   <button className="secondary-action" type="button" onClick={() => copyCommand('brief', analysisBrief)}>
@@ -4638,26 +4784,6 @@ function App() {
               id="required-heading"
               title="Instrument and Money Context"
             >
-              <div className={`position-mode-card ${isHoldingReview ? 'holding-mode' : 'new-mode'}`}>
-                <div>
-                  <span>{isHoldingReview ? 'Existing holding review' : 'New position analysis'}</span>
-                  <strong>{isHoldingReview ? 'Capital is optional unless you plan to add more.' : 'Capital is required for a fresh entry.'}</strong>
-                  <p>
-                    {isHoldingReview
-                      ? 'The verdict prioritises quantity, average price, current P&L, concentration, invalidation, and whether the thesis still deserves fresh capital.'
-                      : 'The verdict prioritises deployable capital, risk budget, invalidation, reward/risk, and whether the current price is worth a new allocation.'}
-                  </p>
-                </div>
-                <ul>
-                  {(isHoldingReview
-                    ? ['Required: ticker, exchange, horizon, quantity, average price', 'Optional: bought date, fresh/additional capital, max risk for add-more sizing']
-                    : ['Required: ticker, exchange, horizon, capital to deploy', 'Optional but useful: max risk, invalidation, target, manual LTP']
-                  ).map((item) => (
-                    <li key={item}>{item}</li>
-                  ))}
-                </ul>
-              </div>
-
               <div className="form-grid setup-primary-grid">
                 <label className="field">
                   <FieldLabel help={requiredHelp.ticker}>Ticker</FieldLabel>
@@ -4684,7 +4810,7 @@ function App() {
                 </label>
                 {!isHoldingReview && (
                   <label className="field">
-                    <FieldLabel help={requiredHelp.capital}>Capital to deploy</FieldLabel>
+                    <FieldLabel help={capitalHelpText}>Capital to deploy</FieldLabel>
                     <input aria-label="Capital to deploy" inputMode="decimal" value={form.capital} onChange={(event) => updateForm('capital', event.target.value)} />
                   </label>
                 )}
@@ -4698,10 +4824,7 @@ function App() {
                     ))}
                   </select>
                 </label>
-              </div>
-
-              <div className="toggle-row">
-                <label className="toggle-field">
+                <label className="toggle-field holding-toggle-field">
                   <input checked={form.alreadyHold} type="checkbox" onChange={(event) => updateForm('alreadyHold', event.target.checked)} />
                   <span className="toggle-copy">
                     Already holding
@@ -4711,11 +4834,10 @@ function App() {
               </div>
 
               {isHoldingReview && (
-                <div className="form-grid two">
+                <div className="form-grid four holding-details-grid">
                   <label className="field">
-                    <FieldLabel help={requiredHelp.boughtOn}>Bought on</FieldLabel>
+                    <FieldLabel help={boughtOnHelpText}>Bought on</FieldLabel>
                     <input type="date" value={form.boughtOn} onChange={(event) => updateForm('boughtOn', event.target.value)} />
-                    <span className="field-note">Optional context for reviewing how long the thesis has had to work.</span>
                   </label>
                   <label className="field">
                     <FieldLabel help={requiredHelp.quantity}>Quantity</FieldLabel>
@@ -4726,9 +4848,8 @@ function App() {
                     <input inputMode="decimal" value={form.averagePrice} onChange={(event) => updateForm('averagePrice', event.target.value)} />
                   </label>
                   <label className="field">
-                    <FieldLabel help={requiredHelp.capital}>Fresh capital</FieldLabel>
+                    <FieldLabel help={capitalHelpText}>Fresh capital</FieldLabel>
                     <input inputMode="decimal" value={form.capital} onChange={(event) => updateForm('capital', event.target.value)} />
-                    <span className="field-note">Optional. Fill only if you are considering adding more to this holding.</span>
                   </label>
                 </div>
               )}
@@ -4823,21 +4944,6 @@ function App() {
 
             <CollapsibleSection className="panel evidence-panel" eyebrow="Optional" id="optional-heading" title="Evidence and Guardrails">
 
-              <div className="form-grid three">
-                <label className="field">
-                  <FieldLabel help={optionalHelp.manualLtp}>Manual LTP</FieldLabel>
-                  <input inputMode="decimal" value={form.manualLtp} onChange={(event) => updateForm('manualLtp', event.target.value)} />
-                </label>
-                <label className="field">
-                  <FieldLabel help={optionalHelp.invalidationPrice}>Invalidation price</FieldLabel>
-                  <input inputMode="decimal" value={form.invalidationPrice} onChange={(event) => updateForm('invalidationPrice', event.target.value)} />
-                </label>
-                <label className="field">
-                  <FieldLabel help={optionalHelp.targetPrice}>Target price</FieldLabel>
-                  <input inputMode="decimal" value={form.targetPrice} onChange={(event) => updateForm('targetPrice', event.target.value)} />
-                </label>
-              </div>
-
               <div className="auto-evidence-panel">
                 <div>
                   <span className="eyebrow">Auto-filled company evidence</span>
@@ -4852,6 +4958,21 @@ function App() {
                     </article>
                   ))}
                 </div>
+              </div>
+
+              <div className="form-grid three risk-anchor-grid">
+                <label className="field">
+                  <FieldLabel help={optionalHelp.manualLtp}>Manual LTP</FieldLabel>
+                  <input inputMode="decimal" value={form.manualLtp} onChange={(event) => updateForm('manualLtp', event.target.value)} />
+                </label>
+                <label className="field">
+                  <FieldLabel help={optionalHelp.invalidationPrice}>Invalidation price</FieldLabel>
+                  <input inputMode="decimal" value={form.invalidationPrice} onChange={(event) => updateForm('invalidationPrice', event.target.value)} />
+                </label>
+                <label className="field">
+                  <FieldLabel help={optionalHelp.targetPrice}>Target price</FieldLabel>
+                  <input inputMode="decimal" value={form.targetPrice} onChange={(event) => updateForm('targetPrice', event.target.value)} />
+                </label>
               </div>
 
               <CollapsibleSection
@@ -4938,6 +5059,7 @@ function App() {
             id="verdict-heading"
             staticOpen
             title={analysis.verdict}
+            titleAddon={<HelpTip text={verdictLogicHelp} />}
           >
 
             <p className="verdict-summary">
@@ -5027,33 +5149,6 @@ function App() {
               </div>
             )}
 
-            <section className="verdict-evidence-box" aria-label="Verdict evidence and missing metrics">
-              <div className="verdict-evidence-heading">
-                <span className="mini-label">Verdict logic</span>
-                <h3>How the agent weighs evidence</h3>
-              </div>
-              <div className="verdict-evidence-grid">
-                <article className="tone-neutral">
-                  <strong>Does it weigh unavailable metrics?</strong>
-                  <p>
-                    It does not invent missing numbers. Required gaps keep the verdict at <b>Needs Input</b>. Optional missing metrics stay as
-                    unknown evidence with neutral or slightly cautious scores, and they reduce confidence so a verdict is not overpowered by only
-                    the data that happened to load. Missing risk-plan inputs such as invalidation, target, or risk budget are penalized more because
-                    they directly affect downside control.
-                  </p>
-                </article>
-                <article className="tone-positive">
-                  <strong>What is being used in the verdict?</strong>
-                  <p>
-                    The score blends price/OHLCV, RSI, MACD, ATR, VWAP, Bollinger Bands, moving averages, trend, liquidity, candlestick patterns,
-                    all 19 ratio cards, sales, EPS, CFO vs PAT, reserves, borrowings, cash flow, top company updates,{' '}
-                    {isHoldingReview ? 'portfolio weight, drawdown,' : 'capital, risk budget, entry quantity,'} reward/risk, personal constraints,
-                    risk profile, horizon-specific weights, Innerworth process discipline, Sector Analysis checklists, NPS capital segregation, and SSE applicability.
-                  </p>
-                </article>
-              </div>
-            </section>
-
             <CollapsibleSection
               className="adaptive-score-panel sub-panel nested-collapse"
               defaultOpen
@@ -5067,14 +5162,15 @@ function App() {
                   <article className={`component-score-card tone-${component.tone}`} key={component.label}>
                     <div>
                       <span>{component.label}</span>
-                      <strong>{component.score}/100</strong>
+                      <strong className="score-with-help">
+                        {component.score}/100
+                        <HelpTip text={componentDefinition(component)} />
+                      </strong>
                     </div>
                     <div className="bar-track">
                       <div className="bar-fill score-fill" style={percentStyle(component.score)} />
                     </div>
-                    <p>
-                      Weight {Math.round(component.weight * 100)}%. {component.rationale}
-                    </p>
+                    <p>{componentNarrative(component)}</p>
                   </article>
                 ))}
               </div>
@@ -5093,46 +5189,17 @@ function App() {
                       <strong>{signal.label}</strong>
                       <small>{signal.value}</small>
                       <div className="signal-score-line">
-                        <b>{signal.score}/100</b>
+                        <span className="score-with-help">
+                          <b>{signal.score}/100</b>
+                          <HelpTip text={signalDefinition(signal)} />
+                        </span>
                         <em>Weight {signal.weight.toFixed(2)}</em>
                       </div>
-                      <p>{signal.rationale}</p>
+                      <p>{signalNarrative(signal)}</p>
                     </article>
                   ))}
                 </div>
               </CollapsibleSection>
-            </CollapsibleSection>
-
-            <CollapsibleSection
-              className="varsity-layer-panel sub-panel nested-collapse"
-              headingClassName="subsection-heading"
-              headingLevel={3}
-              id="varsity-layer-heading"
-              title="Varsity Knowledge Applied"
-            >
-              <div className="varsity-layer-grid">
-                {analysis.varsityLessons.map((lesson) => (
-                  <article className={`varsity-lesson-card tone-${lesson.tone}`} key={`${lesson.module}-${lesson.title}`}>
-                    <div>
-                      <span>{lesson.module}</span>
-                      <strong>{lesson.title}</strong>
-                    </div>
-                    <p>{lesson.text}</p>
-                    {lesson.evidenceChapterCount !== undefined ? (
-                      <small>{lesson.evidenceChapterCount} read chapter{lesson.evidenceChapterCount === 1 ? '' : 's'} support this rule group.</small>
-                    ) : null}
-                    <small>{lesson.action}</small>
-                    {lesson.chapterRefs?.length ? (
-                      <small>
-                        Example matches: {lesson.chapterRefs.slice(0, 2).map((ref) => ref.title).join(' | ')}
-                      </small>
-                    ) : null}
-                    <a href={lesson.source} target="_blank" rel="noreferrer">
-                      Source module
-                    </a>
-                  </article>
-                ))}
-              </div>
             </CollapsibleSection>
 
             <div className="guidance-grid">
@@ -5286,7 +5353,7 @@ function App() {
                         </select>
                       </label>
                       <label className="field">
-                        <FieldLabel help={forecastHelp.mode}>Forecast type</FieldLabel>
+                        <FieldLabel help={`${forecastHelp.mode} Current selection: ${forecastModeLabels[forecastSettings.mode].help}`}>Forecast type</FieldLabel>
                         <select
                           value={forecastSettings.mode}
                           onChange={(event) => updateForecastSetting('mode', event.target.value as ForecastMode)}
@@ -5297,7 +5364,6 @@ function App() {
                             </option>
                           ))}
                         </select>
-                        <small>{forecastModeLabels[forecastSettings.mode].help}</small>
                       </label>
                       <label className="field">
                         <FieldLabel help={forecastHelp.volatilityMultiplier}>Volatility multiplier</FieldLabel>
@@ -5697,9 +5763,12 @@ function App() {
                   <div className="indicator-summary-grid" aria-label="Selected indicator interpretation">
                     {chartIndicatorSummaries.map((item) => (
                       <article className={`indicator-summary tone-${item.tone}`} key={item.label}>
-                        <span>{item.label}</span>
+                        <span className="label-with-help">
+                          {item.label}
+                          <HelpTip text={indicatorDefinition(item.label)} />
+                        </span>
                         <strong>{item.value}</strong>
-                        <p>{item.text}</p>
+                        <p>{indicatorNarrative(item)}</p>
                       </article>
                     ))}
                   </div>
@@ -5712,6 +5781,7 @@ function App() {
                     headingClassName="subsection-heading"
                     headingLevel={4}
                     id="pattern-findings-heading"
+                    titleAddon={<HelpTip text="Candlestick patterns are visual clues, not trade calls. Use them only with trend location, support/resistance, volume, and next-candle confirmation." />}
                     title="Detected Patterns and How to Use Them"
                   >
                     {patternFindings.length ? (
@@ -5836,7 +5906,9 @@ function App() {
                     {formatNumber(activeCandles.length)}
                   </span>
                 </div>
-                <p className="caption">Caption: the line shows recent daily closes. A rising line supports momentum; a falling line warns that the market is still marking the stock down.</p>
+                <p className="caption">
+                  {activeTickerDisplay} has a recent trend of {formatPercent(recentTrendPct)} across the visible daily closes. Use this as the market’s current vote: rising trends can support planned entries, while falling trends ask you to wait for a clearer reversal or reduce add-more enthusiasm.
+                </p>
               </article>
 
               <article className={`visual-card ${pnlTone}`}>
@@ -5877,7 +5949,9 @@ function App() {
                     {breakevenMove === undefined ? '-' : breakevenMove > 0 ? `${formatPlainPercent(breakevenMove)} up` : `${formatPlainPercent(breakevenMove)} cushion`}
                   </span>
                 </div>
-                <p className="caption">Caption: if the current bar is much shorter than invested capital, recovering to your average price requires a large move, so averaging down becomes riskier.</p>
+                <p className="caption">
+                  Your current read is {formatPercent(analysis.positionPnlPct)} P&L on this holding. If the gap to breakeven is large, use this as a discipline check: do not add only to lower average price; add only if the business, chart, and risk/reward have improved.
+                </p>
               </article>
 
               <article className={`visual-card exposure-card tone-${portfolioWeightTone}`}>
@@ -5894,7 +5968,9 @@ function App() {
                   </div>
                   <div>
                     <p>One-stock weight in the loaded portfolio.</p>
-                    <p className="caption">Caption: higher concentration means one company-specific mistake can hurt the full portfolio, even if the broad market is fine.</p>
+                    <p className="caption">
+                      {activeTickerDisplay} is {formatPercent(analysis.portfolioWeight)} of the loaded portfolio. Higher concentration means the app needs stronger proof before suggesting an add; lower concentration gives more room but still needs a risk plan.
+                    </p>
                   </div>
                 </div>
               </article>
@@ -5928,7 +6004,9 @@ function App() {
                 <div className="bar-track score-track">
                   <div className="bar-fill score-fill" style={percentStyle(analysis.score)} />
                 </div>
-                <p className="caption">Caption: risk sizing uses the maximum rupee loss you allow. Without an invalidation price, the app cannot calculate a clean position size.</p>
+                <p className="caption">
+                  The current risk setup {riskPerShare ? `has ${formatInr(riskPerShare)} risk per share` : 'does not yet have a valid risk/share'}. Use this box to decide quantity before emotion takes over; without invalidation, the app cannot give a clean size.
+                </p>
               </article>
 
               <article className={`visual-card range-card tone-${liquidityTone}`}>
@@ -5957,7 +6035,9 @@ function App() {
                     {formatNumber(activeQuote?.volume ?? lastCandle?.volume)}
                   </span>
                 </div>
-                <p className="caption">Caption: the marker shows where the current price sits inside the recent range. Thin volume makes exits harder and increases slippage risk.</p>
+                <p className="caption">
+                  {activeTickerDisplay} is trading around {formatInr(analysis.ltp)} inside the recent range of {formatInr(activeRange.low)} to {formatInr(activeRange.high)}. If volume is thin, keep orders smaller and avoid assuming you can exit instantly.
+                </p>
               </article>
 
               <article className={`visual-card quality-story tone-${confidenceTone}`}>
@@ -5977,7 +6057,9 @@ function App() {
                     </div>
                   ))}
                 </div>
-                <p className="caption">Caption: these filters explain the business side of the score. Missing fundamentals lower confidence because price alone cannot prove quality.</p>
+                <p className="caption">
+                  These filters show whether the company quality is strong enough to support the chart. For {activeTickerDisplay}, missing or weak fundamentals should make you reduce confidence, even if price action looks tempting.
+                </p>
               </article>
                 </div>
               </CollapsibleSection>
@@ -6063,9 +6145,12 @@ function App() {
                 <div className="company-ratio-grid">
                   {companyRatioFacts.map((fact) => (
                     <div className={`company-ratio tone-${fact.tone}`} key={fact.label}>
-                      <span>{fact.label}</span>
+                      <span className="label-with-help">
+                        {fact.label}
+                        <HelpTip text={fact.helper} />
+                      </span>
                       <strong>{fact.value}</strong>
-                      <small>{fact.helper}</small>
+                      <p>{ratioNarrative(fact)}</p>
                     </div>
                   ))}
                 </div>
@@ -6141,7 +6226,8 @@ function App() {
                       <div className="bar-track">
                         <div className="bar-fill score-fill" style={percentStyle(pillar.score)} />
                       </div>
-                      <p>{pillar.caption}</p>
+                      <p>{pillarNarrative(pillar)}</p>
+                      <small>{pillar.caption}</small>
                     </div>
                   ))}
                 </div>
@@ -6220,6 +6306,36 @@ function App() {
                     </p>
                   </article>
                 ))}
+                <article className="reasoning-step varsity-reasoning-step">
+                  <div className="reasoning-step-header">
+                    <span className="reasoning-index">{analysis.steps.length + 1}</span>
+                    <h3>Varsity Knowledge Applied</h3>
+                  </div>
+                  <p className="plain-english">
+                    These rules act like mentor-style guardrails: process discipline, sector-specific operating checks, capital segregation, and instrument applicability.
+                  </p>
+                  <div className="varsity-layer-grid">
+                    {analysis.varsityLessons.map((lesson) => (
+                      <article className={`varsity-lesson-card tone-${lesson.tone}`} key={`${lesson.module}-${lesson.title}`}>
+                        <div>
+                          <span>{lesson.module}</span>
+                          <strong>{lesson.title}</strong>
+                        </div>
+                        <p>{lesson.text}</p>
+                        {lesson.evidenceChapterCount !== undefined ? (
+                          <small>{lesson.evidenceChapterCount} read chapter{lesson.evidenceChapterCount === 1 ? '' : 's'} support this rule group.</small>
+                        ) : null}
+                        <small>{lesson.action}</small>
+                        {lesson.chapterRefs?.length ? (
+                          <small>Example matches: {lesson.chapterRefs.slice(0, 2).map((ref) => ref.title).join(' | ')}</small>
+                        ) : null}
+                        <a href={lesson.source} target="_blank" rel="noreferrer">
+                          Source module
+                        </a>
+                      </article>
+                    ))}
+                  </div>
+                </article>
               </div>
 
               <div className="signal-grid">
@@ -6246,25 +6362,16 @@ function App() {
           <CollapsibleSection
             action={
               <div className="data-action-row">
-                <button type="button" onClick={() => void refreshFreeData({ source: 'data' })} disabled={freeRefreshState === 'refreshing' || serverRestartState === 'restarting'}>
+                <button type="button" onClick={() => void refreshFreeData({ source: 'data' })} disabled={freeRefreshState === 'refreshing'}>
                   {freeRefreshState === 'refreshing' ? 'Syncing...' : 'Sync Market Data'}
-                </button>
-                <button
-                  className="secondary-action"
-                  type="button"
-                  onClick={restartFreeDataServer}
-                  disabled={freeRefreshState === 'refreshing' || serverRestartState === 'restarting'}
-                >
-                  {serverRestartState === 'restarting' ? 'Restarting...' : 'Restart Server'}
-                  <HelpTip text={optionalHelp.serverRestart} />
                 </button>
               </div>
             }
-            className="panel command-panel data-first-panel"
-            eyebrow="Data cache"
+            className="panel command-panel data-sync-command-panel"
+            eyebrow="Data Hub"
             id="command-heading"
             staticOpen
-            title="Market Data Sync"
+            title="Sync Controls"
           >
 
             <div className="data-sync-overview">
@@ -6319,25 +6426,6 @@ function App() {
                 <p>Fetching prices, candles, fundamentals, company updates, and portfolio price matches. Large portfolios can take longer.</p>
               </div>
             )}
-            {syncCoverage && (freeRefreshState === 'done' || uploadState === 'done') && <SyncCoveragePanel coverage={syncCoverage} />}
-            {syncCoverage && (freeRefreshState === 'done' || uploadState === 'done') && (
-              <MissingDataResolverPanel
-                drafts={mappingDrafts}
-                issues={missingDataIssues}
-                mappingState={mappingState}
-                mappingStatus={mappingStatus}
-                retryDisabled={freeRefreshState === 'refreshing' || serverRestartState === 'restarting'}
-                onDraftChange={updateMappingDraft}
-                onMarkUnsupported={markSymbolUnsupported}
-                onRetryMissing={retryMissingData}
-                onSaveMapping={saveSymbolMapping}
-              />
-            )}
-            {serverRestartMessage && (
-              <div className={`refresh-message ${serverRestartState === 'restarting' ? 'uploading' : serverRestartState}`}>
-                <p>{serverRestartMessage}</p>
-              </div>
-            )}
           </CollapsibleSection>
 
           <CollapsibleSection
@@ -6347,9 +6435,10 @@ function App() {
               </span>
             }
             className="panel upload-panel"
-            eyebrow="Portfolio import"
+            defaultOpen
+            eyebrow="Portfolio"
             id="upload-heading"
-            title="Upload Holdings XLSX"
+            title="Portfolio Import and Snapshot"
           >
             <div className="upload-grid">
               {hasUploadedHoldingsFeed && (
@@ -6393,6 +6482,24 @@ function App() {
                 </p>
               </div>
             </div>
+            <section className="metric-grid portfolio-inline-metrics" aria-label="Portfolio metrics">
+              <div className="metric">
+                <span>Snapshot</span>
+                <strong>{providerLabel(activeSnapshot.provider)}</strong>
+              </div>
+              <div className="metric">
+                <span>Current value</span>
+                <strong>{formatInr(portfolio.value)}</strong>
+              </div>
+              <div className="metric">
+                <span>P&L</span>
+                <strong className={portfolio.pnl >= 0 ? 'positive' : 'negative'}>{formatInr(portfolio.pnl)}</strong>
+              </div>
+              <div className="metric">
+                <span>Return</span>
+                <strong className={portfolioReturn >= 0 ? 'positive' : 'negative'}>{formatPercent(portfolioReturn)}</strong>
+              </div>
+            </section>
           </CollapsibleSection>
 
           <section className="data-grid">
@@ -6472,25 +6579,25 @@ function App() {
             </CollapsibleSection>
           </section>
 
-          <CollapsibleSection className="panel portfolio-metrics-panel" eyebrow="Portfolio metrics" id="portfolio-metrics-heading" title="Snapshot Summary">
-            <section className="metric-grid" aria-label="Portfolio metrics">
-              <div className="metric">
-                <span>Snapshot</span>
-                <strong>{providerLabel(activeSnapshot.provider)}</strong>
-              </div>
-              <div className="metric">
-                <span>Current value</span>
-                <strong>{formatInr(portfolio.value)}</strong>
-              </div>
-              <div className="metric">
-                <span>P&L</span>
-                <strong className={portfolio.pnl >= 0 ? 'positive' : 'negative'}>{formatInr(portfolio.pnl)}</strong>
-              </div>
-              <div className="metric">
-                <span>Return</span>
-                <strong className={portfolioReturn >= 0 ? 'positive' : 'negative'}>{formatPercent(portfolioReturn)}</strong>
-              </div>
-            </section>
+          <CollapsibleSection className="panel data-cache-panel" defaultOpen eyebrow="Data cache" id="data-cache-heading" title="Coverage and Missing Data">
+            {syncCoverage && (freeRefreshState === 'done' || uploadState === 'done') ? (
+              <>
+                <SyncCoveragePanel coverage={syncCoverage} />
+                <MissingDataResolverPanel
+                  drafts={mappingDrafts}
+                  issues={missingDataIssues}
+                  mappingState={mappingState}
+                  mappingStatus={mappingStatus}
+                  retryDisabled={freeRefreshState === 'refreshing'}
+                  onDraftChange={updateMappingDraft}
+                  onMarkUnsupported={markSymbolUnsupported}
+                  onRetryMissing={retryMissingData}
+                  onSaveMapping={saveSymbolMapping}
+                />
+              </>
+            ) : (
+              <p className="footer-note">Sync Market Data or upload a holdings report to see technical/fundamental coverage and missing-symbol guidance here.</p>
+            )}
           </CollapsibleSection>
 
           <section className="data-grid support-grid">
