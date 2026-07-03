@@ -14,7 +14,7 @@ type RiskProfile = 'conservative' | 'balanced' | 'balanced_aggressive' | 'aggres
 type Horizon = '3-6m' | '6-12m' | '1-3y' | '3y+'
 type TradeAccess = 'delivery' | 'fo_context' | 'hedging'
 type ProfitTrend = 'unknown' | 'growing' | 'stable' | 'declining' | 'loss_making'
-type View = 'setup' | 'verdict' | 'technicals' | 'fundamentals' | 'reasoning' | 'data'
+type View = 'setup' | 'verdict' | 'coach' | 'technicals' | 'fundamentals' | 'reasoning' | 'data'
 type CacheState = 'loading' | 'live' | 'free' | 'sample'
 type RefreshState = 'idle' | 'refreshing' | 'done' | 'error'
 type UploadState = 'idle' | 'uploading' | 'done' | 'error'
@@ -42,6 +42,7 @@ type IndicatorKey =
 const workspaceTabs: Array<{ id: View; label: string; caption: string }> = [
   { id: 'setup', label: 'Setup', caption: 'Inputs' },
   { id: 'verdict', label: 'Decision', caption: 'Verdict' },
+  { id: 'coach', label: 'AI Coach', caption: 'LLM' },
   { id: 'technicals', label: 'Charts', caption: 'Technicals' },
   { id: 'fundamentals', label: 'Company', caption: 'Fundamentals' },
   { id: 'reasoning', label: 'Reasoning', caption: 'Why' },
@@ -131,6 +132,30 @@ type SymbolMappingDraft = {
 }
 
 type MappingSaveState = 'idle' | 'saving' | 'done' | 'error'
+
+type LlmReview = {
+  headline?: string
+  plainEnglishVerdict?: string
+  whatToDoNext?: string[]
+  whatNotToDo?: string[]
+  keyEvidence?: string[]
+  varsityPrinciples?: string[]
+  riskPlan?: string[]
+  dataGaps?: string[]
+  questionsBeforeAction?: string[]
+  confidenceNote?: string
+}
+
+type LlmVerdictResponse = {
+  ok?: boolean
+  configured?: boolean
+  message?: string
+  setup?: string[]
+  model?: string
+  generated_at?: string
+  review?: LlmReview
+  error?: string
+}
 
 type BrowserWorkspace = {
   version: 1
@@ -700,6 +725,38 @@ function CollapsibleSection({
         </div>
       )}
     </section>
+  )
+}
+
+function reviewItems(items?: string[]) {
+  return Array.isArray(items) ? items.filter((item) => item.trim()) : []
+}
+
+function AiReviewListCard({
+  emptyLabel,
+  items,
+  title,
+  tone = 'neutral',
+}: {
+  emptyLabel: string
+  items?: string[]
+  title: string
+  tone?: SignalTone
+}) {
+  const filteredItems = reviewItems(items)
+  return (
+    <article className={`ai-review-card tone-${tone}`}>
+      <span>{title}</span>
+      {filteredItems.length ? (
+        <ul>
+          {filteredItems.map((item) => (
+            <li key={item}>{item}</li>
+          ))}
+        </ul>
+      ) : (
+        <p>{emptyLabel}</p>
+      )}
+    </article>
   )
 }
 
@@ -3537,6 +3594,9 @@ function App() {
   const [mappingStatus, setMappingStatus] = useState('')
   const [uploadState, setUploadState] = useState<UploadState>('idle')
   const [uploadMessage, setUploadMessage] = useState('')
+  const [llmState, setLlmState] = useState<RefreshState>('idle')
+  const [llmMessage, setLlmMessage] = useState('')
+  const [llmResponse, setLlmResponse] = useState<LlmVerdictResponse | null>(null)
   const [bridgeCacheLoading, setBridgeCacheLoading] = useState(false)
   const [theme, setTheme] = useState<ThemeMode>('dark')
   const [chartTimeframe, setChartTimeframe] = useState<ChartTimeframe>('6M')
@@ -3667,6 +3727,24 @@ function App() {
   const activeChangePct =
     activeQuote?.ohlc?.close && activeQuote.last_price ? ((activeQuote.last_price - activeQuote.ohlc.close) / activeQuote.ohlc.close) * 100 : undefined
   const activePriceTone: SignalTone = activeChangePct === undefined ? 'neutral' : activeChangePct >= 0 ? 'positive' : 'negative'
+
+  useEffect(() => {
+    setLlmState('idle')
+    setLlmMessage('')
+    setLlmResponse(null)
+  }, [
+    activeSnapshot.generated_at,
+    analysis.quoteKey,
+    analysis.score,
+    analysis.verdict,
+    form.alreadyHold,
+    form.averagePrice,
+    form.capital,
+    form.horizon,
+    form.quantity,
+    form.riskProfile,
+  ])
+
   const sparkline = useMemo(() => buildSparkline(activeCandles), [activeCandles])
   const forecastProjection = useMemo(
     () => buildScenarioForecast(activeCandles, analysis, activeFundamentals, forecastSettings),
@@ -4453,6 +4531,238 @@ function App() {
       `Cautions: ${analysis.cautions.join(' ')}`,
     ].join('\n')
   }, [analysis, form])
+
+  function clipText(value: string | undefined, max = 900) {
+    if (!value) return undefined
+    return value.length > max ? `${value.slice(0, max).trim()}...` : value
+  }
+
+  function buildAiCoachContext() {
+    const importantSignals = [...analysis.adaptiveSignals]
+      .sort((a, b) => Math.abs(b.score - 50) * b.weight - Math.abs(a.score - 50) * a.weight)
+      .slice(0, 24)
+      .map((signal) => ({
+        group: signal.group,
+        label: signal.label,
+        value: signal.value,
+        score: signal.score,
+        weight: signal.weight,
+        tone: signal.tone,
+        rationale: signal.rationale,
+        companySpecificRead: signalNarrative(signal),
+      }))
+    const ratioEvidence = companyRatioFacts.map((fact) => ({
+      label: fact.label,
+      value: fact.value,
+      tone: fact.tone,
+      definition: fact.helper,
+      companySpecificRead: ratioNarrative(fact),
+    }))
+    const varsityRuleCatalog = varsityDerivedRules.map((rule) => ({
+      id: rule.id,
+      module: rule.moduleLabel,
+      appliesTo: rule.appliesTo,
+      tone: rule.tone,
+      scoreImpact: rule.scoreImpact,
+      principle: rule.principle,
+      checklist: rule.checklist,
+      action: rule.action,
+      caution: rule.caution,
+      evidenceChapterCount: rule.evidenceChapterCount,
+    }))
+    return {
+      generatedAt: new Date().toISOString(),
+      roleBoundary: {
+        deterministicDecisionRemainsPrimary: true,
+        instruction:
+          'Use the supplied facts, deterministic verdict, technical/fundamental evidence, and Varsity-derived rule catalogue to explain the decision. Do not invent unavailable data or replace the deterministic verdict.',
+      },
+      selectedInstrument: {
+        symbol: analysis.quoteKey,
+        displaySymbol: activeTickerDisplay,
+        name: activeInstrumentName,
+        sector: activeFundamentals?.sector,
+        industry: activeFundamentals?.industry,
+        ltp: analysis.ltp,
+        changePct: activeChangePct,
+      },
+      userContext: {
+        decisionMode: analysis.decisionMode,
+        horizon: horizonLabels[form.horizon],
+        alreadyHolding: form.alreadyHold,
+        boughtOn: form.boughtOn || undefined,
+        quantity: quantityNum,
+        averagePrice: avgPriceNum,
+        freshOrAddMoreCapital: capitalNum,
+        riskProfile: riskProfileLabels[form.riskProfile],
+        marketAccess: tradeAccessLabels[form.tradeAccess],
+        invalidationPrice: invalidationPriceNum,
+        targetPrice: targetPriceNum,
+        constraints: constraintLabels.filter((constraint) => form.constraints[constraint.key]).map((constraint) => constraint.label),
+        thesisNotes: clipText(form.thesis, 1200),
+      },
+      deterministicVerdict: {
+        verdict: analysis.verdict,
+        verdictClass: analysis.verdictClass,
+        score: analysis.score,
+        confidence: analysis.confidenceLabel,
+        scoreComponents: analysis.scoreComponents.map((component) => ({
+          label: component.label,
+          score: component.score,
+          weight: component.weight,
+          tone: component.tone,
+          definition: component.rationale,
+          companySpecificRead: componentNarrative(component),
+        })),
+        doItems: analysis.doItems,
+        dontItems: analysis.dontItems,
+        whyItems: analysis.whyItems,
+        actions: analysis.actions,
+        positives: analysis.positives,
+        cautions: analysis.cautions,
+        missingInputsOrEvidence: analysis.missing,
+        entryPlan: analysis.entryPlan,
+        exitPlan: analysis.exitPlan,
+      },
+      positionAndRisk: {
+        positionPnl: analysis.positionPnl,
+        positionPnlPct: analysis.positionPnlPct,
+        portfolioWeight: analysis.portfolioWeight,
+        investedValue,
+        currentValue,
+        breakevenMove,
+        riskCapital: analysis.riskCapital,
+        riskPerShare,
+        rewardRisk,
+        suggestedShares: analysis.suggestedShares,
+        suggestedDeployment: analysis.suggestedDeployment,
+        suggestedQuantityLabel: analysis.suggestedQuantityLabel,
+      },
+      technicalEvidence: {
+        candlesLoaded: activeCandles.length,
+        latestCandle: lastCandle,
+        recentTrendPct,
+        averageVolume20: avgVolume20,
+        priceRange: {
+          low: activeRange.low,
+          current: analysis.ltp,
+          high: activeRange.high,
+          rangePositionPct: priceRangePercent,
+        },
+        indicators: {
+          rsi14: chartModel.latestRsi,
+          macd: chartModel.latestMacd,
+          macdSignal: chartModel.latestMacdSignal,
+          atr14: chartModel.latestAtr,
+          vwap: chartModel.latestVwap,
+        },
+        selectedIndicatorSummaries: chartIndicatorSummaries.map((item) => ({
+          label: item.label,
+          value: item.value,
+          tone: item.tone,
+          companySpecificRead: indicatorNarrative(item),
+        })),
+        patternFindings: patternFindings.slice(0, 8).map((pattern) => ({
+          name: pattern.name,
+          kind: pattern.kind,
+          bias: pattern.bias,
+          date: pattern.date,
+          close: pattern.price,
+          meaning: pattern.explanation,
+          usageRule: pattern.use,
+          caution: pattern.caution,
+        })),
+      },
+      importantScoredSignals: importantSignals,
+      fundamentalEvidence: {
+        source: activeFundamentals?.source,
+        sourceUrl: activeFundamentals?.source_url,
+        profile: {
+          name: activeFundamentals?.name,
+          sector: activeFundamentals?.sector,
+          industry: activeFundamentals?.industry,
+          businessSummary: clipText(activeFundamentals?.business_summary, 1200),
+          keyPoints: clipText(activeFundamentals?.key_points, 600),
+        },
+        ratios: ratioEvidence,
+        statementFlow: fundamentalStatementFlow,
+        businessQualityPillars: fundamentalPillars.map((pillar) => ({
+          label: pillar.label,
+          value: pillar.value,
+          score: pillar.score,
+          tone: pillar.tone,
+          companySpecificRead: pillarNarrative(pillar),
+        })),
+        annualReportChecklist: fundamentalChecklist,
+        fetchedPros: fetchedPros.slice(0, 5),
+        fetchedCons: fetchedCons.slice(0, 5),
+        companyUpdates: companyUpdates.map((update) => ({
+          title: update.title,
+          summary: update.summary,
+          date: update.date,
+          category: update.category,
+          tone: update.tone,
+        })),
+      },
+      varsityKnowledgeBase: {
+        foundationPdfModules: [
+          'Introduction to Stock Markets',
+          'Technical Analysis',
+          'Fundamental Analysis',
+          'Futures Trading',
+          'Options Theory',
+          'Option Strategies',
+          'Markets and Taxation',
+          'Currency and Commodity Futures',
+          'Risk Management and Trading Psychology',
+          'Trading Systems',
+          'Personal Finance',
+          'Personal Finance Insurance',
+        ],
+        chapterModulesRead: varsityModuleCoverage,
+        chapterCoverageIndex: 'attached server-side by the local data bridge from data/reference/varsity_chapter_rule_index.json',
+        sourceLinks: varsitySourceLinks,
+        matchedLessonsForThisInstrument: analysis.varsityLessons,
+        sectorOperatingRules,
+        allParaphrasedDerivedRules: varsityRuleCatalog,
+      },
+      reasoningTrace: analysis.steps.map((step) => ({
+        title: step.title,
+        plainEnglish: step.plainEnglish,
+        formula: step.formula,
+        rationale: step.rationale,
+        takeaway: step.takeaway,
+      })),
+    }
+  }
+
+  async function generateAiCoachReview() {
+    setLlmState('refreshing')
+    setLlmMessage('Preparing the company evidence, technicals, fundamentals, and Varsity rule context for the AI Coach...')
+    try {
+      const bridgeUrl = requireMarketDataBridge('AI Coach')
+      const response = await fetch(apiUrl(bridgeUrl, '/api/llm/verdict'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ context: buildAiCoachContext() }),
+      })
+      const data = (await readResponseJson(response)) as LlmVerdictResponse
+      if (!response.ok) {
+        throw new Error(data.error || 'AI Coach request failed.')
+      }
+      setLlmResponse(data)
+      setLlmState(data.configured === false ? 'error' : 'done')
+      setLlmMessage(
+        data.configured === false
+          ? data.message || 'AI Coach is not configured on the data bridge yet.'
+          : `AI Coach generated ${data.model ? `with ${data.model}` : 'successfully'} using the current verdict context and Varsity rule catalogue.`,
+      )
+    } catch (error) {
+      setLlmState('error')
+      setLlmResponse(null)
+      setLlmMessage(bridgeFailureMessage(error, 'Could not generate the AI Coach review.'))
+    }
+  }
 
   function updateForm<K extends keyof AnalysisForm>(key: K, value: AnalysisForm[K]) {
     setForm((current) => ({ ...current, [key]: value }))
@@ -5437,6 +5747,111 @@ function App() {
             {analysis.missing.length > 0 && (
               <div className="alerts">
                 <p>Missing: {analysis.missing.join(', ')}</p>
+              </div>
+            )}
+          </CollapsibleSection>
+        </>
+      ) : null}
+
+      {view === 'coach' ? (
+        <>
+          <CollapsibleSection
+            action={
+              <button type="button" onClick={() => void generateAiCoachReview()} disabled={llmState === 'refreshing' || !decisionSymbol}>
+                {llmState === 'refreshing' ? 'Generating...' : llmResponse?.review ? 'Regenerate Review' : 'Generate AI Review'}
+              </button>
+            }
+            className="parent-section ai-coach-section"
+            defaultOpen
+            description="A separate LLM explanation layer. It reads the current verdict, market evidence, company data, and Varsity-derived rule catalogue, then explains the decision in human language without changing the deterministic verdict."
+            eyebrow="AI Coach"
+            headingClassName="section-heading collapsible-section-heading"
+            id="ai-coach-heading"
+            staticOpen
+            title="LLM Review"
+          >
+            <div className="ai-coach-hero">
+              <article className="ai-coach-context-card">
+                <span>Decision anchor</span>
+                <strong>
+                  {analysis.verdict} | {analysis.score}/100
+                </strong>
+                <p>
+                  The Decision tab remains the auditable rule-based verdict. This tab asks an LLM to explain that verdict using the same stock data,
+                  signal scores, risk inputs, and Varsity-derived guardrails.
+                </p>
+              </article>
+              <article className="ai-coach-context-card">
+                <span>Knowledge grounding</span>
+                <strong>{varsityModuleCoverage.reduce((sum, module) => sum + module.chaptersRead, 0)} chapters + PDF rules</strong>
+                <p>
+                  The prompt includes paraphrased Varsity rules, sector checklists, Innerworth process discipline, NPS capital-segregation guardrails,
+                  SSE/ZCZP cautions, and the stock-specific evidence from this workspace.
+                </p>
+              </article>
+              <article className="ai-coach-context-card">
+                <span>Safety boundary</span>
+                <strong>No secret in the browser</strong>
+                <p>
+                  The API key stays on the data bridge. If the bridge is not configured, this page will show setup steps instead of trying to call an
+                  LLM from the frontend.
+                </p>
+              </article>
+            </div>
+
+            {llmMessage && (
+              <div className={`refresh-message ${llmState}`}>
+                <p>{llmMessage}</p>
+              </div>
+            )}
+
+            {!llmResponse && llmState === 'idle' && (
+              <div className="ai-empty-state">
+                <h3>Ready when you are</h3>
+                <p>
+                  Click Generate AI Review after loading market data. The coach will receive only the selected instrument context, not your full
+                  browser history. It will not invent missing fundamentals, news, or prices.
+                </p>
+              </div>
+            )}
+
+            {llmResponse?.configured === false && (
+              <div className="ai-setup-panel">
+                <h3>Configure the AI Coach on your data bridge</h3>
+                <p>{llmResponse.message}</p>
+                <ol>
+                  {(llmResponse.setup ?? []).map((step) => (
+                    <li key={step}>{step}</li>
+                  ))}
+                </ol>
+                <p className="caption">
+                  Keep <code>LLM_API_KEY</code> server-side. Do not put provider secrets in <code>VITE_</code> variables because those are bundled into
+                  the public web app.
+                </p>
+              </div>
+            )}
+
+            {llmResponse?.review && (
+              <div className="ai-review-grid">
+                <article className="ai-review-main">
+                  <span>{llmResponse.model ? `Model: ${llmResponse.model}` : 'AI Coach output'}</span>
+                  <h3>{llmResponse.review.headline || `${analysis.quoteKey}: ${analysis.verdict}`}</h3>
+                  <p>{llmResponse.review.plainEnglishVerdict || 'The AI Coach did not return a plain-English verdict summary.'}</p>
+                  {llmResponse.review.confidenceNote && <p className="ai-confidence-note">{llmResponse.review.confidenceNote}</p>}
+                  {llmResponse.generated_at && <small>Generated {new Date(llmResponse.generated_at).toLocaleString()}</small>}
+                </article>
+                <AiReviewListCard title="What to do next" tone="positive" items={llmResponse.review.whatToDoNext} emptyLabel="No next steps were returned." />
+                <AiReviewListCard title="What not to do" tone="negative" items={llmResponse.review.whatNotToDo} emptyLabel="No avoid-list was returned." />
+                <AiReviewListCard title="Key evidence" tone="neutral" items={llmResponse.review.keyEvidence} emptyLabel="No evidence summary was returned." />
+                <AiReviewListCard title="Varsity principles used" tone="positive" items={llmResponse.review.varsityPrinciples} emptyLabel="No Varsity principles were returned." />
+                <AiReviewListCard title="Risk plan" tone="neutral" items={llmResponse.review.riskPlan} emptyLabel="No risk plan was returned." />
+                <AiReviewListCard title="Data gaps" tone="negative" items={llmResponse.review.dataGaps} emptyLabel="No data gaps were returned." />
+                <AiReviewListCard
+                  title="Questions before action"
+                  tone="neutral"
+                  items={llmResponse.review.questionsBeforeAction}
+                  emptyLabel="No follow-up questions were returned."
+                />
               </div>
             )}
           </CollapsibleSection>
