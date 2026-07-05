@@ -1,4 +1,4 @@
-import { type CSSProperties, type FocusEvent, type MouseEvent, type ReactNode, useEffect, useMemo, useState } from 'react'
+import { type CSSProperties, type FocusEvent, type MouseEvent, type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import {
   sectorOperatingRules,
@@ -14,8 +14,9 @@ type RiskProfile = 'conservative' | 'balanced' | 'balanced_aggressive' | 'aggres
 type Horizon = '3-6m' | '6-12m' | '1-3y' | '3y+'
 type TradeAccess = 'delivery' | 'fo_context' | 'hedging'
 type ProfitTrend = 'unknown' | 'growing' | 'stable' | 'declining' | 'loss_making'
-type View = 'setup' | 'verdict' | 'coach' | 'technicals' | 'fundamentals' | 'reasoning' | 'data'
+type View = 'setup' | 'verdict' | 'coach' | 'technicals' | 'fundamentals' | 'reasoning' | 'data' | 'glossary'
 type CacheState = 'loading' | 'live' | 'free' | 'sample'
+export type { CacheState, Exchange, RiskMode, RiskProfile, Horizon, TradeAccess, ProfitTrend, ConstraintKey, AnalysisForm, AnalysisResult, Snapshot }
 type RefreshState = 'idle' | 'refreshing' | 'done' | 'error'
 type UploadState = 'idle' | 'uploading' | 'done' | 'error'
 type ThemeMode = 'dark' | 'light'
@@ -39,15 +40,47 @@ type IndicatorKey =
   | 'atr'
   | 'patterns'
 
-const workspaceTabs: Array<{ id: View; label: string; caption: string }> = [
-  { id: 'setup', label: 'Setup', caption: 'Inputs' },
-  { id: 'verdict', label: 'Decision', caption: 'Verdict' },
-  { id: 'coach', label: 'AI Coach', caption: 'LLM' },
-  { id: 'technicals', label: 'Charts', caption: 'Technicals' },
-  { id: 'fundamentals', label: 'Company', caption: 'Fundamentals' },
-  { id: 'reasoning', label: 'Reasoning', caption: 'Why' },
-  { id: 'data', label: 'Data Hub', caption: 'Sync' },
+// Primary tabs: the everyday path a first-time user follows, ticker in, verdict out.
+const primaryWorkspaceTabs: Array<{ id: View; label: string; caption: string }> = [
+  { id: 'setup', label: 'Get Started', caption: 'Enter a stock' },
+  { id: 'verdict', label: 'Verdict', caption: 'The answer' },
+  { id: 'technicals', label: 'Charts', caption: 'Price history' },
+  { id: 'fundamentals', label: 'Company', caption: 'The business' },
 ]
+// Secondary tabs: power-user / audit tools, tucked behind "More" so they don't
+// crowd the first-time experience. Still fully functional, just not front-and-centre.
+const moreWorkspaceTabs: Array<{ id: View; label: string; caption: string }> = [
+  { id: 'coach', label: 'AI Coach', caption: 'Plain-English explainer' },
+  { id: 'reasoning', label: 'Reasoning', caption: 'Step-by-step trail' },
+  { id: 'data', label: 'Data Hub', caption: 'Sync & mapping' },
+  { id: 'glossary', label: 'Glossary', caption: 'Terms explained' },
+]
+
+type GlossaryEntry = { term: string; definition: string; category: string }
+const glossaryEntries: GlossaryEntry[] = [
+  { category: 'Verdict basics', term: 'Verdict', definition: 'The app\'s recommendation: Buy, Watchlist, Hold, Reduce, Avoid, or Needs Input. It is a checklist output, not a guarantee.' },
+  { category: 'Verdict basics', term: 'Score (0-100)', definition: 'A weighted blend of technical structure, fundamental quality, statement flow, risk/entry plan, and recent updates. Higher is generally healthier, but always read it alongside the plan below it.' },
+  { category: 'Verdict basics', term: 'Data confidence', definition: 'How complete the evidence behind the verdict is, not a prediction of the stock\'s performance. Low confidence means key data is missing or stale, not that the trade is bad.' },
+  { category: 'Verdict basics', term: 'Needs Input', definition: 'The app does not have enough information yet (usually a missing ticker, capital, or price) to compute a real verdict. This is neutral, not a warning about the stock.' },
+  { category: 'Risk and sizing', term: 'Exit line (invalidation price)', definition: 'The price where the original idea is considered wrong. If the stock falls to or through this level, the plan is to sell rather than hope for a recovery.' },
+  { category: 'Risk and sizing', term: 'Reward/risk', definition: 'How much upside you\'re aiming for compared with how much you\'re risking. 2x means the potential gain is twice the potential loss if the exit line is hit.' },
+  { category: 'Risk and sizing', term: 'Risk budget', definition: 'The maximum rupee amount you\'re willing to lose on this idea, based on your capital and max-risk percentage.' },
+  { category: 'Risk and sizing', term: 'Quantity plan', definition: 'The suggested number of shares to buy, sized so that a loss down to the exit line stays within your risk budget.' },
+  { category: 'Risk and sizing', term: 'Max risk %', definition: 'What share of your deployable capital you\'re willing to risk on a single idea. Lower is more conservative.' },
+  { category: 'Chart indicators', term: 'SMA (Simple Moving Average)', definition: 'The average closing price over a set number of days. Price above its SMA usually signals a healthier short/medium-term trend.' },
+  { category: 'Chart indicators', term: 'EMA (Exponential Moving Average)', definition: 'Like an SMA, but weights recent closes more heavily, so it reacts faster to new price action.' },
+  { category: 'Chart indicators', term: 'VWAP', definition: 'Volume-weighted average price over the displayed window. Price above it suggests buyers paid higher average prices recently.' },
+  { category: 'Chart indicators', term: 'Bollinger Bands', definition: 'A 20-period average with volatility bands around it. Wide bands mean the stock is moving a lot; narrow bands mean it has gone quiet.' },
+  { category: 'Chart indicators', term: 'RSI (Relative Strength Index)', definition: 'A 0-100 momentum reading. Above 70 usually means strong/overbought; below 30 usually means weak/oversold, depending on the broader trend.' },
+  { category: 'Chart indicators', term: 'MACD', definition: 'Trend momentum calculated from the difference between two EMAs, compared against its own signal line.' },
+  { category: 'Chart indicators', term: 'ATR (Average True Range)', definition: 'A volatility measure showing how much a stock typically moves in a day. Useful for setting a realistic exit line.' },
+  { category: 'Fundamentals', term: 'ROCE', definition: 'Return on Capital Employed. Shows how efficiently a business turns the capital invested in it into profit. Higher is generally better.' },
+  { category: 'Fundamentals', term: 'Debt/Equity', definition: 'How much a company relies on borrowed money compared with shareholder money. Higher ratios mean more financial risk if earnings slow down.' },
+  { category: 'Fundamentals', term: 'P/E (Price to Earnings)', definition: 'The share price divided by earnings per share. A rough gauge of how expensive a stock is relative to its profit; useful mainly when compared with peers.' },
+  { category: 'Fundamentals', term: 'Market cap', definition: 'The total value of all a company\'s shares. Influences disclosure quality, liquidity, and how much a single bad quarter can shake the stock.' },
+  { category: 'Fundamentals', term: 'Profit trend', definition: 'Whether a company\'s profits have been growing, flat, or shrinking over recent periods — a quick gut check before digging into ratios.' },
+]
+
 type PatternBias = 'bullish' | 'bearish' | 'neutral'
 type SignalTone = 'positive' | 'negative' | 'neutral'
 
@@ -426,6 +459,7 @@ const initialForm: AnalysisForm = {
 }
 
 const browserWorkspaceKey = 'verdict-workstation:browser-workspace:v1'
+const onboardingTipDismissedKey = 'verdict-workstation:onboarding-tip-dismissed:v1'
 
 function readBrowserWorkspace(): BrowserWorkspace | null {
   if (typeof window === 'undefined') return null
@@ -574,6 +608,12 @@ const indicatorLabels: Record<IndicatorKey, { label: string; help: string }> = {
   atr: { label: 'ATR 14', help: 'Average true range. It measures volatility and helps estimate practical stop-loss distance.' },
   patterns: { label: 'Patterns', help: 'Marks recent single and multi-candle reversal/strength patterns. Context and volume still matter.' },
 }
+// The handful of overlays a first-time chart reader reaches for. Everything else in
+// indicatorLabels is still fully wired up, just tucked behind "More indicators".
+const commonIndicatorKeys: IndicatorKey[] = ['volume', 'range', 'patterns', 'sma20', 'ema20']
+const moreIndicatorKeys: IndicatorKey[] = (Object.keys(indicatorLabels) as IndicatorKey[]).filter(
+  (key) => !commonIndicatorKeys.includes(key),
+)
 
 const requiredHelp = {
   ticker: 'Company symbol to analyse. It controls which quote, candles, and holding row the app matches.',
@@ -3581,6 +3621,43 @@ function App() {
   const [snapshot, setSnapshot] = useState<Snapshot>(() => storedWorkspace?.snapshot ?? starterSnapshot)
   const [cacheState, setCacheState] = useState<CacheState>(() => cacheStateFromProvider((storedWorkspace?.snapshot ?? starterSnapshot).provider))
   const [view, setView] = useState<View>('setup')
+  const viewAnnouncementRef = useRef<HTMLDivElement>(null)
+  const isFirstViewRender = useRef(true)
+
+  useEffect(() => {
+    if (isFirstViewRender.current) {
+      isFirstViewRender.current = false
+      return
+    }
+    viewAnnouncementRef.current?.focus()
+  }, [view])
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false)
+  const [glossarySearch, setGlossarySearch] = useState('')
+  const [clearDataArmed, setClearDataArmed] = useState(false)
+
+  useEffect(() => {
+    if (!clearDataArmed) return
+    const timeout = window.setTimeout(() => setClearDataArmed(false), 4000)
+    return () => window.clearTimeout(timeout)
+  }, [clearDataArmed])
+  const [showOnboardingTip, setShowOnboardingTip] = useState(() => {
+    if (typeof window === 'undefined') return false
+    try {
+      return window.localStorage.getItem(onboardingTipDismissedKey) !== '1'
+    } catch {
+      return true
+    }
+  })
+
+  function dismissOnboardingTip() {
+    setShowOnboardingTip(false)
+    if (typeof window === 'undefined') return
+    try {
+      window.localStorage.setItem(onboardingTipDismissedKey, '1')
+    } catch {
+      // Storage can be disabled; the tip will just reappear next visit, which is a fine fallback.
+    }
+  }
   const [form, setForm] = useState<AnalysisForm>(() => storedWorkspace?.form ?? initialForm)
   const [days, setDays] = useState(() => storedWorkspace?.days ?? 730)
   const [includeHoldings, setIncludeHoldings] = useState(() => storedWorkspace?.includeHoldings ?? false)
@@ -3619,6 +3696,7 @@ function App() {
     atr: true,
     patterns: true,
   })
+  const [showMoreIndicators, setShowMoreIndicators] = useState(false)
   const [hoveredCandleIndex, setHoveredCandleIndex] = useState<number | null>(null)
   const [chartShellElement, setChartShellElement] = useState<HTMLDivElement | null>(null)
 
@@ -4929,6 +5007,7 @@ function App() {
   }
 
   function clearBrowserWorkspace() {
+    setClearDataArmed(false)
     try {
       window.localStorage.removeItem(browserWorkspaceKey)
     } catch {
@@ -5210,34 +5289,90 @@ function App() {
             </div>
           </div>
         </div>
-        <div className="tabs workspace-tabs" role="tablist" aria-label="Workspace sections">
-          {workspaceTabs.map((tab) => (
+        <div className="tabs workspace-tabs" aria-label="Workspace sections">
+          {primaryWorkspaceTabs.map((tab) => (
             <button
-              aria-selected={view === tab.id}
+              aria-current={view === tab.id ? 'page' : undefined}
               className={view === tab.id ? 'active' : ''}
               key={tab.id}
-              role="tab"
               type="button"
-              onClick={() => setView(tab.id)}
+              onClick={() => {
+                setView(tab.id)
+                setMoreMenuOpen(false)
+              }}
             >
               <span>{tab.label}</span>
               <small>{tab.caption}</small>
             </button>
           ))}
+          <div className="workspace-tabs-more">
+            <button
+              aria-expanded={moreMenuOpen}
+              aria-haspopup="true"
+              className={moreWorkspaceTabs.some((tab) => tab.id === view) ? 'active' : ''}
+              type="button"
+              onClick={() => setMoreMenuOpen((current) => !current)}
+            >
+              <span>More</span>
+              <small>{moreWorkspaceTabs.find((tab) => tab.id === view)?.label ?? 'Coach, reasoning, sync'}</small>
+            </button>
+            {moreMenuOpen && (
+              <div className="workspace-tabs-more-menu" role="menu">
+                {moreWorkspaceTabs.map((tab) => (
+                  <button
+                    aria-checked={view === tab.id}
+                    className={view === tab.id ? 'active' : ''}
+                    key={tab.id}
+                    role="menuitemradio"
+                    type="button"
+                    onClick={() => {
+                      setView(tab.id)
+                      setMoreMenuOpen(false)
+                    }}
+                  >
+                    <span>{tab.label}</span>
+                    <small>{tab.caption}</small>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       </nav>
+
+      <div
+        aria-live="polite"
+        className="sr-only view-announcement"
+        ref={viewAnnouncementRef}
+        tabIndex={-1}
+      >
+        {[...primaryWorkspaceTabs, ...moreWorkspaceTabs].find((tab) => tab.id === view)?.label ?? 'Verdict Workstation'} section loaded.
+      </div>
+
+      {showOnboardingTip && view === 'setup' && (
+        <div className="onboarding-tip" role="note">
+          <span className="onboarding-tip-icon" aria-hidden="true">👋</span>
+          <p>
+            New here? Fill in the four fields below and hit <strong>Load &amp; Analyse</strong> to get a Buy/Hold/Avoid verdict. Everything else —
+            risk settings, charts, company data, and the AI Coach — is optional and one tap away under the tabs above.
+          </p>
+          <button aria-label="Dismiss tip" className="onboarding-tip-dismiss" type="button" onClick={dismissOnboardingTip}>
+            ✕
+          </button>
+        </div>
+      )}
 
       {view === 'setup' ? (
         <>
           <CollapsibleSection
             className="parent-section setup-parent"
             defaultOpen
-            description="Start with the instrument and money context. Load its data once, then use the verdict, charts, scenarios, and help cards to make a calmer decision."
-            eyebrow="Decision brief"
+            description="Enter a stock and how much you're investing. We'll pull live market data and give you a clear Buy, Hold, or Avoid verdict."
+            eyebrow="Step 1"
             headingClassName="section-heading collapsible-section-heading"
             id="setup-parent-heading"
             staticOpen
-            title="Analyse One Fund"
+            title="Get Your Verdict"
           >
             <section className="input-grid">
             <CollapsibleSection
@@ -5255,7 +5390,7 @@ function App() {
               defaultOpen
               eyebrow="Required"
               id="required-heading"
-              title="Instrument and Money Context"
+              title="Tell us what you're looking at"
             >
               <div className="form-grid setup-primary-grid">
                 <label className="field">
@@ -5268,18 +5403,6 @@ function App() {
                     <option value="NSE">NSE</option>
                     <option value="BSE">BSE</option>
                   </select>
-                </label>
-                <label className="field">
-                  <FieldLabel help="How many daily candles to request when you click Load & Analyse or Sync Market Data. Longer windows improve long-term trend and support/resistance context, but take longer to refresh.">History window</FieldLabel>
-                  <input
-                    min="30"
-                    max="3000"
-                    step="30"
-                    type="number"
-                    aria-label="History window"
-                    value={days}
-                    onChange={(event) => setDays(Number(event.target.value))}
-                  />
                 </label>
                 {!isHoldingReview && (
                   <label className="field">
@@ -5327,6 +5450,14 @@ function App() {
                 </div>
               )}
 
+              <CollapsibleSection
+                className="sub-panel nested-collapse advanced-setup-panel"
+                description="Sensible defaults are already applied. Open this only if you want to fine-tune risk tolerance, trading access, sizing, or how much price history is fetched."
+                headingClassName="subsection-heading"
+                headingLevel={3}
+                id="advanced-setup-heading"
+                title="Advanced setup (optional)"
+              >
               <div className="setup-control-row">
               <div className="segmented-block compact-choice">
                 <span className="segmented-label">
@@ -5365,6 +5496,21 @@ function App() {
                   ))}
                 </div>
               </div>
+              </div>
+
+              <div className="form-grid">
+                <label className="field">
+                  <FieldLabel help="How many daily candles to request when you click Load & Analyse or Sync Market Data. Longer windows improve long-term trend and support/resistance context, but take longer to refresh.">History window</FieldLabel>
+                  <input
+                    min="30"
+                    max="3000"
+                    step="30"
+                    type="number"
+                    aria-label="History window"
+                    value={days}
+                    onChange={(event) => setDays(Number(event.target.value))}
+                  />
+                </label>
               </div>
 
               {addMoreRiskControlsActive ? (
@@ -5408,6 +5554,7 @@ function App() {
                   </p>
                 </div>
               )}
+              </CollapsibleSection>
               {freeRefreshMessage && view === 'setup' && (
                 <div className={`refresh-message ${freeRefreshState}`}>
                   <p>{freeRefreshMessage}</p>
@@ -5426,7 +5573,7 @@ function App() {
               )}
             </CollapsibleSection>
 
-            <CollapsibleSection className="panel evidence-panel" eyebrow="Optional" id="optional-heading" title="Evidence and Guardrails">
+            <CollapsibleSection className="panel evidence-panel" description="Everything here is optional. The verdict already uses live market and company data — use these only to override a stale figure or add your own notes." eyebrow="Optional" id="optional-heading" title="Fine-tune the evidence">
 
               <div className="auto-evidence-panel">
                 <div>
@@ -5549,10 +5696,9 @@ function App() {
             <p className="verdict-summary">
               {isHoldingReview ? (
                 <>
-                  The app reads this existing position as <strong>{analysis.verdict}</strong> with {analysis.confidenceLabel.toLowerCase()} data
-                  confidence. It is using {formatInr(analysis.ltp)} as the analysis price, {formatPercent(analysis.positionPnlPct)} position P&L, and{' '}
-                  {hasPortfolioContext ? `${formatPercent(analysis.portfolioWeight)} portfolio weight` : 'no portfolio-weight read because no holdings file is loaded'}.
-                  Data confidence means evidence coverage, not certainty of recovery.
+                  The app reads this existing position as <strong>{analysis.verdict}</strong> with {analysis.confidenceLabel.toLowerCase()} confidence
+                  in the data behind it. It is using {formatInr(analysis.ltp)} as the analysis price, {formatPercent(analysis.positionPnlPct)} position
+                  P&L, and {hasPortfolioContext ? `${formatPercent(analysis.portfolioWeight)} portfolio weight` : 'no portfolio weight, since no holdings file is loaded'}.
                 </>
               ) : (
                 <>
@@ -5567,6 +5713,24 @@ function App() {
                 <strong>Special instrument check:</strong> {specialInstrumentWarning}
               </p>
             ) : null}
+
+            <button
+              className="ai-coach-callout"
+              type="button"
+              onClick={() => {
+                setView('coach')
+                if (!llmResponse && llmState !== 'refreshing' && decisionSymbol) {
+                  void generateAiCoachReview()
+                }
+              }}
+            >
+              <span className="ai-coach-callout-icon" aria-hidden="true">💬</span>
+              <span className="ai-coach-callout-copy">
+                <strong>Confused by any of this?</strong>
+                <small>Ask the AI Coach to explain this verdict in plain English</small>
+              </span>
+              <span className="ai-coach-callout-arrow" aria-hidden="true">→</span>
+            </button>
 
             <div className="metric-grid compact-metrics">
               <div className="metric tone-neutral">
@@ -5611,17 +5775,26 @@ function App() {
                     <strong>{formatInr(analysis.riskCapital)}</strong>
                   </div>
                   <div className={invalidationPriceNum ? 'metric tone-neutral' : 'metric tone-negative'}>
-                    <span>Exit line</span>
+                    <span>
+                      Exit line
+                      <HelpTip text="The price where the original idea is considered wrong. If the stock falls to or through this level, the plan is to sell rather than hope for a recovery." />
+                    </span>
                     <strong>{formatInr(invalidationPriceNum)}</strong>
                   </div>
                   <div className={rewardRisk === undefined ? 'metric tone-neutral' : rewardRisk >= 2 ? 'metric tone-positive' : 'metric tone-negative'}>
-                    <span>Reward/risk</span>
+                    <span>
+                      Reward/risk
+                      <HelpTip text="How much upside you're aiming for compared with how much you're risking. 2x means the potential gain is twice the potential loss if the exit line is hit." />
+                    </span>
                     <strong>{rewardRisk === undefined ? '-' : `${rewardRisk.toFixed(1)}x`}</strong>
                   </div>
                 </>
               )}
               <div className={`metric tone-${confidenceTone}`}>
-                <span>Data confidence</span>
+                <span>
+                  Data confidence
+                  <HelpTip text="How complete the evidence behind this verdict is — not a prediction of the stock's performance. Low confidence means key data is missing or stale, not that the trade is bad." />
+                </span>
                 <strong>{analysis.confidenceLabel}</strong>
               </div>
             </div>
@@ -5641,11 +5814,11 @@ function App() {
 
             <CollapsibleSection
               className="adaptive-score-panel sub-panel nested-collapse"
-              defaultOpen
+              description="How the 0-100 score above was built, signal by signal. Most people won't need this."
               headingClassName="subsection-heading"
               headingLevel={3}
               id="adaptive-score-heading"
-              title="Adaptive Hybrid Score"
+              title="See the full score breakdown"
             >
               <div className="component-score-grid">
                 {analysis.scoreComponents.map((component) => (
@@ -5695,6 +5868,7 @@ function App() {
             <div className="guidance-grid">
               <CollapsibleSection
                 className="guidance-card do-card nested-collapse"
+                defaultOpen
                 headingClassName="subsection-heading"
                 headingLevel={3}
                 id="do-next-heading"
@@ -5711,14 +5885,14 @@ function App() {
                   )}
                 </ul>
               </CollapsibleSection>
-              <CollapsibleSection className="guidance-card dont-card nested-collapse" headingClassName="subsection-heading" headingLevel={3} id="dont-do-heading" title="What Not to Do">
+              <CollapsibleSection className="guidance-card dont-card nested-collapse" defaultOpen headingClassName="subsection-heading" headingLevel={3} id="dont-do-heading" title="What Not to Do">
                 <ul>
                   {analysis.dontItems.map((item) => (
                     <li key={item}>{item}</li>
                   ))}
                 </ul>
               </CollapsibleSection>
-              <CollapsibleSection className="guidance-card why-card nested-collapse" headingClassName="subsection-heading" headingLevel={3} id="why-verdict-heading" title="Why This Verdict">
+              <CollapsibleSection className="guidance-card why-card nested-collapse" defaultOpen headingClassName="subsection-heading" headingLevel={3} id="why-verdict-heading" title="Why This Verdict">
                 <ul>
                   {analysis.whyItems.map((item) => (
                     <li key={item}>{item}</li>
@@ -5727,22 +5901,33 @@ function App() {
               </CollapsibleSection>
             </div>
 
-            <div className="verdict-columns">
-              <CollapsibleSection className="sub-panel nested-collapse" headingClassName="subsection-heading" headingLevel={3} id="raw-action-heading" title={isHoldingReview ? 'Raw Action Signals' : 'Entry and Exit Signals'}>
-                <ul>
-                  {analysis.actions.map((item) => (
-                    <li key={item}>{item}</li>
-                  ))}
-                </ul>
-              </CollapsibleSection>
-              <CollapsibleSection className="sub-panel nested-collapse" headingClassName="subsection-heading" headingLevel={3} id="cautions-heading" title="Cautions">
-                <ul>
-                  {analysis.cautions.map((item) => (
-                    <li key={item}>{item}</li>
-                  ))}
-                </ul>
-              </CollapsibleSection>
-            </div>
+            <CollapsibleSection
+              className="sub-panel nested-collapse"
+              description="The individual technical signals and risk flags behind the verdict above."
+              headingClassName="subsection-heading"
+              headingLevel={3}
+              id="raw-signals-heading"
+              title="Every signal & caution behind this verdict"
+            >
+              <div className="verdict-columns">
+                <article className="sub-panel">
+                  <h4>{isHoldingReview ? 'Raw Action Signals' : 'Entry and Exit Signals'}</h4>
+                  <ul>
+                    {analysis.actions.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                </article>
+                <article className="sub-panel">
+                  <h4>Cautions</h4>
+                  <ul>
+                    {analysis.cautions.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                </article>
+              </div>
+            </CollapsibleSection>
 
             {analysis.missing.length > 0 && (
               <div className="alerts">
@@ -5869,6 +6054,23 @@ function App() {
             staticOpen
             title="Technical Analysis"
           >
+            <button
+              className="ai-coach-callout"
+              type="button"
+              onClick={() => {
+                setView('coach')
+                if (!llmResponse && llmState !== 'refreshing' && decisionSymbol) {
+                  void generateAiCoachReview()
+                }
+              }}
+            >
+              <span className="ai-coach-callout-icon" aria-hidden="true">💬</span>
+              <span className="ai-coach-callout-copy">
+                <strong>Not sure what this chart is telling you?</strong>
+                <small>Ask the AI Coach to explain the technical picture in plain English</small>
+              </span>
+              <span className="ai-coach-callout-arrow" aria-hidden="true">→</span>
+            </button>
 
             <div className="visual-grid">
               <article className="visual-card chart-card">
@@ -5899,7 +6101,7 @@ function App() {
                   </div>
                   <span className="chart-zoom-pill">{chartZoomLabel}</span>
                   <div className="indicator-switches" aria-label="Chart indicators">
-                    {(Object.keys(indicatorLabels) as IndicatorKey[]).map((indicator) => (
+                    {commonIndicatorKeys.map((indicator) => (
                       <button
                         className={chartIndicators[indicator] ? 'active' : ''}
                         key={indicator}
@@ -5911,7 +6113,31 @@ function App() {
                         <HelpTip text={indicatorLabels[indicator].help} />
                       </button>
                     ))}
+                    <button
+                      aria-expanded={showMoreIndicators}
+                      className={`more-indicators-toggle ${moreIndicatorKeys.some((key) => chartIndicators[key]) ? 'active' : ''}`}
+                      type="button"
+                      onClick={() => setShowMoreIndicators((current) => !current)}
+                    >
+                      {showMoreIndicators ? 'Fewer indicators' : 'More indicators'}
+                    </button>
                   </div>
+                  {showMoreIndicators && (
+                    <div className="indicator-switches more-indicators-row" aria-label="More chart indicators">
+                      {moreIndicatorKeys.map((indicator) => (
+                        <button
+                          className={chartIndicators[indicator] ? 'active' : ''}
+                          key={indicator}
+                          type="button"
+                          aria-pressed={chartIndicators[indicator]}
+                          onClick={() => toggleIndicator(indicator)}
+                        >
+                          {indicatorLabels[indicator].label}
+                          <HelpTip text={indicatorLabels[indicator].help} />
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
                 <div className="forecast-controls">
@@ -5933,6 +6159,7 @@ function App() {
                   </div>
 
                   {forecastSettings.enabled && (
+                    <>
                     <div className="forecast-control-grid">
                       <label className="field">
                         <FieldLabel help={forecastHelp.horizon}>Horizon</FieldLabel>
@@ -5960,79 +6187,91 @@ function App() {
                           ))}
                         </select>
                       </label>
-                      <label className="field">
-                        <FieldLabel help={forecastHelp.volatilityMultiplier}>Volatility multiplier</FieldLabel>
-                        <input
-                          inputMode="decimal"
-                          value={forecastSettings.volatilityMultiplier}
-                          onChange={(event) => updateForecastSetting('volatilityMultiplier', event.target.value)}
-                        />
-                      </label>
-                      <label className="field">
-                        <FieldLabel help={forecastHelp.trendWeight}>Trend influence %</FieldLabel>
-                        <input
-                          inputMode="decimal"
-                          value={forecastSettings.trendWeight}
-                          onChange={(event) => updateForecastSetting('trendWeight', event.target.value)}
-                        />
-                      </label>
-                      <label className="field">
-                        <FieldLabel help={forecastHelp.fundamentalGrowth}>Fundamental growth %</FieldLabel>
-                        <input
-                          inputMode="decimal"
-                          placeholder="Auto"
-                          value={forecastSettings.fundamentalGrowth}
-                          onChange={(event) => updateForecastSetting('fundamentalGrowth', event.target.value)}
-                        />
-                      </label>
-                      <label className="field">
-                        <FieldLabel help={forecastHelp.valuationShift}>Valuation rerating %</FieldLabel>
-                        <input
-                          inputMode="decimal"
-                          value={forecastSettings.valuationShift}
-                          onChange={(event) => updateForecastSetting('valuationShift', event.target.value)}
-                        />
-                      </label>
-                      <label className="field">
-                        <FieldLabel help={forecastHelp.eventRisk}>Event risk</FieldLabel>
-                        <select
-                          value={forecastSettings.eventRisk}
-                          onChange={(event) => updateForecastSetting('eventRisk', event.target.value as EventRisk)}
-                        >
-                          {(Object.keys(eventRiskLabels) as EventRisk[]).map((risk) => (
-                            <option key={risk} value={risk}>
-                              {eventRiskLabels[risk]}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      <div className="custom-return-fields">
-                        <label className="field">
-                          <FieldLabel help={forecastHelp.customBearAnnualReturn}>Bear annual %</FieldLabel>
-                          <input
-                            inputMode="decimal"
-                            value={forecastSettings.customBearAnnualReturn}
-                            onChange={(event) => updateForecastSetting('customBearAnnualReturn', event.target.value)}
-                          />
-                        </label>
-                        <label className="field">
-                          <FieldLabel help={forecastHelp.customBaseAnnualReturn}>Base annual %</FieldLabel>
-                          <input
-                            inputMode="decimal"
-                            value={forecastSettings.customBaseAnnualReturn}
-                            onChange={(event) => updateForecastSetting('customBaseAnnualReturn', event.target.value)}
-                          />
-                        </label>
-                        <label className="field">
-                          <FieldLabel help={forecastHelp.customBullAnnualReturn}>Bull annual %</FieldLabel>
-                          <input
-                            inputMode="decimal"
-                            value={forecastSettings.customBullAnnualReturn}
-                            onChange={(event) => updateForecastSetting('customBullAnnualReturn', event.target.value)}
-                          />
-                        </label>
-                      </div>
                     </div>
+                    <CollapsibleSection
+                      className="forecast-assumptions-inputs nested-collapse"
+                      description="Sensible defaults are already applied. Adjust these only if you want to override the model's own volatility, growth, or event-risk assumptions."
+                      headingClassName="subsection-heading"
+                      headingLevel={4}
+                      id="forecast-assumption-inputs-heading"
+                      title="Advanced forecast assumptions (optional)"
+                    >
+                      <div className="forecast-control-grid">
+                        <label className="field">
+                          <FieldLabel help={forecastHelp.volatilityMultiplier}>Volatility multiplier</FieldLabel>
+                          <input
+                            inputMode="decimal"
+                            value={forecastSettings.volatilityMultiplier}
+                            onChange={(event) => updateForecastSetting('volatilityMultiplier', event.target.value)}
+                          />
+                        </label>
+                        <label className="field">
+                          <FieldLabel help={forecastHelp.trendWeight}>Trend influence %</FieldLabel>
+                          <input
+                            inputMode="decimal"
+                            value={forecastSettings.trendWeight}
+                            onChange={(event) => updateForecastSetting('trendWeight', event.target.value)}
+                          />
+                        </label>
+                        <label className="field">
+                          <FieldLabel help={forecastHelp.fundamentalGrowth}>Fundamental growth %</FieldLabel>
+                          <input
+                            inputMode="decimal"
+                            placeholder="Auto"
+                            value={forecastSettings.fundamentalGrowth}
+                            onChange={(event) => updateForecastSetting('fundamentalGrowth', event.target.value)}
+                          />
+                        </label>
+                        <label className="field">
+                          <FieldLabel help={forecastHelp.valuationShift}>Valuation rerating %</FieldLabel>
+                          <input
+                            inputMode="decimal"
+                            value={forecastSettings.valuationShift}
+                            onChange={(event) => updateForecastSetting('valuationShift', event.target.value)}
+                          />
+                        </label>
+                        <label className="field">
+                          <FieldLabel help={forecastHelp.eventRisk}>Event risk</FieldLabel>
+                          <select
+                            value={forecastSettings.eventRisk}
+                            onChange={(event) => updateForecastSetting('eventRisk', event.target.value as EventRisk)}
+                          >
+                            {(Object.keys(eventRiskLabels) as EventRisk[]).map((risk) => (
+                              <option key={risk} value={risk}>
+                                {eventRiskLabels[risk]}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <div className="custom-return-fields">
+                          <label className="field">
+                            <FieldLabel help={forecastHelp.customBearAnnualReturn}>Bear annual %</FieldLabel>
+                            <input
+                              inputMode="decimal"
+                              value={forecastSettings.customBearAnnualReturn}
+                              onChange={(event) => updateForecastSetting('customBearAnnualReturn', event.target.value)}
+                            />
+                          </label>
+                          <label className="field">
+                            <FieldLabel help={forecastHelp.customBaseAnnualReturn}>Base annual %</FieldLabel>
+                            <input
+                              inputMode="decimal"
+                              value={forecastSettings.customBaseAnnualReturn}
+                              onChange={(event) => updateForecastSetting('customBaseAnnualReturn', event.target.value)}
+                            />
+                          </label>
+                          <label className="field">
+                            <FieldLabel help={forecastHelp.customBullAnnualReturn}>Bull annual %</FieldLabel>
+                            <input
+                              inputMode="decimal"
+                              value={forecastSettings.customBullAnnualReturn}
+                              onChange={(event) => updateForecastSetting('customBullAnnualReturn', event.target.value)}
+                            />
+                          </label>
+                        </div>
+                      </div>
+                    </CollapsibleSection>
+                    </>
                   )}
                 </div>
 
@@ -6678,6 +6917,24 @@ function App() {
             staticOpen
             title="Fundamental Analysis"
           >
+            <button
+              className="ai-coach-callout"
+              type="button"
+              onClick={() => {
+                setView('coach')
+                if (!llmResponse && llmState !== 'refreshing' && decisionSymbol) {
+                  void generateAiCoachReview()
+                }
+              }}
+            >
+              <span className="ai-coach-callout-icon" aria-hidden="true">💬</span>
+              <span className="ai-coach-callout-copy">
+                <strong>Ratios feeling like alphabet soup?</strong>
+                <small>Ask the AI Coach to explain the business quality picture in plain English</small>
+              </span>
+              <span className="ai-coach-callout-arrow" aria-hidden="true">→</span>
+            </button>
+
             <div className="visual-grid fundamental-grid">
               {!activeFundamentals && (
                 <article className="visual-card fundamental-empty-card tone-negative">
@@ -6889,12 +7146,15 @@ function App() {
 
               <div className="steps-list detailed-steps">
                 {analysis.steps.map((step, index) => (
-                  <article className="reasoning-step" key={step.title}>
-                    <div className="reasoning-step-header">
-                      <span className="reasoning-index">{index + 1}</span>
-                      <h3>{step.title.replace(/^\d+\.\s*/, '')}</h3>
-                    </div>
-                    <p className="plain-english">{step.plainEnglish}</p>
+                  <CollapsibleSection
+                    className="reasoning-step nested-collapse"
+                    description={step.plainEnglish}
+                    headingClassName="subsection-heading"
+                    headingLevel={3}
+                    id={`reasoning-step-${index}`}
+                    key={step.title}
+                    title={`${index + 1}. ${step.title.replace(/^\d+\.\s*/, '')}`}
+                  >
                     <div className="formula-box">
                       <span>Formula or rule used</span>
                       <p>{step.formula}</p>
@@ -6905,7 +7165,7 @@ function App() {
                     <p className="takeaway">
                       <strong>Takeaway:</strong> {step.takeaway}
                     </p>
-                  </article>
+                  </CollapsibleSection>
                 ))}
                 <article className="reasoning-step varsity-reasoning-step">
                   <div className="reasoning-step-header">
@@ -6979,12 +7239,19 @@ function App() {
                   {freeRefreshState === 'refreshing' ? 'Syncing...' : 'Sync Market Data'}
                 </button>
                 <button
-                  className="secondary-action danger-action"
+                  aria-label={clearDataArmed ? 'Confirm clear all browser data, this cannot be undone' : 'Clear Browser Data'}
+                  className={`secondary-action danger-action ${clearDataArmed ? 'armed' : ''}`}
                   type="button"
-                  onClick={clearBrowserWorkspace}
+                  onClick={() => {
+                    if (clearDataArmed) {
+                      clearBrowserWorkspace()
+                    } else {
+                      setClearDataArmed(true)
+                    }
+                  }}
                   disabled={freeRefreshState === 'refreshing' || bridgeCacheLoading}
                 >
-                  Clear Browser Data
+                  {clearDataArmed ? 'Confirm clear? This cannot be undone' : 'Clear Browser Data'}
                 </button>
               </div>
             }
@@ -7127,7 +7394,7 @@ function App() {
 
           <section className="data-grid">
             <CollapsibleSection className="panel table-panel" defaultOpen eyebrow="Portfolio" id="holdings-heading" title="Holdings Feed">
-              <div className="table-wrap">
+              <div className="table-wrap" role="region" aria-label="Holdings Feed table, scroll for more columns" tabIndex={0}>
                 <table>
                   <thead>
                     <tr>
@@ -7137,7 +7404,7 @@ function App() {
                       <th>LTP</th>
                       <th>Value</th>
                       <th>P&L</th>
-                      <th></th>
+                      <th><span className="sr-only">Actions</span></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -7173,7 +7440,7 @@ function App() {
             </CollapsibleSection>
 
             <CollapsibleSection className="panel table-panel" defaultOpen eyebrow="Quotes" id="quotes-heading" title="Latest Market Data">
-              <div className="table-wrap">
+              <div className="table-wrap" role="region" aria-label="Latest Market Data table, scroll for more columns" tabIndex={0}>
                 <table>
                   <thead>
                     <tr>
@@ -7336,8 +7603,62 @@ function App() {
           </section>
         </>
       ) : null}
+
+      {view === 'glossary' ? (
+        <section className="parent-section glossary-section">
+          <div className="section-heading collapsible-section-heading">
+            <span className="mini-label">Reference</span>
+            <h2>Glossary</h2>
+            <p>Every jargon term used across the app, in plain English, in one place.</p>
+          </div>
+
+          <label className="field glossary-search-field">
+            <FieldLabel help="Type any part of a term to filter the list below.">Search terms</FieldLabel>
+            <input
+              placeholder="e.g. reward, ROCE, VWAP"
+              type="search"
+              value={glossarySearch}
+              onChange={(event) => setGlossarySearch(event.target.value)}
+            />
+          </label>
+
+          {(() => {
+            const query = glossarySearch.trim().toLowerCase()
+            const filtered = query
+              ? glossaryEntries.filter(
+                  (entry) => entry.term.toLowerCase().includes(query) || entry.definition.toLowerCase().includes(query),
+                )
+              : glossaryEntries
+            if (filtered.length === 0) {
+              return <p className="glossary-empty">No terms match "{glossarySearch}". Try a shorter search.</p>
+            }
+            const categories = Array.from(new Set(filtered.map((entry) => entry.category)))
+            return categories.map((category) => (
+              <div className="panel glossary-category" key={category}>
+                <h3>{category}</h3>
+                <dl className="glossary-list">
+                  {filtered
+                    .filter((entry) => entry.category === category)
+                    .map((entry) => (
+                      <div className="glossary-entry" key={entry.term}>
+                        <dt>{entry.term}</dt>
+                        <dd>{entry.definition}</dd>
+                      </div>
+                    ))}
+                </dl>
+              </div>
+            ))
+          })()}
+        </section>
+      ) : null}
     </main>
   )
 }
 
 export default App
+
+// Named exports below are purely additive (no change to app behavior or the default
+// export) and exist so the core scoring logic can be unit-tested in isolation from
+// the React component tree. See src/__tests__/buildAnalysis.test.ts.
+export { buildAnalysis, starterSnapshot, initialForm, formatInr, formatPercent, toneFromScore, defaultRiskPercentForProfile }
+
