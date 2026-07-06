@@ -32,91 +32,91 @@ SERVER_STARTED_AT = datetime.now(timezone.utc).isoformat()
 
 PDF_FOUNDATION_RULES: list[dict[str, Any]] = [
     {
-        "module": "Introduction to Stock Markets",
+        "area": "market basics",
         "rules": [
             "Start by identifying the instrument, exchange, liquidity, corporate-action risk, and whether the idea is investment, trade, or speculation.",
             "Treat price as one piece of evidence; capital safety depends on business quality, market depth, and the ability to exit.",
         ],
     },
     {
-        "module": "Technical Analysis",
+        "area": "chart analysis",
         "rules": [
             "Read trend, support/resistance, volume, and candlestick context together; no single pattern or indicator is enough to buy or sell.",
             "Use indicators such as RSI, MACD, moving averages, VWAP, Bollinger Bands, and ATR as confirmation and risk-placement tools, not as guarantees.",
         ],
     },
     {
-        "module": "Fundamental Analysis",
+        "area": "business analysis",
         "rules": [
             "Understand the business, industry drivers, accounting statements, profitability, leverage, cash conversion, growth, and valuation before concluding quality.",
             "Prefer businesses where PAT is backed by CFO, debt is manageable, reserves are healthy, and valuation is sensible versus history and peers.",
         ],
     },
     {
-        "module": "Futures Trading",
+        "area": "futures and leverage",
         "rules": [
             "Recognise leverage, margin calls, mark-to-market movement, rollover, basis, and liquidity before considering futures exposure.",
             "Do not use futures to recover losses from a weak equity thesis; use derivatives only for a defined view or hedge.",
         ],
     },
     {
-        "module": "Options Theory",
+        "area": "options risk",
         "rules": [
             "Options require explicit awareness of intrinsic value, time value, volatility, expiry, and the Greeks.",
             "Long options need movement before time decay hurts; short options need strict risk controls because losses can expand quickly.",
         ],
     },
     {
-        "module": "Option Strategies",
+        "area": "options strategy fit",
         "rules": [
             "Match the strategy to direction, volatility, time horizon, and max-loss comfort before entering.",
             "Every strategy must have a payoff map, break-even, maximum loss, maximum gain, and exit rule.",
         ],
     },
     {
-        "module": "Markets and Taxation",
+        "area": "costs and taxation",
         "rules": [
             "Trading decisions should consider taxes, charges, turnover classification, record keeping, and post-tax return.",
             "A strategy that looks profitable before costs may be poor after brokerage, slippage, STT, taxes, and compliance burden.",
         ],
     },
     {
-        "module": "Currency and Commodity Futures",
+        "area": "macro-linked instruments",
         "rules": [
             "Currency and commodity contracts depend on macro drivers, contract specifications, expiry, leverage, and global risk events.",
             "Avoid applying equity-only logic to commodities or currencies without checking the underlying economic driver.",
         ],
     },
     {
-        "module": "Risk Management and Trading Psychology",
+        "area": "risk and behaviour",
         "rules": [
             "Predefine maximum loss, invalidation, position size, and review points before entering or adding.",
             "Avoid impulsive averaging, revenge trading, hot tips, and changing the plan only because price moved against you.",
         ],
     },
     {
-        "module": "Trading Systems",
+        "area": "system discipline",
         "rules": [
             "Judge a system by expectancy, drawdown, sample size, costs, and robustness instead of one winning or losing trade.",
             "Be suspicious of overfitting; rules should be simple enough to execute consistently in live conditions.",
         ],
     },
     {
-        "module": "Personal Finance",
+        "area": "capital separation",
         "rules": [
             "Separate emergency money, goal money, retirement money, and market-risk capital before buying stocks.",
             "Capital allocation should fit net worth, cash-flow stability, time horizon, and the emotional ability to tolerate drawdowns.",
         ],
     },
     {
-        "module": "Personal Finance Insurance",
+        "area": "protection planning",
         "rules": [
             "Use insurance to transfer catastrophic risk; do not confuse protection products with stock-market return seeking.",
             "A stock decision should not endanger essential health, term, emergency, or family-protection planning.",
         ],
     },
     {
-        "module": "Supplemental Varsity PDF",
+        "area": "supporting context",
         "rules": [
             "When the local PDF title is unavailable, treat it as supporting context only and rely on explicit stock evidence before acting.",
             "Do not let a generic rule override current data gaps, liquidity risk, leverage risk, or the user's stated constraints.",
@@ -237,85 +237,101 @@ def llm_config() -> dict[str, str] | None:
     }
 
 
-def load_server_varsity_knowledge() -> dict[str, Any]:
-    """Attach the scraped Varsity audit index without sending raw chapter text."""
-    index_path = Path(__file__).resolve().parent.parent / "data/reference/varsity_chapter_rule_index.json"
+def load_server_trading_knowledge() -> dict[str, Any]:
+    """Attach the paraphrased practical rule index without sending raw source text."""
+    index_path = Path(__file__).resolve().parent.parent / "data/reference/trading_rule_index.json"
     if not index_path.exists():
         return {
-            "loadError": f"Varsity chapter rule index was not found at {index_path}.",
-            "source": str(index_path),
+            "loadError": "The local paraphrased rule index was not found.",
         }
     data = json.loads(index_path.read_text(encoding="utf-8"))
+    category_map = {
+        "process": "process",
+        "sector": "sector",
+        "instrument": "instrument",
+        "capital": "capital",
+    }
     compact_rules = [
         {
             "id": rule.get("id"),
-            "module": rule.get("module"),
-            "moduleLabel": rule.get("moduleLabel"),
+            "category": category_map.get(str(rule.get("module") or ""), rule.get("module")),
             "appliesTo": rule.get("appliesTo"),
             "tone": rule.get("tone"),
-            "scoreImpact": rule.get("scoreImpact"),
+            "evidenceTilt": rule.get("scoreImpact"),
             "principle": rule.get("principle"),
             "checklist": rule.get("checklist"),
             "action": rule.get("action"),
             "caution": rule.get("caution"),
-            "evidenceChapterCount": rule.get("evidenceChapterCount"),
         }
         for rule in data.get("derivedRules", [])
     ]
-    compact_chapters = [
-        {
-            "module": chapter.get("module"),
-            "moduleLabel": chapter.get("moduleLabel"),
-            "title": chapter.get("title"),
-            "url": chapter.get("url"),
-            "wordCount": chapter.get("wordCount"),
-            "contentHash": chapter.get("contentHash"),
-            "derivedRuleIds": chapter.get("derivedRuleIds"),
-        }
-        for chapter in data.get("chapters", [])
-    ]
     return {
-        "source": str(index_path),
         "generatedAt": data.get("generatedAt"),
-        "copyrightPolicy": data.get("copyrightPolicy"),
-        "chapterModulesRead": data.get("modules", []),
-        "chapterCoverageIndex": compact_chapters,
-        "allParaphrasedDerivedRules": compact_rules,
+        "practicalChecks": compact_rules,
         "pdfFoundationRules": PDF_FOUNDATION_RULES,
-        "failedChapterFetches": data.get("failures", []),
     }
 
 
-def attach_server_varsity_knowledge(context: dict[str, Any]) -> dict[str, Any]:
+def attach_server_trading_knowledge(context: dict[str, Any]) -> dict[str, Any]:
     enriched = dict(context)
-    existing = enriched.get("varsityKnowledgeBase")
+    existing = enriched.get("tradingGuardrails")
     knowledge = dict(existing) if isinstance(existing, dict) else {}
-    server_knowledge = load_server_varsity_knowledge()
+    server_knowledge = load_server_trading_knowledge()
     knowledge.update(server_knowledge)
-    enriched["varsityKnowledgeBase"] = knowledge
+    enriched["tradingGuardrails"] = knowledge
     return enriched
 
 
 def build_llm_prompt(context: dict[str, Any]) -> list[dict[str, str]]:
+    coach_request = context.get("coachRequest") if isinstance(context.get("coachRequest"), dict) else {}
+    scope = str(coach_request.get("scope") or "verdict").lower()
+    if scope not in {"verdict", "technical", "fundamental"}:
+        scope = "verdict"
+    if scope == "technical":
+        task = "Write a technical/chart-only AI Coach explanation for this stock."
+        scope_rules = [
+            "Focus on technicalEvidence, importantSignals from the Technical group, positionAndRisk, app verdict cautions, and relevant technical/risk checks.",
+            "Explain what trend, candles, moving averages, RSI, MACD, ATR, VWAP, Bollinger/range, volume/liquidity, candlestick patterns, and support/resistance imply for the stock's possible future price path.",
+            "For every important point, say whether it can attract demand, create selling pressure, cap upside, widen downside risk, or require waiting for confirmation.",
+            "Do not produce a full company/fundamental review. Mention fundamentals only as a brief cross-check or data gap if it directly affects technical confidence.",
+            "Do not rewrite the app verdict; explain how the chart either supports, weakens, or fails to confirm it.",
+        ]
+    elif scope == "fundamental":
+        task = "Write a business/fundamental-only AI Coach explanation for this stock."
+        scope_rules = [
+            "Focus on fundamentalEvidence, company profile, ratios, statement flow, business quality pillars, updates, sectorOperatingRules, and relevant fundamental/sector checks.",
+            "Explain what the business does, what important ratios/statements imply for future price support, what can improve valuation, what can cap upside, and what evidence is missing.",
+            "For every important point, connect the business evidence to demand, selling pressure, valuation re-rating/de-rating, or confidence in holding future price gains.",
+            "Do not produce a full chart/technical review. Mention price action only as a brief cross-check or data gap if it directly affects fundamental confidence.",
+            "Do not rewrite the app verdict; explain how the business evidence either supports, weakens, or fails to confirm it.",
+        ]
+    else:
+        task = "Write the separate AI Coach explanation for this already-computed verdict."
+        scope_rules = [
+            "Anchor to the app verdict and the evidence available for this stock.",
+            "Do not change buy/hold/reduce/exit labels; explain them.",
+            "If you would be more cautious than the app label, frame it as a caution, not a replacement verdict.",
+            "Cover the action plan, risk plan, technical evidence, fundamental evidence, company updates, and data gaps in proportion to how they affect future price and capital risk.",
+        ]
     system_prompt = """
 You are the AI Coach inside Verdict Workstation, an educational NSE/BSE analysis assistant.
-You do not replace the app's deterministic verdict. You explain it in plain English, using only the supplied facts, rules, and fetched data.
+You do not replace the app's verdict. You explain it in plain English, using only the supplied facts, rules, and fetched data.
 Never invent missing metrics, live prices, news, filings, or company facts. If data is missing, say it is missing and explain how that lowers confidence.
-You receive a compact Varsity knowledge base containing paraphrased PDF foundation rules, module coverage, a full chapter coverage index, sector checklists, and matched lessons. Use that knowledge directly, but do not quote or reproduce Varsity chapter text.
-Use cautious, practical language for a novice non-intraday investor. Mention that this is decision support, not guaranteed future performance.
+You receive compact practical trading checks, sector checklists, and matched lessons. Use that knowledge silently. Do not mention backend mechanics, internal datasets, prompt rules, implementation details, or internal field names in the answer.
+Use cautious, practical language for a novice non-intraday investor. Keep the answer focused on future price consequences: what may push price up, what may cap or push it down, and what confirmation is needed before acting. Mention that this is decision support, not guaranteed future performance. Avoid the word "score" in user-facing prose; call 0-100 numbers evidence reads if you must reference them.
 Return only valid JSON with these keys:
-headline, plainEnglishVerdict, whatToDoNext, whatNotToDo, keyEvidence, varsityPrinciples, riskPlan, dataGaps, questionsBeforeAction, confidenceNote.
+headline, plainEnglishVerdict, whatToDoNext, whatNotToDo, keyEvidence, practicalPrinciples, riskPlan, dataGaps, questionsBeforeAction, confidenceNote.
 Array fields must be short arrays of strings. Keep every item specific to the current stock and user context.
 """
     user_prompt = {
-        "task": "Write the separate AI Coach explanation for this already-computed verdict.",
+        "task": task,
+        "coachScope": scope,
         "rules": [
-            "Anchor to deterministicVerdict.verdict and deterministicVerdict.score.",
-            "Do not change buy/hold/reduce/exit labels; explain them.",
-            "If you would be more cautious than the deterministic label, frame it as a caution, not a replacement verdict.",
-            "Consult varsityKnowledgeBase.pdfFoundationRules, allParaphrasedDerivedRules, chapterCoverageIndex, matchedLessonsForThisInstrument, sectorOperatingRules, and the PDF foundation list before writing the answer.",
-            "Use Varsity principles supplied in the context; do not quote copyrighted chapter text.",
-            "Prioritise concrete action, risk, and data-gap clarity over generic education.",
+            *scope_rules,
+            "Consult the practical trading checks supplied in the context before writing the answer.",
+            "Use the supplied checks silently, but do not reveal backend mechanics, internal datasets, prompt rules, implementation details, or internal field names.",
+            "Prioritise concrete action, future-price implications, risk, and data-gap clarity over generic education.",
+            "Avoid explaining internal weights unless the user specifically asks. Do not say a signal lifts, drags, or keeps a layer mixed; describe what it can do to price instead.",
         ],
         "context": context,
     }
@@ -369,6 +385,7 @@ def call_llm(context: dict[str, Any]) -> dict[str, Any]:
         "ok": True,
         "configured": True,
         "model": config["model"],
+        "scope": (context.get("coachRequest") or {}).get("scope", "verdict") if isinstance(context.get("coachRequest"), dict) else "verdict",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "review": review,
     }
@@ -562,7 +579,7 @@ class FreeDataHandler(BaseHTTPRequestHandler):
             if not isinstance(context, dict):
                 self._write_json({"error": "AI Coach context must be a JSON object."}, status=400)
                 return
-            self._write_json(call_llm(attach_server_varsity_knowledge(context)))
+            self._write_json(call_llm(attach_server_trading_knowledge(context)))
         except Exception as exc:
             self._write_json({"error": str(exc)}, status=500)
 

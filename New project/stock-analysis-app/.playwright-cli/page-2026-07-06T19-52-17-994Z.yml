@@ -1,0 +1,118 @@
+- main [ref=f2e3]:
+  - generic [ref=f2e4]:
+    - generic [ref=f2e5]:
+      - paragraph [ref=f2e6]: NSE/BSE analysis agent
+      - heading "NSE/BSE Analysis Agent" [level=1] [ref=f2e7]
+    - generic [ref=f2e8]:
+      - generic "Reference tools" [ref=f2e9]:
+        - button "Reasoning" [ref=f2e10] [cursor=pointer]
+        - button "Glossary" [ref=f2e11] [cursor=pointer]
+      - button "Dark mode" [pressed] [ref=f2e12] [cursor=pointer]
+      - generic [ref=f2e13]:
+        - generic [ref=f2e14]: Starter workspace
+        - strong [ref=f2e15]: 9 min
+  - navigation "Analysis workspace" [ref=f2e16]:
+    - generic [ref=f2e18]:
+      - generic [ref=f2e19]:
+        - generic [ref=f2e20]: Analysing now
+        - strong [ref=f2e21]: No ticker selected
+        - paragraph [ref=f2e22]: Choose a fund or index
+      - generic [ref=f2e23]:
+        - generic [ref=f2e24]: LTP
+        - strong [ref=f2e25]: "-"
+        - generic [ref=f2e26]: Change pending
+      - generic [ref=f2e27]:
+        - button "Load & Analyse" [disabled] [ref=f2e28]
+        - button "Ask AI" [ref=f2e29] [cursor=pointer]
+    - generic "Workspace sections" [ref=f2e30]:
+      - button "Start Enter stock" [ref=f2e31] [cursor=pointer]:
+        - generic [ref=f2e32]: Start
+        - generic [ref=f2e33]: Enter stock
+      - button "Decision What to do" [ref=f2e34] [cursor=pointer]:
+        - generic [ref=f2e35]: Decision
+        - generic [ref=f2e36]: What to do
+      - button "Chart Price action" [ref=f2e37] [cursor=pointer]:
+        - generic [ref=f2e38]: Chart
+        - generic [ref=f2e39]: Price action
+      - button "Company Business view" [ref=f2e40] [cursor=pointer]:
+        - generic [ref=f2e41]: Company
+        - generic [ref=f2e42]: Business view
+      - button "Portfolio Holdings & sync" [ref=f2e43] [cursor=pointer]:
+        - generic [ref=f2e44]: Portfolio
+        - generic [ref=f2e45]: Holdings & sync
+      - button "AI Coach Plain English" [ref=f2e46] [cursor=pointer]:
+        - generic [ref=f2e47]: AI Coach
+        - generic [ref=f2e48]: Plain English
+  - generic [active] [ref=f2e49]: Start section loaded.
+  - note [ref=f2e50]:
+    - generic [ref=f2e51]: i
+    - paragraph [ref=f2e52]:
+      - text: New here? Fill in the four fields below and hit
+      - strong [ref=f2e53]: Load & Analyse
+      - text: to get a Buy/Hold/Avoid verdict. Everything else — risk settings, charts, company data, and the AI Coach — is optional and one tap away under the tabs above.
+    - button "Dismiss tip" [ref=f2e54] [cursor=pointer]: ✕
+  - region "Get Your Verdict" [ref=f2e55]:
+    - generic [ref=f2e57]:
+      - heading "Get Your Verdict" [level=2] [ref=f2e58]:
+        - generic [ref=f2e59]: Get Your Verdict
+      - paragraph [ref=f2e60]: Enter a stock and how much you're investing. We'll pull live market data and give you a clear Buy, Hold, or Avoid verdict.
+    - generic [ref=f2e62]:
+      - region "Tell us what you're looking at" [ref=f2e63]:
+        - generic [ref=f2e64]:
+          - generic [ref=f2e65]:
+            - paragraph [ref=f2e66]: Required
+            - heading "Tell us what you're looking at" [level=2] [ref=f2e67]:
+              - button "Tell us what you're looking at" [expanded] [ref=f2e68] [cursor=pointer]:
+                - generic [ref=f2e69]: "-"
+                - generic [ref=f2e70]: Tell us what you're looking at
+          - generic [ref=f2e72]:
+            - button "Load & Analyse" [disabled] [ref=f2e73]
+            - button "Copy brief" [ref=f2e74] [cursor=pointer]
+        - generic [ref=f2e75]:
+          - generic [ref=f2e76]:
+            - generic [ref=f2e77]:
+              - generic [ref=f2e78]:
+                - text: Ticker
+                - generic "Company symbol to analyse. It controls which quote, candles, and holding row the app matches." [ref=f2e79]: "?"
+              - textbox "Ticker" [ref=f2e80]
+            - generic [ref=f2e81]:
+              - generic [ref=f2e82]:
+                - text: Exchange
+                - generic "NSE or BSE route for the ticker. The wrong exchange can fetch the wrong security or no data." [ref=f2e83]: "?"
+              - combobox "Exchange" [ref=f2e84]:
+                - option "NSE" [selected]
+                - option "BSE"
+            - generic [ref=f2e85]:
+              - generic [ref=f2e86]:
+                - text: Capital to deploy
+                - generic "Required for a fresh entry. This is the deployable money for the new idea, used to estimate practical quantity, starter tranche, and risk budget. Do not put emergency, retirement, tax, or fixed-goal money here." [ref=f2e87]: "?"
+              - textbox "Capital to deploy" [ref=f2e88]
+            - generic [ref=f2e89]:
+              - generic [ref=f2e90]:
+                - text: Horizon
+                - generic "Your intended holding period. Longer horizons give more weight to fundamentals and less to short-term noise." [ref=f2e91]: "?"
+              - combobox "Horizon" [ref=f2e92]:
+                - option "3-6 months"
+                - option "6-12 months"
+                - option "1-3 years" [selected]
+                - option "3+ years"
+            - generic [ref=f2e93]:
+              - checkbox "Already holding Turn this on when the stock is already in your portfolio. It makes average price, drawdown, and portfolio weight affect the verdict." [ref=f2e94]
+              - generic [ref=f2e95]:
+                - text: Already holding
+                - generic "Turn this on when the stock is already in your portfolio. It makes average price, drawdown, and portfolio weight affect the verdict." [ref=f2e96]: "?"
+          - region "Advanced setup (optional)" [ref=f2e97]:
+            - generic [ref=f2e99]:
+              - heading "Advanced setup (optional)" [level=3] [ref=f2e100]:
+                - button "Advanced setup (optional)" [ref=f2e101] [cursor=pointer]:
+                  - generic [ref=f2e102]: +
+                  - generic [ref=f2e103]: Advanced setup (optional)
+              - paragraph [ref=f2e104]: Sensible defaults are already applied. Open this only if you want to fine-tune risk tolerance, trading access, sizing, or how much price history is fetched.
+      - region "Fine-tune the evidence" [ref=f2e105]:
+        - generic [ref=f2e107]:
+          - paragraph [ref=f2e108]: Optional
+          - heading "Fine-tune the evidence" [level=2] [ref=f2e109]:
+            - button "Fine-tune the evidence" [ref=f2e110] [cursor=pointer]:
+              - generic [ref=f2e111]: +
+              - generic [ref=f2e112]: Fine-tune the evidence
+          - paragraph [ref=f2e113]: Everything here is optional. The verdict already uses live market and company data — use these only to override a stale figure or add your own notes.

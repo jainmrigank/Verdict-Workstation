@@ -1,0 +1,135 @@
+- main [ref=f2e3]:
+  - generic [ref=f2e4]:
+    - generic [ref=f2e5]:
+      - paragraph [ref=f2e6]: NSE/BSE analysis agent
+      - heading "NSE/BSE Analysis Agent" [level=1] [ref=f2e7]
+    - generic [ref=f2e8]:
+      - generic "Reference tools" [ref=f2e9]:
+        - button "Reasoning" [ref=f2e10] [cursor=pointer]
+        - button "Glossary" [ref=f2e11] [cursor=pointer]
+      - button "Dark mode" [pressed] [ref=f2e12] [cursor=pointer]
+      - generic [ref=f2e13]:
+        - generic [ref=f2e14]: Starter workspace
+        - strong [ref=f2e15]: 13 min
+  - navigation "Analysis workspace" [ref=f2e16]:
+    - generic [ref=f2e18]:
+      - generic [ref=f2e19]:
+        - generic [ref=f2e20]: Analysing now
+        - strong [ref=f2e21]: No ticker selected
+        - paragraph [ref=f2e22]: Choose a fund or index
+      - generic [ref=f2e23]:
+        - generic [ref=f2e24]: LTP
+        - strong [ref=f2e25]: "-"
+        - generic [ref=f2e26]: Change pending
+      - generic [ref=f2e27]:
+        - button "Load & Analyse" [disabled] [ref=f2e28]
+        - button "Ask AI" [ref=f2e29] [cursor=pointer]
+    - generic "Workspace sections" [ref=f2e30]:
+      - button "Start Enter stock" [ref=f2e31] [cursor=pointer]:
+        - generic [ref=f2e32]: Start
+        - generic [ref=f2e33]: Enter stock
+      - button "Decision What to do" [ref=f2e34] [cursor=pointer]:
+        - generic [ref=f2e35]: Decision
+        - generic [ref=f2e36]: What to do
+      - button "Chart Price action" [ref=f2e37] [cursor=pointer]:
+        - generic [ref=f2e38]: Chart
+        - generic [ref=f2e39]: Price action
+      - button "Company Business view" [ref=f2e40] [cursor=pointer]:
+        - generic [ref=f2e41]: Company
+        - generic [ref=f2e42]: Business view
+      - button "Portfolio Holdings & sync" [ref=f2e43] [cursor=pointer]:
+        - generic [ref=f2e44]: Portfolio
+        - generic [ref=f2e45]: Holdings & sync
+      - button "AI Coach Plain English" [ref=f2e46] [cursor=pointer]:
+        - generic [ref=f2e47]: AI Coach
+        - generic [ref=f2e48]: Plain English
+  - generic [active] [ref=f2e49]: Portfolio section loaded.
+  - region "Portfolio & Market Data" [ref=f2e114]:
+    - generic [ref=f2e115]:
+      - generic [ref=f2e116]:
+        - paragraph [ref=f2e117]: Portfolio
+        - heading "Portfolio & Market Data" [level=2] [ref=f2e118]:
+          - generic [ref=f2e119]: Portfolio & Market Data
+      - generic [ref=f2e121]:
+        - button "Sync Market Data" [ref=f2e122] [cursor=pointer]
+        - button "Clear Browser Data" [ref=f2e123] [cursor=pointer]
+    - generic [ref=f2e124]:
+      - generic [ref=f2e125]:
+        - generic [ref=f2e126]:
+          - generic [ref=f2e127]:
+            - text: History window
+            - generic "How many past calendar days to request for candles, indicators, patterns, and forecasts." [ref=f2e128]: "?"
+          - textbox "History window How many past calendar days to request for candles, indicators, patterns, and forecasts." [ref=f2e129]: "730"
+        - generic [ref=f2e130]:
+          - checkbox "Include holdings When checked, sync refreshes every listed ticker from the uploaded holdings file along with the current decision ticker. Your imported portfolio table stays loaded either way." [disabled] [ref=f2e131]
+          - generic [ref=f2e132]:
+            - text: Include holdings
+            - generic "When checked, sync refreshes every listed ticker from the uploaded holdings file along with the current decision ticker. Your imported portfolio table stays loaded either way." [ref=f2e133]: "?"
+        - paragraph [ref=f2e134]: Upload a holdings XLSX if you want the sync to include portfolio rows.
+      - region "Portfolio import, summary, and market table" [ref=f2e135]:
+        - generic [ref=f2e136]:
+          - generic [ref=f2e137]:
+            - generic [ref=f2e138]: Portfolio
+            - heading "Holdings Feed and Market Table" [level=3] [ref=f2e139]
+            - paragraph [ref=f2e140]: Upload one holdings XLSX, refresh the cache, then use the combined table for portfolio and market rows.
+          - generic [ref=f2e141]: Local only
+        - generic [ref=f2e142]:
+          - generic [ref=f2e143]:
+            - text: Zerodha holdings report
+            - button "Zerodha holdings report" [ref=f2e144]
+          - paragraph [ref=f2e146]: Choose the holdings XLSX export. The app parses it locally, updates the portfolio table, and refreshes delayed EOD prices.
+        - region "Portfolio metrics" [ref=f2e147]:
+          - generic [ref=f2e148]:
+            - generic [ref=f2e149]: Portfolio snapshot
+            - strong [ref=f2e150]: No holdings loaded
+          - generic [ref=f2e151]:
+            - generic [ref=f2e152]: Current value
+            - strong [ref=f2e153]: ₹0.00
+          - generic [ref=f2e154]:
+            - generic [ref=f2e155]: P&L
+            - strong [ref=f2e156]: ₹0.00
+          - generic [ref=f2e157]:
+            - generic [ref=f2e158]: Return
+            - strong [ref=f2e159]: +0.00%
+        - region "Combined holdings and market data" [ref=f2e160]:
+          - generic [ref=f2e162]:
+            - generic [ref=f2e163]: Combined grid
+            - heading "Holdings and Latest Market Data" [level=3] [ref=f2e164]
+            - paragraph [ref=f2e165]: Holdings, quotes, and analysis actions are in one row so the portfolio context and market data stay together.
+          - region "Combined holdings and market data table, scroll for more columns" [ref=f2e166]:
+            - table [ref=f2e167]:
+              - rowgroup [ref=f2e168]:
+                - row "Holding / Symbol Actions Qty Avg LTP Prev Close Change Value P&L P&L % Volume Candles Data status" [ref=f2e169]:
+                  - columnheader "Holding / Symbol" [ref=f2e170]
+                  - columnheader "Actions" [ref=f2e171]:
+                    - generic [ref=f2e172]: Actions
+                  - columnheader "Qty" [ref=f2e173]
+                  - columnheader "Avg" [ref=f2e174]
+                  - columnheader "LTP" [ref=f2e175]
+                  - columnheader "Prev Close" [ref=f2e176]
+                  - columnheader "Change" [ref=f2e177]
+                  - columnheader "Value" [ref=f2e178]
+                  - columnheader "P&L" [ref=f2e179]
+                  - columnheader "P&L %" [ref=f2e180]
+                  - columnheader "Volume" [ref=f2e181]
+                  - columnheader "Candles" [ref=f2e182]
+                  - columnheader "Data status" [ref=f2e183]
+              - rowgroup [ref=f2e184]:
+                - row "No holdings or quotes loaded yet. Sync market data or upload a holdings report to populate this table." [ref=f2e185]:
+                  - cell "No holdings or quotes loaded yet. Sync market data or upload a holdings report to populate this table." [ref=f2e186]
+  - region "Coverage and Missing Data" [ref=f2e187]:
+    - generic [ref=f2e189]:
+      - paragraph [ref=f2e190]: Data sync
+      - heading "Coverage and Missing Data" [level=2] [ref=f2e191]:
+        - button "Coverage and Missing Data" [ref=f2e192] [cursor=pointer]:
+          - generic [ref=f2e193]: +
+          - generic [ref=f2e194]: Coverage and Missing Data
+  - region "Connection & Diagnostics" [ref=f2e195]:
+    - generic [ref=f2e196]:
+      - generic [ref=f2e197]:
+        - paragraph [ref=f2e198]: Connection
+        - heading "Connection & Diagnostics" [level=2] [ref=f2e199]:
+          - button "Connection & Diagnostics" [ref=f2e200] [cursor=pointer]:
+            - generic [ref=f2e201]: +
+            - generic [ref=f2e202]: Connection & Diagnostics
+      - generic [ref=f2e204]: Ready

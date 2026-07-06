@@ -6,6 +6,7 @@ from __future__ import annotations
 import io
 import re
 import zipfile
+from datetime import datetime, timedelta
 from typing import Any
 from xml.etree import ElementTree as ET
 
@@ -22,6 +23,17 @@ SUFFIX_EXCHANGES = {
 }
 MARKET_EXCHANGES = {"NSE", "BSE", "AUTO"}
 ISIN_LIKE_RE = re.compile(r"IN[A-Z0-9]{10}")
+BOUGHT_ON_HEADERS = (
+    "Bought On",
+    "Bought Date",
+    "Buy Date",
+    "Purchase Date",
+    "Date of Purchase",
+    "Acquisition Date",
+    "Acquired On",
+    "Holding Since",
+    "First Buy Date",
+)
 
 
 def normalize_header(value: str) -> str:
@@ -44,6 +56,29 @@ def coerce_number(value: Any) -> float | None:
         return float(text)
     except ValueError:
         return None
+
+
+def coerce_date(value: Any) -> str | None:
+    if value in (None, "", "-"):
+        return None
+    if isinstance(value, (int, float)):
+        # Excel serial dates use 1899-12-30 as the practical epoch in modern XLSX files.
+        try:
+            return (datetime(1899, 12, 30) + timedelta(days=float(value))).date().isoformat()
+        except (OverflowError, ValueError):
+            return None
+    text = str(value).strip()
+    if not text or text == "-":
+        return None
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%m/%d/%Y", "%d %b %Y", "%d %B %Y"):
+        try:
+            return datetime.strptime(text, fmt).date().isoformat()
+        except ValueError:
+            continue
+    match = re.search(r"(\d{4})-(\d{2})-(\d{2})", text)
+    if match:
+        return match.group(0)
+    return None
 
 
 def clean_symbol(raw_symbol: str) -> tuple[str, str]:
@@ -159,6 +194,7 @@ def parse_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         pledged_loan = numeric_by_header(row, header_by_column, "Quantity Pledged (Loan)") or 0
         quantity = quantity_available + quantity_discrepant + pledged_margin + pledged_loan
         average_price = numeric_by_header(row, header_by_column, "Average Price", "Avg Price") or 0
+        bought_on = coerce_date(by_header(row, header_by_column, *BOUGHT_ON_HEADERS))
         last_price = numeric_by_header(row, header_by_column, "Previous Closing Price", "Last Price", "LTP")
         pnl = numeric_by_header(row, header_by_column, "Unrealized P&L", "Unrealized PNL", "P&L")
         if pnl is None and last_price is not None:
@@ -175,6 +211,7 @@ def parse_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "sector": sector,
                 "quantity": quantity,
                 "average_price": average_price,
+                "bought_on": bought_on,
                 "last_price": last_price or 0,
                 "pnl": pnl or 0,
             }
