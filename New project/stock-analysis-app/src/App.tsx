@@ -41,12 +41,12 @@ type IndicatorKey =
 
 // Primary tabs: the everyday path a first-time user follows, ticker in, verdict out.
 const primaryWorkspaceTabs: Array<{ id: View; label: string; caption: string }> = [
-  { id: 'setup', label: 'Start', caption: 'Enter stock' },
-  { id: 'verdict', label: 'Decision', caption: 'What to do' },
-  { id: 'technicals', label: 'Chart', caption: 'Price action' },
-  { id: 'fundamentals', label: 'Company', caption: 'Business view' },
-  { id: 'data', label: 'Portfolio', caption: 'Holdings & sync' },
-  { id: 'coach', label: 'AI Coach', caption: 'Plain English' },
+  { id: 'setup', label: 'Start', caption: 'Set context' },
+  { id: 'verdict', label: 'Decision', caption: 'Action plan' },
+  { id: 'technicals', label: 'Chart', caption: 'Price map' },
+  { id: 'fundamentals', label: 'Company', caption: 'Business' },
+  { id: 'data', label: 'Portfolio', caption: 'Holdings' },
+  { id: 'coach', label: 'AI Coach', caption: 'Ask why' },
 ]
 
 const utilityWorkspaceTabs: Array<{ id: View; label: string }> = [
@@ -252,7 +252,6 @@ type BrowserWorkspace = {
   snapshot: Snapshot
   form: AnalysisForm
   days: number
-  includeHoldings: boolean
 }
 
 type ForecastSettings = {
@@ -517,7 +516,6 @@ const initialForm: AnalysisForm = {
 }
 
 const browserWorkspaceKey = 'verdict-workstation:browser-workspace:v1'
-const onboardingTipDismissedKey = 'verdict-workstation:onboarding-tip-dismissed:v1'
 
 function readBrowserWorkspace(): BrowserWorkspace | null {
   if (typeof window === 'undefined') return null
@@ -526,12 +524,15 @@ function readBrowserWorkspace(): BrowserWorkspace | null {
     if (!raw) return null
     const parsed = JSON.parse(raw) as Partial<BrowserWorkspace>
     if (parsed.version !== 1 || !parsed.snapshot || !Array.isArray(parsed.snapshot.holdings)) return null
+    const upload = parsed.snapshot.upload
+    const holdings = upload ? (parsed.snapshot.holdings ?? []) : []
     return {
       version: 1,
       snapshot: {
         ...starterSnapshot,
         ...parsed.snapshot,
-        holdings: parsed.snapshot.holdings ?? [],
+        holdings,
+        upload,
         quotes: parsed.snapshot.quotes ?? {},
         candles: parsed.snapshot.candles ?? {},
         fundamentals: parsed.snapshot.fundamentals ?? {},
@@ -539,7 +540,6 @@ function readBrowserWorkspace(): BrowserWorkspace | null {
       },
       form: { ...initialForm, ...(parsed.form ?? {}) },
       days: typeof parsed.days === 'number' && Number.isFinite(parsed.days) ? parsed.days : 730,
-      includeHoldings: typeof parsed.includeHoldings === 'boolean' ? parsed.includeHoldings : false,
     }
   } catch {
     return null
@@ -1091,10 +1091,10 @@ function cacheAge(generatedAt: string) {
 }
 
 function cacheLabel(cacheState: CacheState) {
-  if (cacheState === 'free') return 'Market Data Sync'
-  if (cacheState === 'live') return 'API cache'
-  if (cacheState === 'loading') return 'Loading'
-  return 'Starter workspace'
+  if (cacheState === 'free') return 'Market data'
+  if (cacheState === 'live') return 'Connected data'
+  if (cacheState === 'loading') return 'Loading data'
+  return 'Sample data'
 }
 
 function marketDataBaseUrl() {
@@ -1449,14 +1449,15 @@ function mergeRefreshedSnapshot(refreshedSnapshot: Snapshot, previousSnapshot: S
   const candles = options.retainMarketData
     ? { ...(previousSnapshot.candles ?? {}), ...(refreshedSnapshot.candles ?? {}) }
     : (refreshedSnapshot.candles ?? {})
-  const previousHoldings = previousSnapshot.holdings ?? []
+  const previousHoldings = previousSnapshot.upload ? (previousSnapshot.holdings ?? []) : []
   const refreshedHoldings = refreshedSnapshot.holdings ?? []
   const retainedHoldings =
+    Boolean(previousSnapshot.upload) &&
     !refreshedSnapshot.upload &&
     refreshedHoldings.length === 0 &&
     previousHoldings.length > 0 &&
     !previousSnapshot.provider.includes('sample')
-  const holdings = retainedHoldings ? mergeHoldingsPrices(previousHoldings, quotes) : refreshedHoldings
+  const holdings = refreshedSnapshot.upload ? refreshedHoldings : retainedHoldings ? mergeHoldingsPrices(previousHoldings, quotes) : []
 
   return {
     refreshedCount,
@@ -2809,7 +2810,7 @@ function buildAnalysis(form: AnalysisForm, snapshot: Snapshot, cacheState: Cache
   const missing: string[] = []
   if (!ticker) missing.push('Ticker')
   if (needsFreshCapital && !capital) missing.push('Capital for new position')
-  if (!ltp) missing.push('LTP from live cache or manual input')
+  if (!ltp) missing.push('LTP from loaded market data or manual input')
   if (form.alreadyHold && !quantity) missing.push('Holding quantity')
   if (form.alreadyHold && !avgPrice) missing.push('Average buy price')
 
@@ -3749,27 +3750,8 @@ function App() {
     const timeout = window.setTimeout(() => setClearDataArmed(false), 4000)
     return () => window.clearTimeout(timeout)
   }, [clearDataArmed])
-  const [showOnboardingTip, setShowOnboardingTip] = useState(() => {
-    if (typeof window === 'undefined') return false
-    try {
-      return window.localStorage.getItem(onboardingTipDismissedKey) !== '1'
-    } catch {
-      return true
-    }
-  })
-
-  function dismissOnboardingTip() {
-    setShowOnboardingTip(false)
-    if (typeof window === 'undefined') return
-    try {
-      window.localStorage.setItem(onboardingTipDismissedKey, '1')
-    } catch {
-      // Storage can be disabled; the tip will just reappear next visit, which is a fine fallback.
-    }
-  }
   const [form, setForm] = useState<AnalysisForm>(() => storedWorkspace?.form ?? initialForm)
   const [days, setDays] = useState(() => storedWorkspace?.days ?? 730)
-  const [includeHoldings, setIncludeHoldings] = useState(() => storedWorkspace?.includeHoldings ?? false)
   const [copied, setCopied] = useState<string | null>(null)
   const [freeRefreshState, setFreeRefreshState] = useState<RefreshState>('idle')
   const [freeRefreshMessage, setFreeRefreshMessage] = useState('')
@@ -3829,14 +3811,18 @@ function App() {
       snapshot,
       form,
       days,
-      includeHoldings,
     })
-  }, [days, form, includeHoldings, snapshot])
+  }, [days, form, snapshot])
 
   const activeSnapshot = snapshot
+  const activeHoldings = useMemo(() => (activeSnapshot.upload ? (activeSnapshot.holdings ?? []) : []), [activeSnapshot.holdings, activeSnapshot.upload])
+  const activeSnapshotForAnalysis = useMemo<Snapshot>(
+    () => (activeSnapshot.upload ? activeSnapshot : { ...activeSnapshot, holdings: [], upload: undefined }),
+    [activeSnapshot],
+  )
   const missingDataIssues = useMemo(
-    () => (syncCoverage ? buildMissingDataIssues(activeSnapshot, syncCoverage) : []),
-    [activeSnapshot, syncCoverage],
+    () => (syncCoverage ? buildMissingDataIssues(activeSnapshotForAnalysis, syncCoverage) : []),
+    [activeSnapshotForAnalysis, syncCoverage],
   )
   useEffect(() => {
     if (!missingDataIssues.length) return
@@ -3845,26 +3831,25 @@ function App() {
       const next = { ...current }
       for (const issue of missingDataIssues) {
         if (next[issue.symbol]) continue
-        next[issue.symbol] = mappingDraftForSymbol(activeSnapshot, issue.symbol)
+        next[issue.symbol] = mappingDraftForSymbol(activeSnapshotForAnalysis, issue.symbol)
         changed = true
       }
       return changed ? next : current
     })
-  }, [activeSnapshot, missingDataIssues])
+  }, [activeSnapshotForAnalysis, missingDataIssues])
 
-  const hasUploadedHoldingsFeed = activeSnapshot.holdings.length > 0
-  const loadedHoldingsFilename = activeSnapshot.upload?.filename ?? (hasUploadedHoldingsFeed ? 'Browser cached holdings' : '')
-  const loadedHoldingsCount = activeSnapshot.upload?.holdings_count ?? activeSnapshot.holdings.length
-  const includeHoldingsInSync = includeHoldings && hasUploadedHoldingsFeed
+  const hasUploadedHoldingsFeed = Boolean(activeSnapshot.upload)
+  const loadedHoldingsFilename = activeSnapshot.upload?.filename ?? ''
+  const loadedHoldingsCount = activeSnapshot.upload?.holdings_count ?? activeHoldings.length
   const decisionSymbol = decisionInputSymbol(form)
-  const portfolioSyncSymbols = useMemo(() => portfolioSymbolsForSync(activeSnapshot), [activeSnapshot])
+  const portfolioSyncSymbols = useMemo(() => portfolioSymbolsForSync(activeSnapshotForAnalysis), [activeSnapshotForAnalysis])
   const syncTargetSymbols = useMemo(
-    () => uniqueSymbols([decisionSymbol, ...(includeHoldingsInSync ? portfolioSyncSymbols : [])]),
-    [decisionSymbol, includeHoldingsInSync, portfolioSyncSymbols],
+    () => uniqueSymbols([decisionSymbol, ...portfolioSyncSymbols]),
+    [decisionSymbol, portfolioSyncSymbols],
   )
   const isHoldingReview = form.alreadyHold
-  const analysis = useMemo(() => buildAnalysis(form, activeSnapshot, cacheState), [activeSnapshot, cacheState, form])
-  const portfolio = useMemo(() => portfolioSummary(activeSnapshot), [activeSnapshot])
+  const analysis = useMemo(() => buildAnalysis(form, activeSnapshotForAnalysis, cacheState), [activeSnapshotForAnalysis, cacheState, form])
+  const portfolio = useMemo(() => portfolioSummary(activeSnapshotForAnalysis), [activeSnapshotForAnalysis])
   const portfolioReturn = portfolio.cost ? (portfolio.pnl / portfolio.cost) * 100 : 0
   const capitalNum = parseNumber(form.capital)
   const maxRiskNum = parseNumber(form.maxRisk)
@@ -3892,10 +3877,10 @@ function App() {
   const productionBuildCommand = 'cd stock-analysis-app && npm run build'
   const publicAppCommand = 'cd stock-analysis-app && npm run preview:lan'
   const freeCliCommand = useMemo(() => {
-    const holdingsFlag = includeHoldingsInSync ? '' : ' --no-holdings'
+    const holdingsFlag = hasUploadedHoldingsFeed ? '' : ' --no-holdings'
     const cliSymbols = syncTargetSymbols.length ? syncTargetSymbols.join(' ') : '<decision-symbol-or-uploaded-holdings>'
     return `python3 scripts/market_data_refresh.py --symbols ${cliSymbols} --days ${days}${holdingsFlag}`
-  }, [days, includeHoldingsInSync, syncTargetSymbols])
+  }, [days, hasUploadedHoldingsFeed, syncTargetSymbols])
 
   const marketRows = useMemo(() => {
     const rows = new Map<
@@ -3911,17 +3896,27 @@ function App() {
         symbol: string
       }
     >()
+    const visibleQuoteSymbols = new Set(
+      uniqueSymbols([
+        decisionSymbol,
+        ...activeHoldings.map((holding) => {
+          const exchange = String(holding.exchange ?? 'UNLISTED').toUpperCase()
+          const ticker = String(holding.tradingsymbol ?? holding.isin ?? 'UNKNOWN').toUpperCase()
+          return `${exchange}:${ticker}`
+        }),
+      ]),
+    )
     const quoteSummary = (symbol: string, quote?: MarketQuote) => {
       const close = quote?.ohlc?.close
       const changePct = close && quote?.last_price ? ((quote.last_price - close) / close) * 100 : undefined
-      return { candleCount: activeSnapshot.candles[symbol]?.length ?? 0, changePct }
+      return { candleCount: activeSnapshotForAnalysis.candles[symbol]?.length ?? 0, changePct }
     }
 
-    activeSnapshot.holdings.forEach((holding) => {
+    activeHoldings.forEach((holding) => {
       const exchange = String(holding.exchange ?? 'UNLISTED').toUpperCase()
       const ticker = String(holding.tradingsymbol ?? holding.isin ?? 'UNKNOWN').toUpperCase()
       const symbol = `${exchange}:${ticker}`
-      const quote = activeSnapshot.quotes[symbol]
+      const quote = activeSnapshotForAnalysis.quotes[symbol]
       const { candleCount, changePct } = quoteSummary(symbol, quote)
       const canAnalyze = ['NSE', 'BSE'].includes(exchange) && Boolean(holding.tradingsymbol)
       rows.set(symbol, {
@@ -3936,8 +3931,8 @@ function App() {
       })
     })
 
-    Object.entries(activeSnapshot.quotes).forEach(([symbol, quote]) => {
-      if (rows.has(symbol)) return
+    Object.entries(activeSnapshotForAnalysis.quotes).forEach(([symbol, quote]) => {
+      if (rows.has(symbol) || !visibleQuoteSymbols.has(symbol)) return
       const exchange = symbol.split(':')[0]
       const { candleCount, changePct } = quoteSummary(symbol, quote)
       rows.set(symbol, {
@@ -3952,11 +3947,11 @@ function App() {
     })
 
     return Array.from(rows.values())
-  }, [activeSnapshot])
+  }, [activeHoldings, activeSnapshotForAnalysis, decisionSymbol])
 
-  const activeQuote = activeSnapshot.quotes[analysis.quoteKey]
-  const activeFundamentals = activeSnapshot.fundamentals?.[analysis.quoteKey]
-  const activeCandles = activeSnapshot.candles[analysis.quoteKey] ?? emptyCandles
+  const activeQuote = activeSnapshotForAnalysis.quotes[analysis.quoteKey]
+  const activeFundamentals = activeSnapshotForAnalysis.fundamentals?.[analysis.quoteKey]
+  const activeCandles = activeSnapshotForAnalysis.candles[analysis.quoteKey] ?? emptyCandles
   const hasPortfolioContext = analysis.portfolioWeight !== undefined
   const activeTickerDisplay = decisionSymbol || 'No ticker selected'
   const specialInstrumentWarning = analysis.cautions.find((item) => /special|partly-paid|partly paid|debt-class|call-money/i.test(item))
@@ -4448,6 +4443,21 @@ function App() {
     return signal.rationale
   }
 
+  function adaptiveSignalCategory(signal: AdaptiveSignal) {
+    const label = signal.label.toLowerCase()
+    if (label.includes('trend') || label.includes('moving-average') || label.includes('rsi') || label.includes('macd') || label.includes('momentum')) return 'Trend & Momentum'
+    if (label.includes('atr') || label.includes('bollinger') || label.includes('drawdown') || label.includes('risk') || label.includes('reward') || label.includes('debt') || label.includes('valuation') || label.includes('p/e') || label.includes('price/book') || label.includes('concentration')) return 'Volatility & Risk'
+    if (label.includes('liquidity') || label.includes('volume') || label.includes('vwap') || label.includes('market cap') || label.includes('cash') || label.includes('cfo') || label.includes('fcf')) return 'Liquidity & Execution'
+    return 'Candles, Levels & Patterns'
+  }
+
+  const adaptiveSignalGroups = ['Trend & Momentum', 'Volatility & Risk', 'Liquidity & Execution', 'Candles, Levels & Patterns']
+    .map((title) => ({
+      title,
+      signals: analysis.adaptiveSignals.filter((signal) => adaptiveSignalCategory(signal) === title),
+    }))
+    .filter((group) => group.signals.length > 0)
+
   function indicatorDefinition(label: string) {
     if (label.startsWith('RSI')) return 'RSI measures momentum from 0 to 100. Above 70 can be stretched; below 30 can be oversold; confirmation matters more than the number alone.'
     if (label === 'MACD') return 'MACD compares fast and slow moving averages. Above the signal line leans bullish; below it leans cautious.'
@@ -4816,8 +4826,30 @@ function App() {
     },
   ]
 
+  const companyRatioGroups = [
+    {
+      title: 'Valuation',
+      facts: companyRatioFacts.filter((fact) => ['Market cap', 'Trailing P/E', 'Forward P/E', 'Price/book', 'Dividend yield'].includes(fact.label)),
+    },
+    {
+      title: 'Profitability',
+      facts: companyRatioFacts.filter((fact) => ['ROE', 'ROA', 'ROCE', 'Profit margin', 'Gross margin', 'Operating margin', 'EPS', 'Net profit'].includes(fact.label)),
+    },
+    {
+      title: 'Balance Sheet & Cash',
+      facts: companyRatioFacts.filter((fact) => ['Debt/equity', 'Current ratio', 'Reserves', 'Borrowings', 'Operating cash flow', 'FCF'].includes(fact.label)),
+    },
+    {
+      title: 'Growth / Missing Context',
+      facts: companyRatioFacts.filter((fact) => ['Revenue', 'Revenue growth', 'Earnings growth'].includes(fact.label) || fact.value === '-'),
+    },
+  ].map((group) => ({
+    ...group,
+    facts: Array.from(new Map(group.facts.map((fact) => [fact.label, fact])).values()),
+  })).filter((group) => group.facts.length > 0)
+
   function ratioNarrative(fact: { label: string; value: string; tone: SignalTone }) {
-    if (fact.value === '-') return `${activeTickerDisplay} does not have a reliable ${fact.label.toLowerCase()} value loaded yet, so this metric should reduce confidence rather than drive action.`
+    if (fact.value === '-') return `${activeTickerDisplay} does not have a reliable ${fact.label.toLowerCase()} value loaded yet. Treat it as a blind spot: price can still move, but buying or adding needs stronger confirmation from the data that is loaded.`
     const label = fact.label.toLowerCase()
     if (label.includes('market cap')) {
       return `${activeTickerDisplay} has market cap of ${fact.value}. ${fact.tone === 'positive' ? 'Size and liquidity comfort are supportive, but this does not prove the stock is cheap.' : fact.tone === 'negative' ? 'The company-size filter is weak, so keep position size smaller and demand stronger evidence.' : 'Size is only moderate, so check liquidity and disclosures before relying on this as a price-support clue.'}`
@@ -4871,7 +4903,7 @@ function App() {
   const analysisBrief = useMemo(() => {
     return [
       `Ticker: ${form.exchange}:${form.ticker.toUpperCase()}`,
-      `Verdict: ${analysis.verdict} (${analysis.confidenceLabel} confidence, current read ${analysis.score}/100)`,
+      `Verdict: ${analysis.verdict} (${analysis.confidenceLabel} confidence, evidence strength ${analysis.score}/100)`,
       `${form.alreadyHold ? 'Add-more capital' : 'Capital to deploy'}: ${form.alreadyHold && !parseNumber(form.capital) ? 'Not adding' : formatInr(parseNumber(form.capital))}`,
       `Horizon: ${horizonLabels[form.horizon]}`,
       `Risk profile: ${riskProfileLabels[form.riskProfile]}`,
@@ -4927,15 +4959,15 @@ function App() {
         label: aiCoachScopeCopy[scope].label,
         requestedOutput:
           scope === 'technical'
-            ? 'Explain only the technical/chart picture, including trend, candles, indicators, patterns, liquidity, volatility, and timing risk. Do not rewrite the full verdict.'
+            ? 'Explain only the technical/chart picture, including trend, candles, indicators, patterns, liquidity, volatility, timing risk, and possible future price impact. Do not rewrite the full verdict.'
           : scope === 'fundamental'
-              ? 'Explain only the business/fundamental picture, including company profile, sector, ratios, statements, updates, quality, and data gaps. Do not rewrite the full verdict.'
-              : 'Explain the full verdict in plain English, with action, risk, evidence, and data gaps.',
+              ? 'Explain only the business/fundamental picture, including company profile, sector, ratios, statements, updates, quality, data gaps, and possible future price impact. Do not rewrite the full verdict.'
+              : 'Explain the full decision in plain English, with action, risk, price-impact evidence, and data gaps.',
       },
       roleBoundary: {
         appVerdictRemainsPrimary: true,
         instruction:
-          'Use the supplied facts, app verdict, technical/fundamental evidence, and practical trading checks to explain the decision. Do not invent unavailable data, reveal internal labels, or replace the app verdict.',
+          'Use the supplied facts, app verdict, technical/fundamental evidence, and practical trading checks to explain the decision. Do not invent unavailable data, reveal internal source labels, or replace the app verdict.',
       },
       selectedInstrument: {
         symbol: analysis.quoteKey,
@@ -5152,7 +5184,7 @@ function App() {
 
   async function refreshFreeData(options: { symbolsOverride?: string[]; includeHoldingsOverride?: boolean; source?: 'decision' | 'data' } = {}) {
     const requestedSymbols = uniqueSymbols(options.symbolsOverride ?? syncTargetSymbols)
-    const includeHoldingsForRequest = options.includeHoldingsOverride ?? includeHoldingsInSync
+    const includeHoldingsForRequest = options.includeHoldingsOverride ?? hasUploadedHoldingsFeed
     if (!requestedSymbols.length) {
       setFreeRefreshState('error')
       setSyncProgress(0)
@@ -5184,7 +5216,7 @@ function App() {
         throw new Error(data.error || 'Market-data sync failed.')
       }
       const refreshedSnapshot = data as Snapshot
-      const mergedRefresh = mergeRefreshedSnapshot(refreshedSnapshot, activeSnapshot)
+      const mergedRefresh = mergeRefreshedSnapshot(refreshedSnapshot, activeSnapshotForAnalysis)
       setSnapshot(mergedRefresh.snapshot)
       setCacheState(cacheStateFromProvider(mergedRefresh.snapshot.provider))
       setSyncCoverage(buildSyncCoverage(mergedRefresh.snapshot))
@@ -5239,7 +5271,6 @@ function App() {
     setCacheState(cacheStateFromProvider(starterSnapshot.provider))
     setForm(initialForm)
     setDays(730)
-    setIncludeHoldings(false)
     setFreeRefreshState('idle')
     setFreeRefreshMessage('')
     setSyncProgress(0)
@@ -5256,7 +5287,7 @@ function App() {
     setMappingDrafts((current) => ({
       ...current,
       [symbol]: {
-        ...(current[symbol] ?? mappingDraftForSymbol(activeSnapshot, symbol)),
+        ...(current[symbol] ?? mappingDraftForSymbol(activeSnapshotForAnalysis, symbol)),
         [field]: value,
       },
     }))
@@ -5267,7 +5298,7 @@ function App() {
     setMappingStatus(`Saving mapping for ${symbol}...`)
     try {
       const bridgeUrl = requireMarketDataBridge('Symbol mapping')
-      const draft = mappingDrafts[symbol] ?? mappingDraftForSymbol(activeSnapshot, symbol)
+      const draft = mappingDrafts[symbol] ?? mappingDraftForSymbol(activeSnapshotForAnalysis, symbol)
       const response = await fetch(apiUrl(bridgeUrl, '/api/symbol-map/upsert'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -5314,7 +5345,7 @@ function App() {
         throw new Error(data.error || 'Missing-data retry failed.')
       }
       const refreshedSnapshot = data as Snapshot
-      const mergedRefresh = mergeRefreshedSnapshot(refreshedSnapshot, activeSnapshot, { retainMarketData: true })
+      const mergedRefresh = mergeRefreshedSnapshot(refreshedSnapshot, activeSnapshotForAnalysis, { retainMarketData: true })
       const coverage = buildSyncCoverage(mergedRefresh.snapshot)
       setSnapshot(mergedRefresh.snapshot)
       setCacheState(cacheStateFromProvider(mergedRefresh.snapshot.provider))
@@ -5354,6 +5385,8 @@ function App() {
     if (!file) return
     setUploadState('uploading')
     setUploadMessage(`Uploading ${file.name}...`)
+    setFreeRefreshState('idle')
+    setFreeRefreshMessage('')
     setSyncCoverage(null)
     try {
       const bridgeUrl = requireMarketDataBridge('Holdings upload')
@@ -5371,11 +5404,10 @@ function App() {
         throw new Error(data.error || 'Holdings upload failed.')
       }
       const refreshedSnapshot = data as Snapshot
-      const mergedRefresh = mergeRefreshedSnapshot(refreshedSnapshot, activeSnapshot)
+      const mergedRefresh = mergeRefreshedSnapshot(refreshedSnapshot, activeSnapshotForAnalysis)
       setSnapshot(mergedRefresh.snapshot)
       setCacheState(cacheStateFromProvider(mergedRefresh.snapshot.provider))
       setSyncCoverage(buildSyncCoverage(mergedRefresh.snapshot))
-      setIncludeHoldings(true)
       setUploadState('done')
       const fundamentalsMessage = !hasFundamentalScope(mergedRefresh.snapshot)
         ? 'Company fundamentals are not applicable for index symbols.'
@@ -5399,15 +5431,14 @@ function App() {
 
   async function removeUploadedHoldingsFeed() {
     if (!hasUploadedHoldingsFeed) return
-    const removedKeys = new Set(activeSnapshot.holdings.map(holdingKey).filter(Boolean))
+    const removedKeys = new Set(activeHoldings.map(holdingKey).filter(Boolean))
     const nextSnapshot: Snapshot = {
-      ...activeSnapshot,
+      ...activeSnapshotForAnalysis,
       holdings: [],
       upload: undefined,
     }
     setSnapshot(nextSnapshot)
     setSyncCoverage(null)
-    setIncludeHoldings(false)
     setUploadState('idle')
     setHoldingContextMessage('')
     setUploadMessage('Removed the uploaded holdings feed from this browser. You can upload another XLSX now.')
@@ -5491,7 +5522,6 @@ function App() {
     <main className="app-shell">
       <header className="topbar">
         <div>
-          <p className="eyebrow">NSE/BSE analysis agent</p>
           <h1>NSE/BSE Analysis Agent</h1>
         </div>
         <div className="topbar-actions">
@@ -5526,10 +5556,10 @@ function App() {
         <div className="active-instrument-strip">
           <div className={`instrument-identity tone-${activePriceTone}`}>
             <div>
-            <span>Analysing now</span>
-            <strong>{activeTickerDisplay}</strong>
-            <p>{activeInstrumentName}</p>
-            {activeInstrumentSector && <small>{activeInstrumentSector}</small>}
+              <span>Analysing now</span>
+              <strong>{activeTickerDisplay}</strong>
+              <p>{activeInstrumentName}</p>
+              {activeInstrumentSector && <small>{activeInstrumentSector}</small>}
             </div>
             <div className="instrument-ltp-inline">
               <span>LTP</span>
@@ -5542,11 +5572,9 @@ function App() {
                 onClick={() => void loadDecisionData()}
                 disabled={freeRefreshState === 'refreshing' || !decisionSymbol}
               >
-                {freeRefreshState === 'refreshing' ? 'Loading...' : 'Load & Analyse'}
+                {freeRefreshState === 'refreshing' ? 'Loading...' : 'Analyse'}
               </button>
-              <button className="secondary-action" type="button" onClick={() => setView('coach')}>
-                Ask AI
-              </button>
+              {/* Future shortcut: re-enable an Ask Coach action here if a header coaching entry point becomes useful again. */}
             </div>
           </div>
         </div>
@@ -5575,37 +5603,21 @@ function App() {
         {[...primaryWorkspaceTabs, ...utilityWorkspaceTabs].find((tab) => tab.id === view)?.label ?? 'NSE/BSE Analysis Agent'} section loaded.
       </div>
 
-      {showOnboardingTip && view === 'setup' && (
-        <div className="onboarding-tip" role="note">
-          <span className="onboarding-tip-icon" aria-hidden="true">i</span>
-          <p>
-            New here? Fill in the four fields below and hit <strong>Load &amp; Analyse</strong> to get a Buy/Hold/Avoid verdict. Everything else —
-            risk settings, charts, company data, and the AI Coach — is optional and one tap away under the tabs above.
-          </p>
-          <button aria-label="Dismiss tip" className="onboarding-tip-dismiss" type="button" onClick={dismissOnboardingTip}>
-            ✕
-          </button>
-        </div>
-      )}
-
       {view === 'setup' ? (
         <>
           <CollapsibleSection
             className="parent-section setup-parent"
             defaultOpen
-            description="Enter a stock and how much you're investing. We'll pull live market data and give you a clear Buy, Hold, or Avoid verdict."
+            description="Set the instrument, time horizon, and money context. The rest of the workspace updates from this brief."
             headingClassName="section-heading collapsible-section-heading"
             id="setup-parent-heading"
             staticOpen
-            title="Get Your Verdict"
+            title="Research Brief"
           >
             <section className="input-grid">
             <CollapsibleSection
               action={
                 <div className="setup-action-row">
-                  <button type="button" onClick={() => void loadDecisionData()} disabled={freeRefreshState === 'refreshing' || !decisionSymbol}>
-                    {freeRefreshState === 'refreshing' ? 'Loading...' : 'Load & Analyse'}
-                  </button>
                   <button className="secondary-action" type="button" onClick={() => copyCommand('brief', analysisBrief)}>
                     {copied === 'brief' ? 'Copied' : 'Copy brief'}
                   </button>
@@ -5613,9 +5625,8 @@ function App() {
               }
               className="panel form-panel"
               defaultOpen
-              eyebrow="Required"
               id="required-heading"
-              title="Tell us what you're looking at"
+              title="Instrument"
             >
               <div className="form-grid setup-primary-grid">
                 <label className="field">
@@ -5678,11 +5689,11 @@ function App() {
 
               <CollapsibleSection
                 className="sub-panel nested-collapse advanced-setup-panel"
-                description="Sensible defaults are already applied. Open this only if you want to fine-tune risk tolerance, trading access, sizing, or how much price history is fetched."
+                description="Risk, market access, and history-window controls."
                 headingClassName="subsection-heading"
                 headingLevel={3}
                 id="advanced-setup-heading"
-                title="Advanced setup (optional)"
+                title="Preferences"
               >
               <div className="setup-control-row">
               <div className="segmented-block compact-choice">
@@ -5774,9 +5785,8 @@ function App() {
                 <div className="risk-idle-panel">
                   <strong>Add-more sizing is inactive</strong>
                   <p>
-                    This is an existing-holding review with no add-more capital entered. The verdict focuses on quantity, average price, LTP, P&L,
-                    invalidation, target, company quality, liquidity, and chart structure. Enter add-more capital only if you are actively considering
-                    buying more.
+                    This is a holding review. Add-more sizing stays off until you enter fresh capital, so the app will focus on exit discipline,
+                    position risk, chart strength, and whether the stock deserves more money.
                   </p>
                 </div>
               )}
@@ -5799,12 +5809,12 @@ function App() {
               )}
             </CollapsibleSection>
 
-            <CollapsibleSection className="panel evidence-panel" description="Everything here is optional. The verdict already uses live market and company data — use these only to override a stale figure or add your own notes." eyebrow="Optional" id="optional-heading" title="Fine-tune the evidence">
+            <CollapsibleSection className="panel evidence-panel" description="Overrides for missing data, stale data, or a specific exit/target plan." eyebrow="Optional" id="optional-heading" title="Guardrails">
 
               <div className="auto-evidence-panel">
                 <div>
                   <span className="eyebrow">Auto-filled company evidence</span>
-                  <p>These values are pulled from refreshed market/company data when available. Manual entries below only override missing or stale data.</p>
+                  <p>Loaded from market/company data when available. Manual values below override only what you choose.</p>
                 </div>
                 <div className="auto-evidence-grid">
                   {companyEvidenceCards.map((card) => (
@@ -6032,11 +6042,11 @@ function App() {
 
             <CollapsibleSection
               className="adaptive-score-panel sub-panel nested-collapse"
-              description="A compact breakdown of what is supporting the current answer, what can pressure price, and what needs confirmation before you act."
+              description="A compact read of what can push price higher, what can cap upside, and what needs confirmation before you act."
               headingClassName="subsection-heading"
               headingLevel={3}
               id="adaptive-score-heading"
-              title="See the full evidence breakdown"
+              title="Price Drivers Behind This Answer"
             >
               <div className="component-score-grid">
                 {analysis.scoreComponents.map((component) => (
@@ -6044,7 +6054,8 @@ function App() {
                     <div>
                       <span>{component.label}</span>
                       <strong className="score-with-help">
-                        {component.score}/100
+                        {component.score}
+                        <span className="read-scale">/100</span>
                         <HelpTip text={componentDefinition(component)} />
                       </strong>
                     </div>
@@ -6059,24 +6070,35 @@ function App() {
               <CollapsibleSection
                 className="signal-contribution-panel nested-collapse"
                 headingClassName="subsection-heading"
-              headingLevel={4}
-              id="all-signal-contributions-heading"
+                headingLevel={4}
+                id="all-signal-contributions-heading"
                 title="Metric-by-Metric Price Clues"
               >
-                <div className="adaptive-signal-grid">
-                  {analysis.adaptiveSignals.map((signal) => (
-                    <article className={`adaptive-signal-card tone-${signal.tone}`} key={`${signal.group}-${signal.label}`}>
-                      <span>{signal.group}</span>
-                      <strong>{signal.label}</strong>
-                      <small>{signal.value}</small>
-                      <div className="signal-score-line">
-                        <span className="score-with-help">
-                          <b>{signal.score}/100</b>
-                          <HelpTip text={signalDefinition(signal)} />
-                        </span>
+                <div className="signal-category-stack">
+                  {adaptiveSignalGroups.map((group) => (
+                    <section className="signal-category-block" key={group.title}>
+                      <div className="category-strip-heading">
+                        <h4>{group.title}</h4>
+                        <span>{group.signals.length}</span>
                       </div>
-                      <p>{signalNarrative(signal)}</p>
-                    </article>
+                      <div className="adaptive-signal-grid">
+                        {group.signals.map((signal) => (
+                          <article className={`adaptive-signal-card tone-${signal.tone}`} key={`${signal.group}-${signal.label}`}>
+                            <span>{signal.group}</span>
+                            <strong>{signal.label}</strong>
+                            <small>{signal.value}</small>
+                            <div className="signal-score-line">
+                              <span className="score-with-help">
+                                <b>{signal.score}</b>
+                                <span className="read-scale">/100</span>
+                                <HelpTip text={signalDefinition(signal)} />
+                              </span>
+                            </div>
+                            <p>{signalNarrative(signal)}</p>
+                          </article>
+                        ))}
+                      </div>
+                    </section>
                   ))}
                 </div>
               </CollapsibleSection>
@@ -6165,45 +6187,29 @@ function App() {
             }
             className="parent-section ai-coach-section"
             defaultOpen
-            description="Pick what you want explained. The AI Coach keeps the answer focused on possible price impact, risk, and the next practical decision."
+            description="Choose a coaching focus: price action, business quality, or the final decision."
             eyebrow="AI Coach"
             headingClassName="section-heading collapsible-section-heading"
             id="ai-coach-heading"
             staticOpen
             title={activeAiCoachCopy.title}
           >
-            <div className="ai-coach-mode-grid" role="radiogroup" aria-label="AI Coach focus">
+            <div className="ai-coach-mode-segmented" role="radiogroup" aria-label="AI Coach focus">
               {([
-                {
-                  scope: 'technical' as AiCoachScope,
-                  label: 'Charts',
-                  title: 'Explain price action',
-                  text: 'Trend, indicators, candles, volatility, liquidity, support/resistance, and what they can mean for the next move.',
-                },
-                {
-                  scope: 'fundamental' as AiCoachScope,
-                  label: 'Company',
-                  title: 'Explain the business',
-                  text: 'Business model, ratios, statements, updates, data gaps, and whether the business can support higher prices.',
-                },
-                {
-                  scope: 'verdict' as AiCoachScope,
-                  label: 'Verdict',
-                  title: 'Explain the decision',
-                  text: 'The final action, what to do next, what not to do, risk plan, and which evidence matters most now.',
-                },
+                { scope: 'technical' as AiCoachScope, label: 'Chart', help: 'Explain trend, indicators, candles, volatility, liquidity, support/resistance, and what they can mean for the next move.' },
+                { scope: 'fundamental' as AiCoachScope, label: 'Company', help: 'Explain business model, ratios, statements, updates, data gaps, and whether the business can support higher prices.' },
+                { scope: 'verdict' as AiCoachScope, label: 'Verdict', help: 'Explain the final action, what to do next, what not to do, risk plan, and which evidence matters most now.' },
               ]).map((option) => (
                 <button
                   aria-checked={llmScope === option.scope}
-                  className={`ai-coach-mode-card ${llmScope === option.scope ? 'active' : ''}`}
+                  className={`ai-coach-mode-pill ${llmScope === option.scope ? 'active' : ''}`}
                   key={option.scope}
                   role="radio"
                   type="button"
                   onClick={() => setLlmScope(option.scope)}
                 >
                   <span>{option.label}</span>
-                  <strong>{option.title}</strong>
-                  <p>{option.text}</p>
+                  <HelpTip text={option.help} />
                 </button>
               ))}
             </div>
@@ -6279,7 +6285,7 @@ function App() {
         <>
           <CollapsibleSection
             className="parent-section technical-section"
-            description="Price action, chart indicators, position economics, portfolio exposure, risk, liquidity, and setup quality."
+            description="Price action, indicators, volatility, liquidity, and scenario ranges."
             eyebrow="Technical analysis"
             headingClassName="section-heading collapsible-section-heading"
             id="technical-heading"
@@ -7124,7 +7130,7 @@ function App() {
         <>
           <CollapsibleSection
             className="parent-section fundamental-section"
-            description="Company profile, ratios, statement summaries, important updates, business quality, and due-diligence checks."
+            description="Business model, valuation, margins, balance sheet, cash flow, and recent company updates."
             eyebrow="Fundamental analysis"
             headingClassName="section-heading collapsible-section-heading"
             id="fundamental-heading"
@@ -7182,7 +7188,7 @@ function App() {
                   ))}
                 </div>
                 <p className="caption">
-                  This tells you what business the ticker actually represents. When the business model or industry is unclear, the future price view should stay cautious because ratios can be misread.
+                  Use this to judge what can realistically move future price: demand for this business, margin resilience in this industry, and whether the current valuation is backed by a durable business model.
                 </p>
               </article>
 
@@ -7195,16 +7201,26 @@ function App() {
                   </div>
                   <strong>{activeFundamentals ? `${companyRatioFacts.filter((fact) => fact.value !== '-').length}/${companyRatioFacts.length}` : '0'}</strong>
                 </div>
-                <div className="company-ratio-grid">
-                  {companyRatioFacts.map((fact) => (
-                    <div className={`company-ratio tone-${fact.tone}`} key={fact.label}>
-                      <span className="label-with-help">
-                        {fact.label}
-                        <HelpTip text={fact.helper} />
-                      </span>
-                      <strong>{fact.value}</strong>
-                      <p>{ratioNarrative(fact)}</p>
-                    </div>
+                <div className="company-ratio-category-stack">
+                  {companyRatioGroups.map((group) => (
+                    <section className="company-ratio-category" key={group.title}>
+                      <div className="category-strip-heading">
+                        <h4>{group.title}</h4>
+                        <span>{group.facts.filter((fact) => fact.value !== '-').length}/{group.facts.length}</span>
+                      </div>
+                      <div className="company-ratio-grid">
+                        {group.facts.map((fact) => (
+                          <div className={`company-ratio tone-${fact.tone}`} key={`${group.title}-${fact.label}`}>
+                            <span className="label-with-help">
+                              {fact.label}
+                              <HelpTip text={fact.helper} />
+                            </span>
+                            <strong>{fact.value}</strong>
+                            <p>{ratioNarrative(fact)}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </section>
                   ))}
                 </div>
                 <p className="caption">
@@ -7267,7 +7283,7 @@ function App() {
               <article className={`visual-card fundamental-score-card tone-${fundamentalScore >= 70 ? 'positive' : fundamentalScore < 40 ? 'negative' : 'neutral'}`}>
                 <div className="visual-card-heading">
                   <div>
-                    <span className="mini-label">Fundamental analysis</span>
+                    <span className="mini-label">Company quality</span>
                     <h3>Business Quality Wheel</h3>
                   </div>
                   <strong>{fundamentalScore}/100</strong>
@@ -7343,7 +7359,7 @@ function App() {
       {view === 'reasoning' ? (
         <>
           <section className="reasoning-grid lower-grid">
-            <CollapsibleSection className="panel parent-section reasoning-parent" eyebrow="Reasoning trace" id="steps-heading" staticOpen title="Agent Reasoning">
+            <CollapsibleSection className="panel parent-section reasoning-parent" eyebrow="Reasoning" id="steps-heading" staticOpen title="Decision Path">
 
               <div className="steps-list detailed-steps">
                 {analysis.steps.map((step, index) => (
@@ -7401,7 +7417,7 @@ function App() {
                 </CollapsibleSection>
                 <CollapsibleSection className="sub-panel nested-collapse" headingClassName="subsection-heading" headingLevel={3} id="data-source-heading" title="Data Freshness">
                   <p>
-                    Market cache is {cacheAge(activeSnapshot.generated_at)} old for {analysis.quoteKey}. If this feels stale, sync again before acting on the price view.
+                    Last refreshed {cacheAge(activeSnapshot.generated_at)} ago for {analysis.quoteKey}. Refresh before acting if the move is time-sensitive.
                   </p>
                 </CollapsibleSection>
               </div>
@@ -7443,36 +7459,8 @@ function App() {
             eyebrow="Portfolio"
             id="portfolio-market-heading"
             staticOpen
-            title="Portfolio & Market Data"
+            title="Portfolio"
           >
-            <div className="data-hub-controls">
-              <label className="field compact-field">
-                <FieldLabel help="How many past calendar days to request for candles, indicators, patterns, and forecasts.">History window</FieldLabel>
-                <input
-                  inputMode="numeric"
-                  min="1"
-                  value={days}
-                  onChange={(event) => setDays(Number(event.target.value) || 1)}
-                />
-              </label>
-              <label className="toggle-field data-hub-toggle">
-                <input
-                  checked={includeHoldingsInSync}
-                  disabled={!hasUploadedHoldingsFeed}
-                  type="checkbox"
-                  onChange={(event) => setIncludeHoldings(event.target.checked)}
-                />
-                <span className="toggle-copy">
-                  Include holdings
-                  <HelpTip text={optionalHelp.holdingsRefresh} />
-                </span>
-              </label>
-              <p>
-                {hasUploadedHoldingsFeed
-                  ? 'Turn this on when you want the uploaded portfolio refreshed together with the stock in the header.'
-                  : 'Upload a holdings XLSX if you want the sync to include portfolio rows.'}
-              </p>
-            </div>
             {freeRefreshMessage && (
               <div className={`refresh-message ${freeRefreshState}`}>
                 <p>{freeRefreshMessage}</p>
@@ -7491,90 +7479,77 @@ function App() {
               </div>
             )}
             <section className="portfolio-workspace" aria-label="Portfolio import, summary, and market table">
-              <div className="section-inline-heading">
+              <div className="section-inline-heading portfolio-table-heading">
                 <div>
                   <span className="mini-label">Portfolio</span>
-                  <h3>Holdings Feed and Market Table</h3>
-                  <p>Upload one holdings XLSX, refresh the cache, then use the combined table for portfolio and market rows.</p>
+                  <h3>Holdings & Quotes</h3>
+                  <p>Your active holdings file, latest prices, and row-level analyse actions.</p>
                 </div>
-                <span className={`status-dot ${uploadState === 'error' ? 'warning' : 'ready'}`}>
-                  {uploadState === 'uploading' ? 'Uploading' : hasUploadedHoldingsFeed ? 'Loaded' : uploadState === 'error' ? 'Check' : 'Local only'}
-                </span>
+                <div className="holding-feed-actions">
+                  <span className={`status-dot ${uploadState === 'error' ? 'warning' : 'ready'}`}>
+                    {uploadState === 'uploading' ? 'Uploading' : hasUploadedHoldingsFeed ? 'Loaded' : uploadState === 'error' ? 'Check' : 'No file'}
+                  </span>
+                  {hasUploadedHoldingsFeed && (
+                    <button
+                      className="secondary-action danger-action compact-remove-feed"
+                      type="button"
+                      onClick={() => {
+                        void removeUploadedHoldingsFeed()
+                      }}
+                    >
+                      Remove feed
+                    </button>
+                  )}
+                </div>
               </div>
 
-              <div className="upload-grid portfolio-upload-grid">
-              {hasUploadedHoldingsFeed && (
-                <div className="loaded-upload-card">
-                  <div>
-                    <span>Loaded holdings feed</span>
-                    <strong>{loadedHoldingsFilename}</strong>
-                    <p>
-                      {loadedHoldingsCount} holdings are active in this browser. Remove this feed before uploading another XLSX.
-                    </p>
-                  </div>
-                  <button
-                    className="secondary-action danger-action"
-                    type="button"
-                    onClick={() => {
-                      void removeUploadedHoldingsFeed()
-                    }}
-                  >
-                    Remove feed
-                  </button>
-                </div>
-              )}
               {!hasUploadedHoldingsFeed && (
-                <label className="field holdings-upload-field">
-                  Zerodha holdings report
-                  <input
-                    accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    disabled={uploadState === 'uploading'}
-                    key="holdings-ready"
-                    type="file"
-                    onChange={(event) => {
-                      void uploadHoldingsReport(event.target.files?.[0])
-                      event.target.value = ''
-                    }}
-                  />
-                </label>
-              )}
-              {(uploadMessage || !hasUploadedHoldingsFeed) && (
-                <div className={`refresh-message ${uploadState}`}>
-                  <p>
-                    {uploadMessage ||
-                      'Choose the holdings XLSX export. The app parses it locally, updates the portfolio table, and refreshes delayed EOD prices.'}
-                  </p>
+                <div className="upload-grid portfolio-upload-grid">
+                  <label className="field holdings-upload-field">
+                    Zerodha holdings report
+                    <input
+                      accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                      disabled={uploadState === 'uploading'}
+                      key="holdings-ready"
+                      type="file"
+                      onChange={(event) => {
+                        void uploadHoldingsReport(event.target.files?.[0])
+                        event.target.value = ''
+                      }}
+                    />
+                  </label>
+                  <div className={`refresh-message ${uploadState}`}>
+                    <p>{uploadMessage || 'Choose a Zerodha holdings XLSX export to build a private browser-local portfolio table.'}</p>
+                  </div>
                 </div>
               )}
-              </div>
+              {hasUploadedHoldingsFeed && uploadMessage && uploadState === 'error' && (
+                <div className={`refresh-message ${uploadState}`}>
+                  <p>{uploadMessage}</p>
+                </div>
+              )}
 
               <section className="metric-grid portfolio-inline-metrics" aria-label="Portfolio metrics">
-              <div className="metric">
-                <span>Portfolio snapshot</span>
-                <strong>{hasUploadedHoldingsFeed ? `${loadedHoldingsCount} holdings` : 'No holdings loaded'}</strong>
-              </div>
-              <div className="metric">
-                <span>Current value</span>
-                <strong>{formatInr(portfolio.value)}</strong>
-              </div>
-              <div className="metric">
-                <span>P&L</span>
-                <strong className={portfolio.pnl >= 0 ? 'positive' : 'negative'}>{formatInr(portfolio.pnl)}</strong>
-              </div>
-              <div className="metric">
-                <span>Return</span>
-                <strong className={portfolioReturn >= 0 ? 'positive' : 'negative'}>{formatPercent(portfolioReturn)}</strong>
-              </div>
+                <div className="metric">
+                  <span>Portfolio snapshot</span>
+                  <strong>{hasUploadedHoldingsFeed ? `${loadedHoldingsCount} holdings` : 'No holdings loaded'}</strong>
+                  {hasUploadedHoldingsFeed && <small className="metric-subtext">{loadedHoldingsFilename || 'Browser-local upload'}</small>}
+                </div>
+                <div className="metric">
+                  <span>Current value</span>
+                  <strong>{formatInr(portfolio.value)}</strong>
+                </div>
+                <div className="metric">
+                  <span>P&L</span>
+                  <strong className={portfolio.pnl >= 0 ? 'positive' : 'negative'}>{formatInr(portfolio.pnl)}</strong>
+                </div>
+                <div className="metric">
+                  <span>Return</span>
+                  <strong className={portfolioReturn >= 0 ? 'positive' : 'negative'}>{formatPercent(portfolioReturn)}</strong>
+                </div>
               </section>
 
               <section className="portfolio-market-grid-section" aria-label="Combined holdings and market data">
-                <div className="section-inline-heading compact-inline-heading">
-                  <div>
-                    <span className="mini-label">Combined grid</span>
-                    <h3>Holdings and Latest Market Data</h3>
-                    <p>Holdings, quotes, and analysis actions are in one row so the portfolio context and market data stay together.</p>
-                  </div>
-                </div>
                 <div className="table-wrap merged-table-wrap" role="region" aria-label="Combined holdings and market data table, scroll for more columns" tabIndex={0}>
                   <table className="portfolio-market-table">
                   <thead>
@@ -7597,7 +7572,7 @@ function App() {
                   <tbody>
                     {marketRows.length === 0 ? (
                       <tr>
-                        <td className="empty-table-cell" colSpan={13}>No holdings or quotes loaded yet. Sync market data or upload a holdings report to populate this table.</td>
+                        <td className="empty-table-cell" colSpan={13}>Sync market data or upload holdings to populate this table.</td>
                       </tr>
                     ) : (
                       marketRows.map((row) => {
@@ -7665,7 +7640,7 @@ function App() {
             </section>
           </CollapsibleSection>
 
-          <CollapsibleSection className="panel data-cache-panel" eyebrow="Data sync" id="data-cache-heading" title="Coverage and Missing Data">
+          <CollapsibleSection className="panel data-cache-panel" eyebrow="Coverage" id="data-cache-heading" title="Missing Data Resolver">
             {syncCoverage && (freeRefreshState === 'done' || uploadState === 'done') ? (
               <>
                 <SyncCoveragePanel coverage={syncCoverage} />
@@ -7682,7 +7657,7 @@ function App() {
                 />
               </>
             ) : (
-              <p className="footer-note">Sync Market Data or upload a holdings report to see technical/fundamental coverage and missing-symbol guidance here.</p>
+              <p className="footer-note">Sync or upload holdings to see which symbols still need mapping or provider follow-up.</p>
             )}
           </CollapsibleSection>
 
@@ -7784,10 +7759,10 @@ function App() {
                 <p className="footer-note">
                   If a symbol fails, add or correct its Yahoo mapping in the symbol file. BSE names often need the BSE code, for example 517393.BO.
                 </p>
-                {activeSnapshot.errors.length > 0 && (
+                {(freeRefreshState === 'error' || uploadState === 'error') && activeSnapshotForAnalysis.errors.length > 0 && (
                   <div className="diagnostic-warning-list">
                     <strong>Provider follow-up notes</strong>
-                    {activeSnapshot.errors.map((error) => (
+                    {activeSnapshotForAnalysis.errors.map((error) => (
                       <p key={error}>{error}</p>
                     ))}
                   </div>
