@@ -1,4 +1,4 @@
-import { type CSSProperties, type FocusEvent, type MouseEvent, type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
+import { type CSSProperties, type MouseEvent, type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import {
   sectorOperatingRules,
@@ -48,6 +48,17 @@ const primaryWorkspaceTabs: Array<{ id: View; label: string; caption: string }> 
   { id: 'data', label: 'Portfolio', caption: 'Holdings' },
   { id: 'coach', label: 'AI Coach', caption: 'Ask why' },
 ]
+
+const workspaceTabIcons: Record<View, string> = {
+  setup: 'S',
+  verdict: 'D',
+  technicals: 'C',
+  fundamentals: 'Co',
+  data: 'P',
+  coach: 'AI',
+  reasoning: 'R',
+  glossary: '?',
+}
 
 const utilityWorkspaceTabs: Array<{ id: View; label: string }> = [
   { id: 'reasoning', label: 'Reasoning' },
@@ -722,24 +733,12 @@ const forecastHelp = {
 }
 
 function HelpTip({ text }: { text: string }) {
-  function positionTooltip(event: MouseEvent<HTMLSpanElement> | FocusEvent<HTMLSpanElement>) {
-    const rect = event.currentTarget.getBoundingClientRect()
-    const halfTooltip = Math.min(160, Math.max(120, (window.innerWidth - 32) / 2))
-    const minX = halfTooltip + 16
-    const maxX = Math.max(minX, window.innerWidth - halfTooltip - 16)
-    const x = Math.min(Math.max(rect.left + rect.width / 2, minX), maxX)
-    event.currentTarget.style.setProperty('--tip-x', `${x}px`)
-    event.currentTarget.style.setProperty('--tip-y', `${rect.top}px`)
-  }
-
   return (
     <span
       className="help-tip"
       data-tip={text}
       tabIndex={0}
       aria-label={text}
-      onMouseEnter={positionTooltip}
-      onFocus={positionTooltip}
     >
       ?
     </span>
@@ -3734,6 +3733,7 @@ function App() {
   const [view, setView] = useState<View>('setup')
   const viewAnnouncementRef = useRef<HTMLDivElement>(null)
   const isFirstViewRender = useRef(true)
+  const autoCompanyOverrideKeyRef = useRef('')
 
   useEffect(() => {
     if (isFirstViewRender.current) {
@@ -3744,6 +3744,8 @@ function App() {
   }, [view])
   const [glossarySearch, setGlossarySearch] = useState('')
   const [clearDataArmed, setClearDataArmed] = useState(false)
+  const [mobileContextExpanded, setMobileContextExpanded] = useState(false)
+  const [workspaceDrawerOpen, setWorkspaceDrawerOpen] = useState(false)
 
   useEffect(() => {
     if (!clearDataArmed) return
@@ -4137,38 +4139,32 @@ function App() {
       caption: 'Improving or stable profit trend reduces the chance of a value trap.',
     },
   ]
-  const companyEvidenceCards = [
-    {
-      label: 'Market cap',
-      value: marketCapCr === undefined ? 'Missing' : `${formatNumber(marketCapCr)} cr`,
-      source: parseNumber(form.marketCapCr) !== undefined ? 'Manual override' : companyMarketCap !== undefined ? 'Auto-filled' : 'Missing',
-      tone: toneFromNumber(marketCapCr, (value) => value >= 10000, (value) => value < 500),
-    },
-    {
-      label: 'Debt/equity',
-      value: formatNumber(debtEquity),
-      source: parseNumber(form.debtEquity) !== undefined ? 'Manual override' : companyDebtEquity !== undefined ? 'Auto-filled' : 'Missing',
-      tone: toneFromNumber(debtEquity, (value) => value <= 0.5, (value) => value > 1.5),
-    },
-    {
-      label: 'ROCE',
-      value: formatPercent(roce),
-      source: parseNumber(form.roce) !== undefined ? 'Manual override' : companyRoce !== undefined ? 'Auto-filled' : 'Missing',
-      tone: toneFromNumber(roce, (value) => value >= 18, (value) => value < 8),
-    },
-    {
-      label: 'P/E',
-      value: formatNumber(pe),
-      source: parseNumber(form.pe) !== undefined ? 'Manual override' : companyTrailingPe !== undefined ? 'Auto-filled' : 'Missing',
-      tone: toneFromNumber(pe, (value) => value > 8 && value < 30, (value) => value > 55),
-    },
-    {
-      label: 'Profit trend',
-      value: profitTrendLabels[effectiveProfitTrend],
-      source: form.profitTrend !== 'unknown' ? 'Manual override' : effectiveProfitTrend !== 'unknown' ? 'Auto-derived' : 'Missing',
-      tone: effectiveProfitTrend === 'growing' || effectiveProfitTrend === 'stable' ? 'positive' : effectiveProfitTrend === 'declining' || effectiveProfitTrend === 'loss_making' ? 'negative' : 'neutral',
-    },
-  ]
+  useEffect(() => {
+    const autoMarketCapCr = companyMarketCap === undefined ? undefined : companyMarketCap / 10000000
+    const cleanNumber = (value: number | undefined, decimals = 4) =>
+      value === undefined || !Number.isFinite(value) ? '' : Number(value.toFixed(decimals)).toString()
+    const key = [
+      decisionSymbol,
+      cleanNumber(autoMarketCapCr, 2),
+      cleanNumber(companyDebtEquity),
+      cleanNumber(companyRoce),
+      cleanNumber(companyTrailingPe),
+      inferredProfitTrend,
+    ].join('|')
+
+    if (autoCompanyOverrideKeyRef.current === key) return
+    autoCompanyOverrideKeyRef.current = key
+
+    setForm((current) => {
+      const next: Partial<AnalysisForm> = {}
+      if (!current.marketCapCr && autoMarketCapCr !== undefined) next.marketCapCr = cleanNumber(autoMarketCapCr, 2)
+      if (!current.debtEquity && companyDebtEquity !== undefined) next.debtEquity = cleanNumber(companyDebtEquity)
+      if (!current.roce && companyRoce !== undefined) next.roce = cleanNumber(companyRoce)
+      if (!current.pe && companyTrailingPe !== undefined) next.pe = cleanNumber(companyTrailingPe)
+      if (current.profitTrend === 'unknown' && inferredProfitTrend !== 'unknown') next.profitTrend = inferredProfitTrend
+      return Object.keys(next).length ? { ...current, ...next } : current
+    })
+  }, [companyDebtEquity, companyMarketCap, companyRoce, companyTrailingPe, decisionSymbol, inferredProfitTrend])
 
   const rsiInterpretation =
     chartModel.latestRsi === undefined
@@ -4901,21 +4897,41 @@ function App() {
   }
 
   const analysisBrief = useMemo(() => {
+    const enabledConstraints = constraintLabels
+      .filter((constraint) => form.constraints[constraint.key])
+      .map((constraint) => constraint.label)
+      .join(', ')
+
     return [
       `Ticker: ${form.exchange}:${form.ticker.toUpperCase()}`,
-      `Verdict: ${analysis.verdict} (${analysis.confidenceLabel} confidence, evidence strength ${analysis.score}/100)`,
-      `${form.alreadyHold ? 'Add-more capital' : 'Capital to deploy'}: ${form.alreadyHold && !parseNumber(form.capital) ? 'Not adding' : formatInr(parseNumber(form.capital))}`,
+      `Exchange: ${form.exchange}`,
       `Horizon: ${horizonLabels[form.horizon]}`,
-      `Risk profile: ${riskProfileLabels[form.riskProfile]}`,
-      `Already hold: ${form.alreadyHold ? 'Yes' : 'No'}`,
+      `Already holding: ${form.alreadyHold ? 'Yes' : 'No'}`,
+      `${form.alreadyHold ? 'Add-more capital' : 'Capital to deploy'}: ${form.alreadyHold && !parseNumber(form.capital) ? 'Not adding' : formatInr(parseNumber(form.capital))}`,
+      `Bought on: ${form.boughtOn || '-'}`,
       `Quantity: ${form.quantity || '-'}`,
       `Average price: ${form.averagePrice || '-'}`,
+      `Risk profile: ${riskProfileLabels[form.riskProfile]}`,
+      `Market access: ${tradeAccessLabels[form.tradeAccess]}`,
+      `History window: ${days} daily candles`,
+      `${form.alreadyHold ? 'Add-more max risk' : 'Max risk'}: ${form.maxRisk || '-'} ${form.riskMode === 'percent' ? '% of capital' : 'rupee amount'}`,
+      `Manual LTP: ${form.manualLtp || '-'}`,
+      `Invalidation price: ${form.invalidationPrice || '-'}`,
+      `Target price: ${form.targetPrice || '-'}`,
+      `Market cap override: ${form.marketCapCr || (marketCapCr === undefined ? '-' : `${formatNumber(marketCapCr)} cr`)}`,
+      `Debt/equity override: ${form.debtEquity || formatNumber(debtEquity)}`,
+      `ROCE override: ${form.roce || formatPercent(roce)}`,
+      `P/E override: ${form.pe || formatNumber(pe)}`,
+      `Profit trend: ${profitTrendLabels[effectiveProfitTrend]}`,
+      `Personal filters: ${enabledConstraints || 'None'}`,
+      `Thesis or notes: ${form.thesis || '-'}`,
+      `Verdict: ${analysis.verdict} (${analysis.confidenceLabel} confidence, evidence strength ${analysis.score}/100)`,
       `LTP used: ${formatInr(analysis.ltp)}`,
       `Position P&L: ${formatInr(analysis.positionPnl)} (${formatPercent(analysis.positionPnlPct)})`,
       `Actions: ${analysis.actions.join(' ')}`,
       `Cautions: ${analysis.cautions.join(' ')}`,
     ].join('\n')
-  }, [analysis, form])
+  }, [analysis, days, debtEquity, effectiveProfitTrend, form, marketCapCr, pe, roce])
 
   function clipText(value: string | undefined, max = 900) {
     if (!value) return undefined
@@ -5520,79 +5536,134 @@ function App() {
 
   return (
     <main className="app-shell">
-      <header className="topbar">
-        <div>
-          <h1>NSE/BSE Analysis Agent</h1>
+      <header className="topbar app-hero-panel">
+        <button
+          aria-controls="workspace-drawer"
+          aria-expanded={workspaceDrawerOpen}
+          aria-label={workspaceDrawerOpen ? 'Close workspace drawer' : 'Open workspace drawer'}
+          className={`workspace-drawer-toggle ${workspaceDrawerOpen ? 'open' : ''}`}
+          type="button"
+          onClick={() => setWorkspaceDrawerOpen((current) => !current)}
+        >
+          <span />
+          <span />
+          <span />
+        </button>
+
+        <div className="app-title-block">
+          <h1>Stock Analysis Agent</h1>
         </div>
-        <div className="topbar-actions">
-          <div className="utility-nav" aria-label="Reference tools">
-            {utilityWorkspaceTabs.map((tab) => (
+
+        <nav className="workspace-nav" aria-label="Analysis workspace">
+          <div className="active-instrument-strip">
+            <div className={`instrument-identity tone-${activePriceTone} ${mobileContextExpanded ? 'expanded' : ''}`}>
               <button
-                className={view === tab.id ? 'active' : ''}
-                key={tab.id}
+                aria-expanded={mobileContextExpanded}
+                className="instrument-mobile-toggle"
                 type="button"
-                onClick={() => setView(tab.id)}
+                onClick={() => setMobileContextExpanded((current) => !current)}
               >
-                {tab.label}
+                <span>{activeTickerDisplay}</span>
+                <strong>{formatInr(analysis.ltp)}</strong>
+                <small>{activeChangePct === undefined ? 'Change pending' : formatPercent(activeChangePct)}</small>
               </button>
-            ))}
+              <div className="instrument-copy">
+                <span>Analysing now</span>
+                <strong>{activeTickerDisplay}</strong>
+                <p>{activeInstrumentName}</p>
+                {activeInstrumentSector && <small>{activeInstrumentSector}</small>}
+              </div>
+              <div className="instrument-ltp-inline">
+                <span>LTP</span>
+                <strong>{formatInr(analysis.ltp)}</strong>
+                <small>{activeChangePct === undefined ? 'Change pending' : formatPercent(activeChangePct)}</small>
+              </div>
+              <div className="instrument-quick-actions">
+                <button
+                  type="button"
+                  onClick={() => void loadDecisionData()}
+                  disabled={freeRefreshState === 'refreshing' || !decisionSymbol}
+                >
+                  {freeRefreshState === 'refreshing' ? 'Loading...' : 'Analyse'}
+                </button>
+                {/* Future shortcut: re-enable an Ask Coach action here if a header coaching entry point becomes useful again. */}
+              </div>
+            </div>
           </div>
+        </nav>
+      </header>
+
+      <button
+        aria-hidden={!workspaceDrawerOpen}
+        className={`workspace-drawer-backdrop ${workspaceDrawerOpen ? 'open' : ''}`}
+        tabIndex={workspaceDrawerOpen ? 0 : -1}
+        type="button"
+        onClick={() => setWorkspaceDrawerOpen(false)}
+      />
+
+      <aside
+        aria-label="Workspace navigation and utilities"
+        className={`workspace-drawer ${workspaceDrawerOpen ? 'open' : ''}`}
+        id="workspace-drawer"
+      >
+        <div className="workspace-drawer-head">
+          <span>Workspace</span>
+          <button type="button" onClick={() => setWorkspaceDrawerOpen(false)}>
+            Close
+          </button>
+        </div>
+        <div className="workspace-drawer-section" aria-label="Analysis sections">
+          {primaryWorkspaceTabs.map((tab) => (
+            <button
+              aria-current={view === tab.id ? 'page' : undefined}
+              className={`drawer-nav-item ${view === tab.id ? 'active' : ''}`}
+              key={tab.id}
+              type="button"
+              onClick={() => {
+                setView(tab.id)
+                setWorkspaceDrawerOpen(false)
+              }}
+            >
+              <span className="nav-icon" aria-hidden="true">{workspaceTabIcons[tab.id]}</span>
+              <span>
+                <strong>{tab.label}</strong>
+                <small>{tab.caption}</small>
+              </span>
+            </button>
+          ))}
+        </div>
+        <div className="workspace-drawer-section utility-drawer-section" aria-label="Reference tools">
+          {utilityWorkspaceTabs.map((tab) => (
+            <button
+              className={`drawer-nav-item ${view === tab.id ? 'active' : ''}`}
+              key={tab.id}
+              type="button"
+              onClick={() => {
+                setView(tab.id)
+                setWorkspaceDrawerOpen(false)
+              }}
+            >
+              <span className="nav-icon" aria-hidden="true">{workspaceTabIcons[tab.id]}</span>
+              <span>
+                <strong>{tab.label}</strong>
+                <small>{tab.id === 'reasoning' ? 'Decision trace' : 'Term guide'}</small>
+              </span>
+            </button>
+          ))}
           <button
-            className="theme-toggle"
+            className="drawer-nav-item"
             type="button"
             aria-pressed={theme === 'dark'}
             onClick={() => setTheme((current) => (current === 'dark' ? 'light' : 'dark'))}
           >
-            {theme === 'dark' ? 'Dark mode' : 'Light mode'}
+            <span className="nav-icon" aria-hidden="true">{theme === 'dark' ? 'D' : 'L'}</span>
+            <span>
+              <strong>{theme === 'dark' ? 'Dark mode' : 'Light mode'}</strong>
+              <small>Theme</small>
+            </span>
           </button>
-          <div className={`cache-pill ${cacheState}`}>
-            <span>{cacheLabel(cacheState)}</span>
-            <strong>{cacheAge(activeSnapshot.generated_at)}</strong>
-          </div>
         </div>
-      </header>
-
-      <nav className="workspace-nav" aria-label="Analysis workspace">
-        <div className="active-instrument-strip">
-          <div className={`instrument-identity tone-${activePriceTone}`}>
-            <div>
-              <span>Analysing now</span>
-              <strong>{activeTickerDisplay}</strong>
-              <p>{activeInstrumentName}</p>
-              {activeInstrumentSector && <small>{activeInstrumentSector}</small>}
-            </div>
-            <div className="instrument-ltp-inline">
-              <span>LTP</span>
-              <strong>{formatInr(analysis.ltp)}</strong>
-              <small>{activeChangePct === undefined ? 'Change pending' : formatPercent(activeChangePct)}</small>
-            </div>
-            <div className="instrument-quick-actions">
-              <button
-                type="button"
-                onClick={() => void loadDecisionData()}
-                disabled={freeRefreshState === 'refreshing' || !decisionSymbol}
-              >
-                {freeRefreshState === 'refreshing' ? 'Loading...' : 'Analyse'}
-              </button>
-              {/* Future shortcut: re-enable an Ask Coach action here if a header coaching entry point becomes useful again. */}
-            </div>
-          </div>
-        </div>
-        <div className="tabs workspace-tabs" aria-label="Workspace sections">
-          {primaryWorkspaceTabs.map((tab) => (
-            <button
-              aria-current={view === tab.id ? 'page' : undefined}
-              className={view === tab.id ? 'active' : ''}
-              key={tab.id}
-              type="button"
-              onClick={() => setView(tab.id)}
-            >
-              <span>{tab.label}</span>
-              <small>{tab.caption}</small>
-            </button>
-          ))}
-        </div>
-      </nav>
+      </aside>
 
       <div
         aria-live="polite"
@@ -5600,12 +5671,28 @@ function App() {
         ref={viewAnnouncementRef}
         tabIndex={-1}
       >
-        {[...primaryWorkspaceTabs, ...utilityWorkspaceTabs].find((tab) => tab.id === view)?.label ?? 'NSE/BSE Analysis Agent'} section loaded.
+        {[...primaryWorkspaceTabs, ...utilityWorkspaceTabs].find((tab) => tab.id === view)?.label ?? 'Stock Analysis Agent'} section loaded.
       </div>
 
       {view === 'setup' ? (
         <>
           <CollapsibleSection
+            action={
+              <div className="research-brief-actions">
+                <button
+                  aria-pressed={form.alreadyHold}
+                  className={`holding-toggle-button ${form.alreadyHold ? 'active' : ''}`}
+                  type="button"
+                  onClick={() => updateForm('alreadyHold', !form.alreadyHold)}
+                >
+                  Already holding
+                  <HelpTip text={requiredHelp.alreadyHold} />
+                </button>
+                <button className="secondary-action" type="button" onClick={() => copyCommand('brief', analysisBrief)}>
+                  {copied === 'brief' ? 'Copied' : 'Copy brief'}
+                </button>
+              </div>
+            }
             className="parent-section setup-parent"
             defaultOpen
             description="Set the instrument, time horizon, and money context. The rest of the workspace updates from this brief."
@@ -5616,13 +5703,6 @@ function App() {
           >
             <section className="input-grid">
             <CollapsibleSection
-              action={
-                <div className="setup-action-row">
-                  <button className="secondary-action" type="button" onClick={() => copyCommand('brief', analysisBrief)}>
-                    {copied === 'brief' ? 'Copied' : 'Copy brief'}
-                  </button>
-                </div>
-              }
               className="panel form-panel"
               defaultOpen
               id="required-heading"
@@ -5640,12 +5720,6 @@ function App() {
                     <option value="BSE">BSE</option>
                   </select>
                 </label>
-                {!isHoldingReview && (
-                  <label className="field">
-                    <FieldLabel help={capitalHelpText}>Capital to deploy</FieldLabel>
-                    <input aria-label="Capital to deploy" inputMode="decimal" value={form.capital} onChange={(event) => updateForm('capital', event.target.value)} />
-                  </label>
-                )}
                 <label className="field">
                   <FieldLabel help={requiredHelp.horizon}>Horizon</FieldLabel>
                   <select aria-label="Horizon" value={form.horizon} onChange={(event) => updateForm('horizon', event.target.value as Horizon)}>
@@ -5656,12 +5730,9 @@ function App() {
                     ))}
                   </select>
                 </label>
-                <label className="toggle-field holding-toggle-field">
-                  <input checked={form.alreadyHold} type="checkbox" onChange={(event) => updateForm('alreadyHold', event.target.checked)} />
-                  <span className="toggle-copy">
-                    Already holding
-                    <HelpTip text={requiredHelp.alreadyHold} />
-                  </span>
+                <label className="field">
+                  <FieldLabel help={capitalHelpText}>{isHoldingReview ? 'Add-more capital' : 'Capital to deploy'}</FieldLabel>
+                  <input aria-label={isHoldingReview ? 'Add-more capital' : 'Capital to deploy'} inputMode="decimal" value={form.capital} onChange={(event) => updateForm('capital', event.target.value)} />
                 </label>
               </div>
 
@@ -5670,7 +5741,6 @@ function App() {
                   <label className="field">
                     <FieldLabel help={boughtOnHelpText}>Bought on</FieldLabel>
                     <input type="date" value={form.boughtOn} onChange={(event) => updateForm('boughtOn', event.target.value)} />
-                    {boughtOnPrompt && <span className="field-note warning-note">{boughtOnPrompt}</span>}
                   </label>
                   <label className="field">
                     <FieldLabel help={requiredHelp.quantity}>Quantity</FieldLabel>
@@ -5679,10 +5749,6 @@ function App() {
                   <label className="field">
                     <FieldLabel help={requiredHelp.averagePrice}>Average price</FieldLabel>
                     <input inputMode="decimal" value={form.averagePrice} onChange={(event) => updateForm('averagePrice', event.target.value)} />
-                  </label>
-                  <label className="field">
-                    <FieldLabel help={capitalHelpText}>Add-more capital</FieldLabel>
-                    <input inputMode="decimal" value={form.capital} onChange={(event) => updateForm('capital', event.target.value)} />
                   </label>
                 </div>
               )}
@@ -5810,23 +5876,6 @@ function App() {
             </CollapsibleSection>
 
             <CollapsibleSection className="panel evidence-panel" description="Overrides for missing data, stale data, or a specific exit/target plan." eyebrow="Optional" id="optional-heading" title="Guardrails">
-
-              <div className="auto-evidence-panel">
-                <div>
-                  <span className="eyebrow">Auto-filled company evidence</span>
-                  <p>Loaded from market/company data when available. Manual values below override only what you choose.</p>
-                </div>
-                <div className="auto-evidence-grid">
-                  {companyEvidenceCards.map((card) => (
-                    <article className={`auto-evidence-card tone-${card.tone}`} key={card.label}>
-                      <span>{card.label}</span>
-                      <strong>{card.value}</strong>
-                      <small>{card.source}</small>
-                    </article>
-                  ))}
-                </div>
-              </div>
-
               <div className="form-grid three risk-anchor-grid">
                 <label className="field">
                   <FieldLabel help={optionalHelp.manualLtp}>Manual LTP</FieldLabel>
@@ -5842,14 +5891,7 @@ function App() {
                 </label>
               </div>
 
-              <CollapsibleSection
-                className="manual-overrides-panel nested-collapse"
-                headingClassName="subsection-heading"
-                headingLevel={3}
-                id="manual-company-overrides-heading"
-                title="Manual company-data overrides"
-                description="Use only when the refreshed data is missing, stale, or you want to test a conservative scenario."
-              >
+              <CollapsibleSection className="manual-overrides-panel nested-collapse" headingClassName="subsection-heading" headingLevel={3} id="manual-company-overrides-heading" title="Company overrides">
                 <div className="form-grid three">
                   <label className="field">
                     <FieldLabel help={optionalHelp.marketCapCr}>Override market cap, cr</FieldLabel>
@@ -5914,7 +5956,7 @@ function App() {
         <>
           <CollapsibleSection
             action={
-              <div className="score-box">
+              <div className="score-box" style={percentStyle(analysis.score, '--score')}>
                 <strong>{analysis.score}</strong>
                 <span>/100</span>
               </div>
@@ -5952,10 +5994,10 @@ function App() {
             {boughtOnPrompt ? (
               <div className="verdict-summary verdict-inline-warning prompt-warning">
                 <p>
-                  <strong>Holding-period context missing:</strong> {boughtOnPrompt}
+                  <strong>Holding period:</strong> Bought date missing; add for exit context.
                 </p>
                 <button className="secondary-action" type="button" onClick={() => setView('setup')}>
-                  Add bought date
+                  Add date
                 </button>
               </div>
             ) : null}
@@ -5983,7 +6025,7 @@ function App() {
                     <span>P&L %</span>
                     <strong className={(analysis.positionPnl ?? 0) >= 0 ? 'positive' : 'negative'}>{formatPercent(analysis.positionPnlPct)}</strong>
                   </div>
-                  <div className={`metric tone-${portfolioWeightTone}`}>
+                  <div className="metric tone-neutral">
                     <span>Weight</span>
                     <strong>{formatPercent(analysis.portfolioWeight)}</strong>
                   </div>
@@ -6180,11 +6222,6 @@ function App() {
       {view === 'coach' ? (
         <>
           <CollapsibleSection
-            action={
-              <button type="button" onClick={() => void generateAiCoachReview(llmScope)} disabled={llmState === 'refreshing' || !decisionSymbol}>
-                {llmState === 'refreshing' ? 'Generating...' : llmResponse?.review ? 'Regenerate Review' : 'Generate AI Review'}
-              </button>
-            }
             className="parent-section ai-coach-section"
             defaultOpen
             description="Choose a coaching focus: price action, business quality, or the final decision."
@@ -6212,6 +6249,12 @@ function App() {
                   <HelpTip text={option.help} />
                 </button>
               ))}
+            </div>
+
+            <div className="ai-coach-review-action">
+              <button type="button" onClick={() => void generateAiCoachReview(llmScope)} disabled={llmState === 'refreshing' || !decisionSymbol}>
+                {llmState === 'refreshing' ? 'Generating...' : llmResponse?.review ? 'Regenerate Review' : 'Generate AI Review'}
+              </button>
             </div>
 
             {llmMessage && (
@@ -6318,8 +6361,18 @@ function App() {
                         {chartTimeframes[timeframe].label}
                       </button>
                     ))}
+                    <button
+                      className={chartZoomLevel === 1 ? 'active' : ''}
+                      type="button"
+                      onClick={() => {
+                        setChartZoomLevel(1)
+                        setChartWindowEnd(null)
+                      }}
+                    >
+                      Full
+                    </button>
                   </div>
-                  <span className="chart-zoom-pill">{chartZoomLabel}</span>
+                  {chartZoomLevel > 1 && <span className="chart-zoom-pill">{chartZoomLabel}</span>}
                   <div className="indicator-switches" aria-label="Chart indicators">
                     {commonIndicatorKeys.map((indicator) => (
                       <button
@@ -7130,12 +7183,12 @@ function App() {
         <>
           <CollapsibleSection
             className="parent-section fundamental-section"
-            description="Business model, valuation, margins, balance sheet, cash flow, and recent company updates."
+            description="Business, ratios, filings, and quality checks."
             eyebrow="Fundamental analysis"
             headingClassName="section-heading collapsible-section-heading"
             id="fundamental-heading"
             staticOpen
-            title="Fundamental Analysis"
+            title="Company"
           >
             <div className="visual-grid fundamental-grid">
               {!activeFundamentals && (
@@ -7157,11 +7210,10 @@ function App() {
               <CollapsibleSection
                 className="sub-panel nested-collapse analysis-subsection"
                 defaultOpen
-                description="Business profile, valuation ratios, balance-sheet clues, cash-flow clues, and recent exchange/company updates."
                 headingClassName="subsection-heading"
                 headingLevel={3}
                 id="fundamental-company-heading"
-                title="Company Snapshot, Evidence, and Updates"
+                title="Snapshot"
               >
                 <div className="visual-grid subsection-card-grid fundamental-subgrid">
               <article className="visual-card company-profile-card">
@@ -7195,9 +7247,9 @@ function App() {
               <article className="visual-card company-ratio-card">
                 <div className="visual-card-heading refined-heading">
                   <div>
-                    <span className="mini-label">Fundamental evidence</span>
-                    <h3>Valuation, Profitability, Debt, Cash</h3>
-                    <p className="heading-subtext">Synced ratios are quick evidence; final decisions still need filings, peers, and history.</p>
+                    <span className="mini-label">Evidence</span>
+                    <h3>Ratios</h3>
+                    <p className="heading-subtext">Use synced ratios as a quick read, then confirm important items from filings.</p>
                   </div>
                   <strong>{activeFundamentals ? `${companyRatioFacts.filter((fact) => fact.value !== '-').length}/${companyRatioFacts.length}` : '0'}</strong>
                 </div>
@@ -7231,9 +7283,9 @@ function App() {
               <article className="visual-card company-updates-card">
                 <div className="visual-card-heading refined-heading">
                   <div>
-                    <span className="mini-label">Company updates</span>
-                    <h3>Top 3 Important Updates</h3>
-                    <p className="heading-subtext">Recent filings translated into plain English: what changed, why it matters, and how price may react.</p>
+                    <span className="mini-label">Updates</span>
+                    <h3>Recent filings</h3>
+                    <p className="heading-subtext">What changed, why it matters, and possible price impact.</p>
                   </div>
                   <strong>{companyUpdates.length ? 'Review impact' : 'None found'}</strong>
                 </div>
@@ -7273,18 +7325,17 @@ function App() {
               <CollapsibleSection
                 className="sub-panel nested-collapse analysis-subsection"
                 defaultOpen
-                description="Business-quality read, statement flow, and due-diligence checks that explain whether the company can support future price strength."
                 headingClassName="subsection-heading"
                 headingLevel={3}
                 id="fundamental-quality-heading"
-                title="Financial Quality and Due Diligence"
+                title="Quality"
               >
                 <div className="visual-grid subsection-card-grid fundamental-subgrid fundamental-quality-grid">
               <article className={`visual-card fundamental-score-card tone-${fundamentalScore >= 70 ? 'positive' : fundamentalScore < 40 ? 'negative' : 'neutral'}`}>
                 <div className="visual-card-heading">
                   <div>
                     <span className="mini-label">Company quality</span>
-                    <h3>Business Quality Wheel</h3>
+                    <h3>Quality score</h3>
                   </div>
                   <strong>{fundamentalScore}/100</strong>
                 </div>
@@ -7313,7 +7364,7 @@ function App() {
                 <div className="visual-card-heading">
                   <div>
                     <span className="mini-label">Financial statements</span>
-                    <h3>P&L to Intrinsic Value Flow</h3>
+                    <h3>Statement flow</h3>
                   </div>
                   <strong>4 steps</strong>
                 </div>
@@ -7335,7 +7386,7 @@ function App() {
                 <div className="visual-card-heading">
                   <div>
                     <span className="mini-label">Due diligence</span>
-                    <h3>Annual Report Checklist</h3>
+                    <h3>Checklist</h3>
                   </div>
                   <strong>{fundamentalChecklist.length} checks</strong>
                 </div>
@@ -7431,6 +7482,10 @@ function App() {
           <CollapsibleSection
             action={
               <div className="data-action-row">
+                <div className={`cache-pill portfolio-cache-pill ${cacheState}`}>
+                  <span>{cacheLabel(cacheState)}</span>
+                  <strong>{cacheAge(activeSnapshot.generated_at)}</strong>
+                </div>
                 <button
                   type="button"
                   onClick={() => void refreshFreeData({ source: 'data' })}
@@ -7618,14 +7673,14 @@ function App() {
                                 {row.canAnalyze ? 'Analyze' : 'Needs mapping'}
                               </button>
                             </td>
-                            <td>{holding ? formatNumber(holding.quantity) : '-'}</td>
-                            <td>{holding ? formatInr(holding.average_price) : '-'}</td>
+                            <td>{holding ? formatNumber(holding.quantity) : <span className="muted-placeholder">n/a</span>}</td>
+                            <td>{holding ? formatInr(holding.average_price) : <span className="muted-placeholder">n/a</span>}</td>
                             <td>{formatInr(ltp)}</td>
                             <td>{formatInr(prevClose)}</td>
                             <td className={row.changePct === undefined ? '' : row.changePct >= 0 ? 'positive' : 'negative'}>{formatPercent(row.changePct)}</td>
-                            <td>{holding ? formatInr(holdingValue(holding)) : '-'}</td>
-                            <td className={pnl === undefined ? '' : pnl >= 0 ? 'positive' : 'negative'}>{pnl === undefined ? '-' : formatInr(pnl)}</td>
-                            <td className={pnlPct === undefined ? '' : pnlPct >= 0 ? 'positive' : 'negative'}>{formatPercent(pnlPct)}</td>
+                            <td>{holding ? formatInr(holdingValue(holding)) : <span className="muted-placeholder">n/a</span>}</td>
+                            <td className={pnl === undefined ? '' : pnl >= 0 ? 'positive' : 'negative'}>{pnl === undefined ? <span className="muted-placeholder">n/a</span> : formatInr(pnl)}</td>
+                            <td className={pnlPct === undefined ? '' : pnlPct >= 0 ? 'positive' : 'negative'}>{pnlPct === undefined ? <span className="muted-placeholder">n/a</span> : formatPercent(pnlPct)}</td>
                             <td>{formatNumber(quote?.volume)}</td>
                             <td>{row.candleCount}</td>
                             <td><span className={`data-status-pill ${row.source}`}>{row.status}</span></td>
@@ -7635,6 +7690,99 @@ function App() {
                     )}
                   </tbody>
                   </table>
+                </div>
+                <div className="portfolio-mobile-card-list" aria-label="Mobile holdings and market data cards">
+                  {marketRows.length === 0 ? (
+                    <p className="empty-table-cell">Sync market data or upload holdings to populate this table.</p>
+                  ) : (
+                    marketRows.map((row) => {
+                      const holding = row.holding
+                      const quote = row.quote
+                      const invested = holding ? (holding.average_price ?? 0) * (holding.quantity ?? 0) : undefined
+                      const pnl = holding?.pnl
+                      const pnlPct = invested && pnl !== undefined ? (pnl / invested) * 100 : undefined
+                      const ltp = quote?.last_price ?? holding?.last_price
+                      const prevClose = quote?.ohlc?.close
+                      const rowLabel = holding ? 'Portfolio holding' : 'Market data row'
+                      return (
+                        <article className="portfolio-mobile-card" key={`mobile-${row.symbol}`}>
+                          <div className="portfolio-mobile-card-head">
+                            <div>
+                              <span>{rowLabel}</span>
+                              <strong>{row.symbol}</strong>
+                            </div>
+                            <div className="portfolio-mobile-price">
+                              <strong>{formatInr(ltp)}</strong>
+                              <small className={row.changePct === undefined ? '' : row.changePct >= 0 ? 'positive' : 'negative'}>{formatPercent(row.changePct)}</small>
+                            </div>
+                          </div>
+                          <dl className="portfolio-mobile-facts">
+                            <div>
+                              <dt>Qty</dt>
+                              <dd>{holding ? formatNumber(holding.quantity) : <span className="muted-placeholder">n/a</span>}</dd>
+                            </div>
+                            <div>
+                              <dt>Avg</dt>
+                              <dd>{holding ? formatInr(holding.average_price) : <span className="muted-placeholder">n/a</span>}</dd>
+                            </div>
+                            <div>
+                              <dt>Prev close</dt>
+                              <dd>{formatInr(prevClose)}</dd>
+                            </div>
+                            <div>
+                              <dt>Value</dt>
+                              <dd>{holding ? formatInr(holdingValue(holding)) : <span className="muted-placeholder">n/a</span>}</dd>
+                            </div>
+                            <div>
+                              <dt>P&L</dt>
+                              <dd className={pnl === undefined ? '' : pnl >= 0 ? 'positive' : 'negative'}>{pnl === undefined ? <span className="muted-placeholder">n/a</span> : formatInr(pnl)}</dd>
+                            </div>
+                            <div>
+                              <dt>P&L %</dt>
+                              <dd className={pnlPct === undefined ? '' : pnlPct >= 0 ? 'positive' : 'negative'}>{pnlPct === undefined ? <span className="muted-placeholder">n/a</span> : formatPercent(pnlPct)}</dd>
+                            </div>
+                            <div>
+                              <dt>Volume</dt>
+                              <dd>{formatNumber(quote?.volume)}</dd>
+                            </div>
+                            <div>
+                              <dt>Candles</dt>
+                              <dd>{row.candleCount}</dd>
+                            </div>
+                          </dl>
+                          <div className="portfolio-mobile-card-actions">
+                            <span className={`data-status-pill ${row.source}`}>{row.status}</span>
+                            <button
+                              className="table-button"
+                              disabled={!row.canAnalyze}
+                              title={row.canAnalyze ? undefined : 'Unlisted holdings need a valid NSE or BSE symbol before analysis.'}
+                              type="button"
+                              onClick={() => {
+                                if (holding) {
+                                  analyzeHolding(holding)
+                                  return
+                                }
+                                const [exchangeRaw, tickerRaw = ''] = row.symbol.split(':')
+                                if (exchangeRaw !== 'NSE' && exchangeRaw !== 'BSE') return
+                                setForm((current) => ({
+                                  ...current,
+                                  alreadyHold: false,
+                                  averagePrice: '',
+                                  boughtOn: '',
+                                  exchange: exchangeRaw,
+                                  quantity: '',
+                                  ticker: tickerRaw,
+                                }))
+                                setView('verdict')
+                              }}
+                            >
+                              {row.canAnalyze ? 'Analyze' : 'Needs mapping'}
+                            </button>
+                          </div>
+                        </article>
+                      )
+                    })
+                  )}
                 </div>
               </section>
             </section>

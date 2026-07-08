@@ -9,60 +9,64 @@
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   --display-font: "Aptos Display", "Aptos", "Avenir Next", "Segoe UI Variable Display", "Segoe UI", -apple-system, BlinkMacSystemFont, ui-sans-serif, system-ui, sans-serif;
-  --page-bg: #080c14;
-  --surface: rgba(14, 21, 33, 0.9);
-  --surface-2: rgba(18, 28, 43, 0.9);
-  --surface-3: rgba(9, 14, 23, 0.96);
-  --surface-soft: rgba(48, 63, 84, 0.5);
-  --text-primary: #f4f7fb;
-  --text-secondary: #b7c2d3;
-  --text-muted: #8391a6;
-  --border: rgba(124, 148, 183, 0.18);
-  --border-strong: rgba(128, 156, 197, 0.34);
-  --control-bg: rgba(11, 17, 28, 0.88);
-  --control-bg-hover: rgba(30, 43, 62, 0.9);
-  --accent: #56a0ff;
-  --accent-strong: #3f86f4;
-  --positive: #31d6a1;
-  --positive-soft: rgba(49, 214, 161, 0.13);
-  --negative: #ff6b87;
-  --negative-soft: rgba(255, 107, 135, 0.13);
-  --warning: #f6be4f;
-  --warning-soft: rgba(246, 190, 79, 0.13);
-  --info-soft: rgba(75, 141, 255, 0.14);
-  --shadow: 0 24px 70px rgba(0, 0, 0, 0.36);
-  --shadow-soft: 0 14px 32px rgba(0, 0, 0, 0.2);
-  --panel-bg: rgba(15, 24, 38, 0.82);
-  --tile-bg: rgba(12, 19, 31, 0.76);
+  --page-bg: #17140f;
+  --surface: #1e2022;
+  --surface-2: #1e2022;
+  --surface-3: #1a1b1d;
+  --surface-soft: #24211f;
+  --text-primary: #d9dadb;
+  --text-secondary: #9a9c9e;
+  --text-muted: #736c60;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.14);
+  --control-bg: #1b1b1c;
+  --control-bg-hover: #24211f;
+  --accent: #e0835a;
+  --accent-strong: #e0835a;
+  --on-accent: #201005;
+  --active-bg: #24211f;
+  --positive: #36a66f;
+  --positive-soft: rgba(54, 166, 111, 0.12);
+  --negative: #d85b50;
+  --negative-soft: rgba(216, 91, 80, 0.12);
+  --warning: #c58a32;
+  --warning-soft: rgba(197, 138, 50, 0.14);
+  --info-soft: rgba(224, 131, 90, 0.1);
+  --shadow: none;
+  --shadow-soft: none;
+  --panel-bg: #1e2022;
+  --tile-bg: #1e2022;
 }
 
 :root[data-theme='light'] {
   color-scheme: light;
-  --page-bg: #e5edf5;
-  --surface: rgba(255, 255, 255, 0.86);
-  --surface-2: rgba(248, 251, 255, 0.9);
-  --surface-3: rgba(255, 255, 255, 0.96);
-  --surface-soft: rgba(216, 228, 240, 0.82);
-  --text-primary: #121923;
-  --text-secondary: #415167;
-  --text-muted: #6e7d91;
-  --border: rgba(79, 101, 128, 0.2);
-  --border-strong: rgba(76, 100, 132, 0.32);
-  --control-bg: rgba(255, 255, 255, 0.9);
-  --control-bg-hover: #f3f7fc;
-  --accent: #3478f6;
-  --accent-strong: #235ec7;
-  --positive: #128763;
-  --positive-soft: rgba(18, 135, 99, 0.1);
-  --negative: #c3314f;
-  --negative-soft: rgba(195, 49, 79, 0.1);
-  --warning: #9a610f;
-  --warning-soft: rgba(154, 97, 15, 0.11);
-  --info-soft: rgba(52, 120, 246, 0.1);
-  --shadow: 0 24px 60px rgba(45, 64, 88, 0.12);
-  --shadow-soft: 0 12px 28px rgba(45, 64, 88, 0.08);
-  --panel-bg: rgba(255, 255, 255, 0.72);
-  --tile-bg: rgba(255, 255, 255, 0.68);
+  --page-bg: #f5f2ec;
+  --surface: #ffffff;
+  --surface-2: #ffffff;
+  --surface-3: #f8f5ef;
+  --surface-soft: #fbe4d8;
+  --text-primary: #201e1a;
+  --text-secondary: #6b6660;
+  --text-muted: #a39c8e;
+  --border: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.14);
+  --control-bg: #ffffff;
+  --control-bg-hover: #fbe4d8;
+  --accent: #b8623a;
+  --accent-strong: #e0835a;
+  --on-accent: #fffaf6;
+  --active-bg: #fbe4d8;
+  --positive: #2f8f5b;
+  --positive-soft: rgba(47, 143, 91, 0.1);
+  --negative: #c94a3f;
+  --negative-soft: rgba(201, 74, 63, 0.1);
+  --warning: #b8791f;
+  --warning-soft: rgba(184, 121, 31, 0.11);
+  --info-soft: rgba(224, 131, 90, 0.1);
+  --shadow: none;
+  --shadow-soft: none;
+  --panel-bg: #ffffff;
+  --tile-bg: #ffffff;
 }
 
 * {
@@ -71,17 +75,12 @@
 
 html {
   min-width: 320px;
-  background:
-    linear-gradient(rgba(93, 139, 203, 0.035) 1px, transparent 1px) 0 0 / 100% 72px,
-    linear-gradient(90deg, rgba(93, 139, 203, 0.026) 1px, transparent 1px) 0 0 / 72px 100%,
-    var(--page-bg);
+  background: var(--page-bg);
 }
 
 body {
   min-width: 320px;
   min-height: 100vh;
   margin: 0;
-  background:
-    linear-gradient(180deg, rgba(86, 160, 255, 0.055), transparent 360px),
-    var(--page-bg);
+  background: var(--page-bg);
 }
