@@ -13859,17 +13859,31 @@ table th {
 }
 
 /* --- AI Coach: compact header controls ------------------------------------------ */
+.ai-coach-section > .section-heading.collapsible-section-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  column-gap: 18px;
+}
+
+.ai-coach-section > .section-heading.collapsible-section-heading > .collapsible-action {
+  justify-self: end;
+  align-self: start;
+  padding-top: 24px;
+}
+
 .ai-coach-header-controls {
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 10px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   min-width: 0;
 }
 
 .ai-coach-header-controls .ai-coach-mode-segmented {
   display: inline-flex;
+  flex-wrap: nowrap;
   gap: 4px;
   margin: 0;
   padding: 4px;
@@ -13895,9 +13909,23 @@ table th {
 }
 
 @media (max-width: 760px) {
+  .ai-coach-section > .section-heading.collapsible-section-heading {
+    grid-template-columns: 1fr;
+  }
+
+  .ai-coach-section > .section-heading.collapsible-section-heading > .collapsible-action {
+    justify-self: stretch;
+    padding-top: 0;
+  }
+
   .ai-coach-header-controls {
     justify-content: flex-start;
+    flex-wrap: wrap;
     width: 100%;
+  }
+
+  .ai-coach-header-controls .ai-coach-mode-segmented {
+    flex-wrap: wrap;
   }
 }
 

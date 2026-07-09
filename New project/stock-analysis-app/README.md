@@ -1,198 +1,254 @@
-# Stock Analysis Agent
+# Fund Analyser
 
-Stock Analysis Agent is a browser-based NSE/BSE decision workstation for personal stock analysis. It combines manual inputs, delayed/free market data, uploaded portfolio holdings, company fundamentals, chart evidence, risk sizing, and practical trading rules into a structured verdict such as Needs Input, Watch, Buy, Hold and Watch, Reduce, or Avoid.
+Fund Analyser is a browser-based NSE/BSE research workstation for personal stock and portfolio analysis. It turns a ticker, price context, portfolio holding details, chart structure, company fundamentals, risk preferences, and practical trading rules into a structured decision: what the app thinks, why it thinks that, what to do next, and what to avoid.
 
-The app is built with React, TypeScript, and Vite. Most of the decision engine runs directly in the browser; an optional local Python bridge in the sibling `scripts/` folder supplies delayed market data, holdings upload parsing, and AI Coach requests.
+The app is built with React, TypeScript, Vite, and `lightweight-charts`. Most analysis runs in the browser. An optional Python bridge in the sibling `scripts/` folder fetches delayed/free market data, parses Zerodha-style holdings uploads, resolves symbol mappings, and proxies AI Coach calls without exposing provider secrets in the frontend.
 
-This is an educational decision-support tool, not financial advice and not a trading or order-execution platform.
+This is an educational decision-support tool. It is not investment advice, a live data terminal, or an order execution system.
 
-## What The App Does
+## What It Does
 
-- Builds a stock-specific verdict from ticker, exchange, investment horizon, holding status, prices, quantity, average price, target, invalidation level, risk profile, company evidence, and portfolio context.
-- Separates two workflows: fresh entry analysis and already-held position review.
-- Scores chart, company, portfolio, risk, statement-flow, update/event, and process evidence.
-- Shows what to do next, what to avoid, what evidence matters most, and which missing data weakens confidence.
-- Explains the verdict through visible reasoning steps rather than hiding the answer inside a black box.
-- Lets you upload a Zerodha-style holdings XLSX file and analyze each row with current quote and portfolio-weight context.
-- Stores the active workspace in the browser so the app can recover after refresh without needing a backend account.
-- Supports manual overrides so missing or weak public data can be corrected by the user.
-- Includes an optional AI Coach that explains the generated verdict, chart evidence, or company evidence in plain English through the local bridge.
+- Analyses NSE/BSE tickers for fresh-entry decisions and existing-holding reviews.
+- Builds a verdict from price action, company quality, statement flow, portfolio exposure, risk controls, user preferences, and data confidence.
+- Calculates position P&L, portfolio weight, capital-at-risk, suggested sizing, invalidation level, target/reward-risk, and add-more discipline.
+- Shows interactive candlestick charts with indicators, pattern markers, volume, range lines, RSI, MACD, ATR, Bollinger Bands, VWAP, moving averages, and scenario forecasts.
+- Presents dense evidence through swipeable flashcard decks so the page stays compact on small screens.
+- Lets you upload a Zerodha holdings XLSX file, sync market data, analyse each holding, and resolve missing mappings.
+- Stores workspace state in the browser so the current form, portfolio snapshot, and data window survive refreshes.
+- Offers an optional AI Coach that explains the app's chart, company, or final verdict in plain English through the local bridge.
+- Includes a reasoning audit trail and glossary so every verdict can be inspected.
 
-## Main Tabs
+## Main Workflow
+
+1. Open the Start tab and fill the Research Brief.
+2. Choose whether this is a fresh entry or an already-held position.
+3. Enter the ticker, exchange, horizon, capital or add-more capital, and optional holding details.
+4. Add risk controls such as invalidation price, target price, max risk, risk profile, market access, and personal filters.
+5. Click Analyse in the header to refresh/load evidence through the bridge when available.
+6. Read the Decision tab first, then use Chart, Company, Portfolio, AI Coach, Reasoning, and Glossary for deeper context.
+
+## Workspace Tabs
 
 ### Start
 
-The Start tab is where the analysis context is created.
+The Start tab is the input workspace. It is currently titled Research Brief.
 
-It includes:
+It captures:
 
-- Ticker and exchange selection.
+- Ticker and exchange.
 - Investment horizon.
-- Already holding mode for existing positions.
-- Quantity, average price, bought date, and add-more capital fields when relevant.
-- Optional risk preferences such as avoiding high debt, small caps, low liquidity, intraday/swing behavior, and averaging down.
-- Company override fields for profile and fundamentals when public data is missing or needs correction.
-- A research brief section that summarizes the current form values for quick review or copying.
+- Fresh-entry capital or add-more capital.
+- Already holding mode.
+- Bought date, quantity, and average price for holding reviews.
+- Risk profile and market-access mode.
+- History window for market-data refresh.
+- Manual LTP, invalidation price, and target price.
+- Company overrides for market cap, debt/equity, ROCE, P/E, and profit trend.
+- Personal filters such as avoid high debt, avoid small caps, avoid low liquidity, no intraday/swing, and no averaging losers.
+- Thesis or report notes.
 
-The Start tab is designed to be usable with minimal input, while still allowing detailed overrides when a stock needs manual correction.
+The Copy brief button copies the current research context so it can be reviewed or pasted elsewhere.
 
 ### Decision
 
-The Decision tab is the main answer page.
+The Decision tab is the answer page.
 
 It shows:
 
-- Final verdict label and score.
-- Confidence level and missing-data warnings.
-- Price used for the decision.
-- P&L and portfolio-weight context for existing holdings.
-- Practical next actions.
-- Moves to avoid.
-- Key reasons behind the answer.
-- Risk controls such as invalidation level, position sizing, and add-more discipline.
-- Evidence cards grouped by technicals, fundamentals, portfolio, and process.
+- Verdict and score out of 100.
+- Data confidence.
+- Ticker, LTP, capital, quantity plan, risk budget, exit line, reward/risk, P&L, and portfolio weight depending on decision mode.
+- Buy plan and exit discipline for fresh entries.
+- Next actions, avoid-list, and why-this-answer guidance.
+- Price drivers behind the answer.
+- Metric clue flashcards grouped by technical, fundamental, statement, news, risk, and process signals.
+- Missing-data warnings when the app cannot produce a high-confidence answer.
 
-For existing positions, the decision logic focuses on whether to hold, reduce, watch, or avoid adding more. For fresh entries, it focuses on whether the setup justifies new capital.
+The app intentionally separates "Needs Input" from negative verdicts. Missing data means the evidence is incomplete, not automatically that the stock is bad.
 
 ### Chart
 
-The Chart tab turns price history into a practical price map.
+The Chart tab is an interactive technical analysis workspace.
 
-It includes:
+It uses `src/PriceChart.tsx` and `lightweight-charts` for:
 
-- Candlestick chart with multiple time windows.
-- Moving averages such as SMA and EMA.
-- VWAP, Bollinger Bands, volume, range, RSI, MACD, ATR, and pattern overlays.
-- Support/resistance style chart context.
-- Volatility and liquidity checks.
-- Scenario forecast modes such as adaptive hybrid, technical range, fundamental valuation, and custom scenario.
-- Bear, base, and bull case projections.
+- Candlestick rendering.
+- Hover/crosshair OHLC legend.
+- Fit-to-view reset.
+- 1D, 1M, 3M, 6M, 1Y, and All time windows.
+- SMA 20/50/100/200.
+- EMA 20/50.
+- VWAP.
+- Bollinger Bands.
+- Volume histogram.
+- Range high/low lines.
+- RSI 14 pane.
+- MACD pane.
+- ATR 14 pane.
+- Candlestick pattern markers.
+- Bear/base/bull scenario forecast lines.
 
-The chart is not meant to predict with certainty. It helps frame the price path, risk zone, and conditions that would improve or weaken the setup.
+The tab also includes:
+
+- Scenario Forecast controls with adaptive, technical, fundamental, and custom modes.
+- Forecast horizon controls from 5 trading days to 10 years.
+- Optional assumptions for volatility, trend influence, fundamental growth, valuation rerating, event risk, and custom annual returns.
+- Detected pattern flashcards explaining how to spot, interpret, use, and invalidate candle patterns.
+- A chart-reading guide for non-intraday trading.
+- Position, risk, range, liquidity, and business-filter flashcards.
+
+Chart output is designed for delayed end-of-day analysis, not live intraday execution.
 
 ### Company
 
-The Company tab focuses on the business behind the stock.
+The Company tab is the fundamental analysis workspace.
 
 It includes:
 
-- Company name, sector, industry, country, and employee count when available.
-- Valuation metrics such as market cap, trailing P/E, forward P/E, price/book, and dividend yield.
-- Profitability metrics such as ROE, ROCE, ROA, profit margin, gross margin, and operating margin.
-- Balance-sheet metrics such as debt/equity and current ratio.
-- Cash-flow and growth metrics such as FCF, revenue, net profit, operating cash flow, revenue growth, and earnings growth.
-- Statement-flow summaries for P&L, balance sheet, cash flow, and valuation.
-- Business-quality scoring.
-- Sector-aware operating rules from the local trading knowledge catalogue.
-- Notes for missing or weak company evidence.
+- Company profile and business summary.
+- Sector, industry, country, employee count, and source information when available.
+- Ratio flashcards grouped by valuation, profitability, balance sheet, cash conversion, growth, and shareholder return.
+- Recent filing/update cards with business meaning and possible price effect.
+- Business quality score.
+- Statement flow for P&L, balance sheet, cash flow, and valuation.
+- Due-diligence checklist.
+- Missing-fundamentals callout when the bridge could not fetch Screener/Yahoo-backed company data.
 
-Manual company overrides from the Start tab can fill or correct this evidence before it is used by the verdict engine.
+The app auto-fills blank company override fields from fetched fundamentals when available, while still letting the user edit those values.
 
 ### Portfolio
 
-The Portfolio tab handles holdings and market-data coverage.
+The Portfolio tab handles holdings, quotes, sync status, and diagnostics.
 
-It includes:
+It supports:
 
-- Zerodha-style holdings XLSX upload.
-- Browser-local portfolio table.
-- Portfolio snapshot, current value, P&L, return, and row-level quote information.
-- Row-level Analyze actions that load a holding into the analysis flow.
-- Latest price, previous close, change, value, volume, candles, and data-quality status.
-- Missing-data resolver and symbol-map update flow.
-- Market data refresh controls.
-- Clear/upload reset controls.
+- Zerodha-style XLSX holdings upload.
+- Portfolio snapshot, current value, P&L, return, and loaded holdings count.
+- Combined holdings and market-data table.
+- Mobile-friendly portfolio cards.
+- Row-level Analyze actions.
+- Sync Market Data flow with progress.
+- Remove uploaded feed.
+- Quote, candle, volume, previous close, data status, and P&L columns.
+- Missing Data Resolver for symbols that need mapping, retry, or unsupported marking.
+- Symbol mapping upsert through the bridge.
+- Connection diagnostics and copyable commands.
 
-Uploaded holdings are treated as private local data. They are parsed through the local bridge and cached for browser-local use; they are not meant to be committed to the repository.
+Uploaded holdings are personal financial data. Treat them as local/private and do not commit generated cache or holdings files.
 
 ### AI Coach
 
-The AI Coach explains the app output in a more conversational way.
+The AI Coach tab can explain the current analysis in three scopes:
 
-It has three focus modes:
+- Chart: price action, indicators, candles, patterns, liquidity, and volatility.
+- Company: business model, ratios, statements, filings, and missing evidence.
+- Verdict: final action, risk controls, what to do next, and what not to do.
 
-- Chart: explains price action, indicators, candles, volatility, liquidity, support/resistance, and possible next moves.
-- Company: explains business model, ratios, statements, updates, and data gaps.
-- Verdict: explains the final action, risk controls, and evidence that matters most now.
-
-The AI Coach only works when the local bridge is configured with an LLM key. The key stays on the machine running the bridge and is never exposed in the browser bundle.
+AI Coach calls go through `POST /api/llm/verdict` on the Python bridge. LLM provider secrets stay on the bridge machine and must not be placed in `VITE_` variables.
 
 ### Reasoning
 
 The Reasoning tab is the audit trail.
 
-It shows the main decision steps used by the engine, including input checks, price context, capital at risk, technical evidence, company evidence, portfolio context, and final verdict construction.
+It shows:
+
+- Decision path steps.
+- Plain-English explanation.
+- Formula or interpretation for each step.
+- Rationale and takeaway.
+- Practical price checks from the trading-rule layer.
+- Positive signals and data freshness.
 
 ### Glossary
 
-The Glossary tab defines the finance, trading, portfolio, and app-specific terms used across the interface. It includes terms for chart indicators, valuation, risk, portfolio exposure, and AI Coach modes.
+The Glossary tab is a searchable term guide covering verdict terms, market data, chart structure, indicators, candlesticks, risk, sizing, portfolio concepts, fundamentals, statements, data quality, and AI Coach terms.
 
-## How The Decision Engine Works
+## How The Analysis Engine Works
 
-The core decision engine lives in `src/App.tsx` as `buildAnalysis(form, snapshot, cacheState)`.
+The core engine is `buildAnalysis(form, snapshot, cacheState)` in `src/App.tsx`.
 
-At a high level:
+Inputs:
 
-1. It normalizes the selected ticker, exchange, quote, holdings row, fundamentals, and cached market snapshot.
-2. It checks whether the request is a fresh-entry analysis or an already-held position review.
-3. It calculates price context, returns, volatility, volume, trend, RSI, MACD, ATR, VWAP, Bollinger position, and candle-pattern evidence.
-4. It reads company evidence such as valuation, profitability, leverage, margins, growth, cash flow, and statement-flow signals.
-5. It adds portfolio context such as position value, P&L, return, concentration, and portfolio weight.
-6. It applies user preferences, risk profile, invalidation level, target price, and add-more capital rules.
-7. It applies practical trading rules from `src/tradingKnowledge.ts`.
-8. It produces a score, tone, confidence, verdict, next actions, avoid-list, reasons, warnings, signal cards, and reasoning steps.
+- `AnalysisForm`: user-entered ticker, exchange, horizon, capital, holding details, risk controls, manual overrides, thesis, and filters.
+- `Snapshot`: provider name, generated time, symbols, quotes, candles, fundamentals, holdings, upload metadata, and provider errors.
+- `CacheState`: loading, live, free, or sample.
 
-The score is not treated as a standalone answer. The app pairs it with confidence, missing-data warnings, and concrete next actions.
+The engine:
+
+1. Normalizes ticker, exchange, quote key, holding row, candles, and fundamentals.
+2. Chooses fresh-entry mode or holding-review mode.
+3. Builds price and chart signals from LTP, previous close, trend, volatility, candle history, RSI, MACD, ATR, VWAP, Bollinger position, patterns, and liquidity.
+4. Builds company signals from market cap, valuation, profitability, leverage, margins, growth, cash flow, company updates, and statement summaries.
+5. Adds portfolio signals such as current value, invested value, P&L, P&L %, concentration, and portfolio weight.
+6. Applies risk controls such as risk budget, invalidation price, target price, reward/risk, max risk, and starter/suggested quantity.
+7. Applies practical trading and sector rules from `src/tradingKnowledge.ts`.
+8. Produces verdict, score, confidence, actions, positives, cautions, do/don't items, why items, signal cards, score components, trading lessons, and reasoning steps.
+
+Score tone currently follows these bands:
+
+- 62 and above: positive.
+- 43 to 61: neutral.
+- 42 and below: negative.
+
+The score is not the whole answer. The app pairs it with confidence, missing-data warnings, and action guidance.
 
 ## Data Sources
 
-The app can work from several sources:
+The app can run from manual inputs alone, but richer analysis uses the local bridge.
 
-- Manual inputs entered on the Start tab.
-- Manual company and price overrides entered by the user.
+Data can come from:
+
+- User-entered form values.
+- Manual LTP and company overrides.
 - Browser-local workspace cache.
 - Zerodha-style holdings XLSX uploads.
-- Free/delayed market-data refresh through the local Python bridge.
-- Yahoo Finance public chart and quote endpoints used by the bridge for end-of-day candles and best-effort company data.
-- Screener.in company pages/search used by the bridge as a free fallback for profile, ratios, statements, pros/cons, and due-diligence clues.
-- Local practical trading rules generated into `src/tradingKnowledge.ts`.
+- Yahoo Finance public endpoints for delayed/end-of-day candles and best-effort quote/company data.
+- Screener.in pages/search for company profile, ratios, statements, pros/cons, and updates.
+- Local symbol mapping data.
+- Generated trading and sector rules in `src/tradingKnowledge.ts`.
 
-Free data availability varies by symbol and exchange. Some mappings require manual correction through the app.
+Free public data is best effort. Availability varies by exchange, symbol, provider, and rate limits.
 
 ## Privacy And Local State
 
-- The React app runs client-side in the browser.
-- The active workspace is saved in `localStorage` under `verdict-workstation:browser-workspace:v1`.
-- Uploaded holdings are parsed by the local bridge and used to refresh market-data coverage.
-- LLM credentials are read only by the bridge from environment variables.
-- No LLM key is shipped to the browser.
-- Public deployments can host the static app, but upload, refresh, and AI Coach features need a reachable HTTPS bridge.
+- The frontend is a static browser app.
+- Workspace state is saved in `localStorage` under `verdict-workstation:browser-workspace:v1`.
+- Uploaded holdings are parsed by the bridge and copied into the local snapshot flow.
+- AI provider credentials are read only by the Python bridge.
+- `VITE_` variables are public at build time and must not contain secrets.
+- Public deployments need a separate HTTPS bridge if refresh, upload, mapping, or AI Coach should work outside localhost.
 
-## Local Development
+## Local Setup
 
-Requirements:
+Use Node.js `>=22.13.0`.
 
-- Node.js `>=22.13.0`
-- npm
-- Python 3 for the optional market-data bridge
-
-Install and run the app:
+Install dependencies:
 
 ```bash
 npm install
+```
+
+Start the Vite dev server:
+
+```bash
 npm run dev
 ```
 
-Run the app on the local network:
+Start a LAN-accessible dev server:
 
 ```bash
 npm run dev:lan
 ```
 
-Build and preview:
+Build the production bundle:
 
 ```bash
 npm run build
+```
+
+Preview the production bundle:
+
+```bash
 npm run preview
 ```
 
@@ -203,25 +259,29 @@ npm run lint
 npm run test
 ```
 
-## Optional Market-Data Bridge
+## Optional Data Bridge
 
-The bridge is in the sibling `scripts/` folder one level above this app directory.
+The bridge lives one directory above this app, in `../scripts`.
 
-From the parent `New project/` folder:
+From the parent `New project` directory:
 
 ```bash
 python3 scripts/market_data_server.py --host 127.0.0.1 --port 8787
 ```
 
-When the app runs on `localhost`, `127.0.0.1`, LAN, or `.local`, it will automatically try `http://<host>:8787`.
+By default, the app auto-detects the bridge at:
 
-For a hosted app or non-local bridge, set:
+```text
+http://<current-browser-host>:8787
+```
+
+For hosted or non-local bridge URLs, set this before building:
 
 ```bash
 VITE_MARKET_DATA_BASE_URL=https://your-bridge-url
 ```
 
-The bridge exposes the endpoints used by the app:
+Bridge endpoints used by the app:
 
 - `GET /api/free-data/latest`
 - `POST /api/free-data/refresh`
@@ -231,9 +291,19 @@ The bridge exposes the endpoints used by the app:
 - `POST /api/llm/verdict`
 - `POST /api/server/restart`
 
-## Optional AI Coach Configuration
+Related bridge scripts:
 
-Set these on the machine running `scripts/market_data_server.py`, either in the sibling `.env` file or in the shell:
+- `../scripts/market_data_server.py`: local HTTP bridge entrypoint.
+- `../scripts/free_data_server.py`: bridge server implementation.
+- `../scripts/free_data_refresh.py`: delayed/free market-data refresh.
+- `../scripts/market_data_refresh.py`: wrapper for refresh CLI usage.
+- `../scripts/holdings_parser.py`: Zerodha-style XLSX holdings parser.
+- `../scripts/kite_refresh.py`: optional Kite-related refresh script.
+- `../scripts/varsity_knowledge_refresh.py`: knowledge refresh utility.
+
+## Optional AI Coach Setup
+
+Set these on the machine running the bridge:
 
 ```bash
 LLM_API_KEY=...
@@ -243,39 +313,85 @@ LLM_TEMPERATURE=0.2
 LLM_TIMEOUT_SECONDS=45
 ```
 
-`OPENAI_API_KEY` and `OPENAI_MODEL` are also supported as fallback names. `LLM_BASE_URL` can point to any OpenAI-compatible provider.
+Fallback names are also supported:
 
-## Public Hosting
+- `OPENAI_API_KEY`
+- `OPENAI_MODEL`
 
-The app can be deployed as a static Vite build.
+`LLM_BASE_URL` can point to an OpenAI-compatible provider.
 
-Included hosting helpers:
+## Deployment
 
-- `vercel.json` builds with `npm run build` and serves `dist`.
-- `public/_redirects` supports single-page-app routing on static hosts.
-- `PUBLIC_HOSTING.md` contains more detailed public-hosting notes.
+The frontend can be deployed as a static Vite app.
 
-Important hosting note: the static app can be public, but market refresh, holdings upload, and AI Coach need a separately hosted HTTPS bridge and a `VITE_MARKET_DATA_BASE_URL` value at build time.
+If deploying this app from a larger repository, use this app directory as the frontend root:
 
-## Important Files
+```text
+New project/stock-analysis-app
+```
 
-- `src/App.tsx` - application state, views, scoring engine, formatters, market-data calls, portfolio flow, AI Coach flow, and exported test helpers.
-- `src/App.css` - visual system, responsive layout, navigation, cards, forms, tables, chart UI, and theme styling.
-- `src/tradingKnowledge.ts` - generated practical trading-rule catalogue and sector operating rules used by the analysis.
-- `src/__tests__/buildAnalysis.test.ts` - tests for formatting, score tones, default risk profile, fresh-entry analysis, and holding-review analysis.
-- `.env.example` - browser-facing bridge URL example.
-- `PUBLIC_HOSTING.md` - public deployment guide.
-- `../scripts/market_data_server.py` - local bridge entrypoint.
-- `../scripts/free_data_server.py` - bridge server implementation.
-- `../scripts/free_data_refresh.py` - free end-of-day market-data refresh logic.
-- `../scripts/holdings_parser.py` - Zerodha-style holdings XLSX parser.
+Build command:
+
+```bash
+npm run build
+```
+
+Output directory:
+
+```text
+dist
+```
+
+Included hosting files:
+
+- `vercel.json`: Vercel build/output configuration and SPA rewrite.
+- `public/_redirects`: static-host SPA fallback.
+
+Read-only hosting works with no bridge. Refresh, upload, symbol mapping, and AI Coach need a reachable HTTPS bridge plus `VITE_MARKET_DATA_BASE_URL`.
+
+## Project Structure
+
+```text
+stock-analysis-app/
+  src/
+    App.tsx                  Main app state, views, analysis engine, bridge calls
+    App.css                  Full visual system and responsive layout
+    FlashcardDeck.tsx        Reusable swipe/keyboard/tap flashcard carousel
+    PriceChart.tsx           lightweight-charts candlestick/indicator component
+    tradingKnowledge.ts      Generated sector and practical trading rules
+    __tests__/
+      buildAnalysis.test.ts  Unit tests for formatters and analysis behavior
+  public/
+    _redirects               Static-host SPA redirect
+  .env.example               Public bridge URL example and AI secret note
+  package.json               Scripts and dependencies
+  vercel.json                Static deployment config
+```
+
+## Testing
+
+The test suite currently covers:
+
+- INR and percent formatting.
+- Score tone bands.
+- Default risk profile behavior.
+- Empty form behavior.
+- Fresh-entry quantity/risk calculation.
+- Existing-holding review behavior.
+
+Run it with:
+
+```bash
+npm run test
+```
 
 ## Limitations
 
-- This app is not investment advice.
-- It does not place trades.
-- It does not provide guaranteed real-time data.
-- Free public data sources can be delayed, incomplete, rate-limited, or unavailable for some symbols.
-- Screener and Yahoo data are best-effort fallbacks, not official exchange feeds.
-- AI Coach explanations should be treated as explanations of the app's evidence, not as independent recommendations.
-- Manual review is still required before making any financial decision.
+- Not investment advice.
+- Not a trade execution tool.
+- Not guaranteed real-time data.
+- Free/delayed public data can be stale, incomplete, unavailable, or rate-limited.
+- Some BSE/NSE symbols require manual Yahoo/Screener mapping.
+- Forecasts are scenarios, not promises.
+- AI Coach explains the app's evidence; it should not override independent due diligence.
+- Always verify important decisions against exchange filings, annual reports, broker data, and your own risk rules.

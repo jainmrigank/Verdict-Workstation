@@ -1468,13 +1468,22 @@ function mergeRefreshedSnapshot(refreshedSnapshot: Snapshot, previousSnapshot: S
     : (refreshedSnapshot.candles ?? {})
   const previousHoldings = previousSnapshot.upload ? (previousSnapshot.holdings ?? []) : []
   const refreshedHoldings = refreshedSnapshot.holdings ?? []
+  const refreshedHasHoldings = refreshedHoldings.length > 0
   const retainedHoldings =
     Boolean(previousSnapshot.upload) &&
     !refreshedSnapshot.upload &&
-    refreshedHoldings.length === 0 &&
+    !refreshedHasHoldings &&
     previousHoldings.length > 0 &&
     !previousSnapshot.provider.includes('sample')
-  const holdings = refreshedSnapshot.upload ? refreshedHoldings : retainedHoldings ? mergeHoldingsPrices(previousHoldings, quotes) : []
+  const carriesUploadedPortfolio = Boolean(refreshedSnapshot.upload) || (Boolean(previousSnapshot.upload) && (refreshedHasHoldings || retainedHoldings))
+  const upload = refreshedSnapshot.upload ?? (carriesUploadedPortfolio ? previousSnapshot.upload : undefined)
+  const holdings = refreshedSnapshot.upload
+    ? mergeHoldingsPrices(refreshedHoldings, quotes)
+    : refreshedHasHoldings && previousSnapshot.upload
+      ? mergeHoldingsPrices(refreshedHoldings, quotes)
+      : retainedHoldings
+        ? mergeHoldingsPrices(previousHoldings, quotes)
+        : []
 
   return {
     refreshedCount,
@@ -1491,7 +1500,7 @@ function mergeRefreshedSnapshot(refreshedSnapshot: Snapshot, previousSnapshot: S
       holdings,
       quotes,
       symbols: options.retainMarketData ? mergeSymbolRows(previousSnapshot.symbols ?? [], refreshedSnapshot.symbols ?? []) : (refreshedSnapshot.symbols ?? []),
-      upload: refreshedSnapshot.upload ?? (retainedHoldings ? previousSnapshot.upload : undefined),
+      upload,
     },
   }
 }
@@ -5372,8 +5381,9 @@ function App() {
     if (!file) return
     setUploadState('uploading')
     setUploadMessage(`Uploading ${file.name}...`)
-    setFreeRefreshState('idle')
-    setFreeRefreshMessage('')
+    setFreeRefreshState('refreshing')
+    setFreeRefreshMessage(`Uploading ${file.name} and loading portfolio market data...`)
+    setSyncProgress(8)
     setSyncCoverage(null)
     try {
       const bridgeUrl = requireMarketDataBridge('Holdings upload')
@@ -5396,6 +5406,8 @@ function App() {
       setCacheState(cacheStateFromProvider(mergedRefresh.snapshot.provider))
       setSyncCoverage(buildSyncCoverage(mergedRefresh.snapshot))
       setUploadState('done')
+      setFreeRefreshState('done')
+      setSyncProgress(100)
       const fundamentalsMessage = !hasFundamentalScope(mergedRefresh.snapshot)
         ? 'Company fundamentals are not applicable for index symbols.'
         : mergedRefresh.refreshedCount
@@ -5410,9 +5422,15 @@ function App() {
       setUploadMessage(
         `Imported ${refreshedSnapshot.upload?.holdings_count ?? mergedRefresh.snapshot.holdings.length} holdings from ${file.name}. ${quotedHoldingsCount(mergedRefresh.snapshot)} holdings have refreshed prices. ${fundamentalsMessage}${boughtOnMessage}`,
       )
+      setFreeRefreshMessage(
+        `Imported ${refreshedSnapshot.upload?.holdings_count ?? mergedRefresh.snapshot.holdings.length} holdings and loaded ${Object.keys(mergedRefresh.snapshot.quotes).length} priced symbols. ${fundamentalsMessage}`,
+      )
     } catch (error) {
       setUploadState('error')
+      setFreeRefreshState('error')
+      setSyncProgress(0)
       setUploadMessage(bridgeFailureMessage(error, 'Holdings upload failed.'))
+      setFreeRefreshMessage(bridgeFailureMessage(error, 'Holdings upload failed.'))
     }
   }
 
@@ -7209,16 +7227,13 @@ function App() {
                   <p>Your active holdings file, latest prices, and row-level analyse actions.</p>
                 </div>
                 <div className="holding-feed-actions">
-                  <div className={`cache-pill portfolio-cache-pill ${cacheState}`}>
-                    <span>{cacheLabel(cacheState)}</span>
-                    <strong>{cacheAge(activeSnapshot.generated_at)}</strong>
-                  </div>
                   <button
                     type="button"
+                    aria-label={`${cacheLabel(cacheState)}. Last refreshed ${cacheAge(activeSnapshot.generated_at)} ago. Sync market data.`}
                     onClick={() => void refreshFreeData({ source: 'data' })}
                     disabled={freeRefreshState === 'refreshing'}
                   >
-                    {freeRefreshState === 'refreshing' ? 'Syncing...' : 'Sync Market Data'}
+                    {freeRefreshState === 'refreshing' ? 'Sync Market Data: syncing...' : `Sync Market Data: ${cacheAge(activeSnapshot.generated_at)}`}
                   </button>
                   {hasUploadedHoldingsFeed && (
                     <button
@@ -7657,4 +7672,4 @@ export default App
 // export) and exist so the core scoring logic can be unit-tested in isolation from
 // the React component tree. See src/__tests__/buildAnalysis.test.ts.
 // eslint-disable-next-line react-refresh/only-export-components
-export { buildAnalysis, starterSnapshot, initialForm, formatInr, formatPercent, toneFromScore, defaultRiskPercentForProfile }
+export { buildAnalysis, starterSnapshot, initialForm, formatInr, formatPercent, toneFromScore, defaultRiskPercentForProfile, mergeRefreshedSnapshot }

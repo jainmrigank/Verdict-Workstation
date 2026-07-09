@@ -5,9 +5,11 @@ import {
   formatInr,
   formatPercent,
   initialForm,
+  mergeRefreshedSnapshot,
   starterSnapshot,
   toneFromScore,
   type AnalysisForm,
+  type Snapshot,
 } from '../App'
 
 describe('formatInr', () => {
@@ -111,5 +113,55 @@ describe('buildAnalysis', () => {
 
     expect(result.decisionMode).toBe('holding-review')
     expect(result.positionPnl).toBeGreaterThan(0)
+  })
+
+  it('keeps uploaded portfolio holdings when a later sync returns holdings without upload metadata', () => {
+    const previousSnapshot: Snapshot = {
+      ...starterSnapshot,
+      provider: 'free_upload',
+      generated_at: '2026-07-10T00:00:00.000Z',
+      symbols: [
+        {
+          exchange: 'NSE',
+          input: 'NSE:ABC',
+          kite_key: 'NSE:ABC',
+          tradingsymbol: 'ABC',
+        },
+      ],
+      quotes: {
+        'NSE:ABC': { last_price: 100 },
+      },
+      candles: {
+        'NSE:ABC': [{ date: '2026-07-09', open: 95, high: 101, low: 94, close: 100, volume: 1000 }],
+      },
+      fundamentals: {},
+      holdings: [{ exchange: 'NSE', tradingsymbol: 'ABC', quantity: 10, average_price: 90, last_price: 100, pnl: 100 }],
+      upload: {
+        filename: 'holdings.xlsx',
+        holdings_count: 1,
+        symbols: ['NSE:ABC'],
+      },
+    }
+    const refreshedSnapshot: Snapshot = {
+      ...starterSnapshot,
+      provider: 'free_refresh',
+      generated_at: '2026-07-10T01:00:00.000Z',
+      symbols: previousSnapshot.symbols,
+      quotes: {
+        'NSE:ABC': { last_price: 110 },
+      },
+      candles: {
+        'NSE:ABC': [{ date: '2026-07-10', open: 102, high: 112, low: 101, close: 110, volume: 1200 }],
+      },
+      fundamentals: {},
+      holdings: [{ exchange: 'NSE', tradingsymbol: 'ABC', quantity: 10, average_price: 90 }],
+    }
+
+    const merged = mergeRefreshedSnapshot(refreshedSnapshot, previousSnapshot).snapshot
+
+    expect(merged.upload).toEqual(previousSnapshot.upload)
+    expect(merged.holdings).toHaveLength(1)
+    expect(merged.holdings[0].last_price).toBe(110)
+    expect(merged.holdings[0].pnl).toBe(200)
   })
 })
