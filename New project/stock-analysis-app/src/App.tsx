@@ -1,5 +1,7 @@
-import { type CSSProperties, type MouseEvent, type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
+import { type CSSProperties, type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
+import { FlashcardDeck, FlashcardStack } from './FlashcardDeck'
+import { PriceChart } from './PriceChart'
 import {
   sectorOperatingRules,
   tradingDerivedRules,
@@ -666,11 +668,10 @@ const indicatorLabels: Record<IndicatorKey, { label: string; help: string }> = {
   atr: { label: 'ATR 14', help: 'Average true range. It measures volatility and helps estimate practical stop-loss distance.' },
   patterns: { label: 'Patterns', help: 'Marks recent single and multi-candle reversal/strength patterns. Context and volume still matter.' },
 }
-// The handful of overlays a first-time chart reader reaches for. Everything else in
-// indicatorLabels is still fully wired up, just tucked behind "More indicators".
+// Common overlays lead the row; the rest of indicatorLabels follows in one flat list.
 const commonIndicatorKeys: IndicatorKey[] = ['volume', 'range', 'patterns', 'sma20', 'ema20']
-const moreIndicatorKeys: IndicatorKey[] = (Object.keys(indicatorLabels) as IndicatorKey[]).filter(
-  (key) => !commonIndicatorKeys.includes(key),
+const allIndicatorKeys: IndicatorKey[] = commonIndicatorKeys.concat(
+  (Object.keys(indicatorLabels) as IndicatorKey[]).filter((key) => !commonIndicatorKeys.includes(key)),
 )
 
 const requiredHelp = {
@@ -722,12 +723,25 @@ const forecastHelp = {
 }
 
 function HelpTip({ text }: { text: string }) {
+  // Anchor the fixed-position tooltip to this dot and flip it below when the
+  // dot sits too close to the top of the viewport for the bubble to fit above.
+  function placeTip(event: { currentTarget: HTMLElement }) {
+    const dot = event.currentTarget
+    const rect = dot.getBoundingClientRect()
+    const showBelow = rect.top < 320
+    dot.dataset.tipPos = showBelow ? 'below' : 'above'
+    dot.style.setProperty('--tip-x', `${rect.left + rect.width / 2}px`)
+    dot.style.setProperty('--tip-y', `${showBelow ? rect.bottom + 10 : rect.top - 10}px`)
+  }
+
   return (
     <span
       className="help-tip"
       data-tip={text}
       tabIndex={0}
       aria-label={text}
+      onFocus={placeTip}
+      onPointerEnter={placeTip}
     >
       ?
     </span>
@@ -789,7 +803,22 @@ function CollapsibleSection({
                 {titleAddon}
               </span>
             ) : (
-              <button className="collapse-title-button" type="button" aria-controls={bodyId} aria-expanded={isOpen} onClick={() => setOpenState({ id, isOpen: !isOpen })}>
+              <button
+                className="collapse-title-button"
+                type="button"
+                aria-controls={bodyId}
+                aria-expanded={isOpen}
+                onClick={() => {
+                  const nextOpen = !isOpen
+                  setOpenState({ id, isOpen: nextOpen })
+                  if (nextOpen) {
+                    // Keep the newly opened section's heading in view instead of forcing the reader to scroll back.
+                    window.requestAnimationFrame(() => {
+                      document.getElementById(id)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+                    })
+                  }
+                }}
+              >
                 <span className="collapse-icon" aria-hidden="true">
                   {isOpen ? '-' : '+'}
                 </span>
@@ -2222,7 +2251,7 @@ function meaningfulCompanyUpdates(updates: CompanyFundamentals['company_updates'
       if (junkUrlMatches.some((term) => url.includes(term))) return false
       return true
     })
-    .slice(0, 3)
+    .slice(0, 10)
 }
 
 function updateToneScore(updates: CompanyFundamentals['company_updates'] | undefined) {
@@ -3732,15 +3761,8 @@ function App() {
     viewAnnouncementRef.current?.focus()
   }, [view])
   const [glossarySearch, setGlossarySearch] = useState('')
-  const [clearDataArmed, setClearDataArmed] = useState(false)
   const [mobileContextExpanded, setMobileContextExpanded] = useState(false)
   const [workspaceDrawerOpen, setWorkspaceDrawerOpen] = useState(false)
-
-  useEffect(() => {
-    if (!clearDataArmed) return
-    const timeout = window.setTimeout(() => setClearDataArmed(false), 4000)
-    return () => window.clearTimeout(timeout)
-  }, [clearDataArmed])
   const [form, setForm] = useState<AnalysisForm>(() => storedWorkspace?.form ?? initialForm)
   const [days, setDays] = useState(() => storedWorkspace?.days ?? 730)
   const [copied, setCopied] = useState<string | null>(null)
@@ -3760,8 +3782,6 @@ function App() {
   const [holdingContextMessage, setHoldingContextMessage] = useState('')
   const [theme, setTheme] = useState<ThemeMode>('dark')
   const [chartTimeframe, setChartTimeframe] = useState<ChartTimeframe>('6M')
-  const [chartZoomLevel, setChartZoomLevel] = useState(1)
-  const [chartWindowEnd, setChartWindowEnd] = useState<number | null>(null)
   const [forecastSettings, setForecastSettings] = useState<ForecastSettings>(initialForecastSettings)
   const [chartIndicators, setChartIndicators] = useState<Record<IndicatorKey, boolean>>({
     sma20: true,
@@ -3779,10 +3799,6 @@ function App() {
     atr: true,
     patterns: true,
   })
-  const [showMoreIndicators, setShowMoreIndicators] = useState(false)
-  const [hoveredCandleIndex, setHoveredCandleIndex] = useState<number | null>(null)
-  const [chartShellElement, setChartShellElement] = useState<HTMLDivElement | null>(null)
-
   useEffect(() => {
     document.documentElement.dataset.theme = theme
   }, [theme])
@@ -3983,65 +3999,20 @@ function App() {
     [activeCandles, activeFundamentals, analysis, forecastSettings],
   )
   const chartModel = useMemo(
-    () => buildCandleChart(activeCandles, chartTimeframe, chartZoomLevel, chartWindowEnd, forecastProjection),
-    [activeCandles, chartTimeframe, chartWindowEnd, chartZoomLevel, forecastProjection],
+    () => buildCandleChart(activeCandles, chartTimeframe, 1, null, forecastProjection),
+    [activeCandles, chartTimeframe, forecastProjection],
   )
   const activeRange = useMemo(() => candleRange(activeCandles, 252), [activeCandles])
-
-  useEffect(() => {
-    setHoveredCandleIndex(null)
-  }, [analysis.quoteKey, chartTimeframe, chartWindowEnd, chartZoomLevel])
-
-  useEffect(() => {
-    setChartZoomLevel(1)
-    setChartWindowEnd(null)
-  }, [analysis.quoteKey])
-
-  useEffect(() => {
-    if (!chartShellElement) return undefined
-    const shellElement = chartShellElement
-
-    function handleNativeChartWheel(event: WheelEvent) {
-      const isPinchZoom = event.ctrlKey || event.metaKey
-      if (!isPinchZoom || !chartModel.candles.length || !chartModel.baseLength) return
-      event.preventDefault()
-      event.stopPropagation()
-
-      const rect = shellElement.getBoundingClientRect()
-      const plotLeftPx = (chartModel.plotLeft / chartModel.width) * rect.width
-      const plotWidthPx = (chartModel.plotWidth / chartModel.width) * rect.width
-      const pointerRatio = clamp((event.clientX - rect.left - plotLeftPx) / plotWidthPx, 0, 1)
-      const pointerIndex = clamp(pointerRatio * chartModel.candles.length - 0.5, 0, chartModel.candles.length - 1)
-      const anchoredIndex = chartModel.windowStart + pointerIndex
-      const deltaScale = event.deltaMode === 1 ? 18 : event.deltaMode === 2 ? rect.height : 1
-      const cappedDelta = clamp(event.deltaY * deltaScale, -70, 70)
-      const factor = Math.exp(-cappedDelta * 0.002)
-      const nextZoom = clamp(chartZoomLevel * factor, 1, 8)
-      const nextLength = Math.max(1, Math.ceil(chartModel.baseLength / nextZoom))
-      const nextStart = clamp(Math.round(anchoredIndex - (pointerRatio * nextLength - 0.5)), 0, Math.max(0, chartModel.baseLength - nextLength))
-
-      setChartZoomLevel(nextZoom)
-      setChartWindowEnd(nextZoom <= 1 ? null : nextStart + nextLength)
-    }
-
-    shellElement.addEventListener('wheel', handleNativeChartWheel, { passive: false })
-    return () => shellElement.removeEventListener('wheel', handleNativeChartWheel)
-  }, [chartModel, chartShellElement, chartZoomLevel])
 
   const priceRangePercent = rangePosition(analysis.ltp, activeRange.low, activeRange.high)
   const recentTrendPct = candleTrendPct(activeCandles, 30)
   const avgVolume20 = averageVolume(activeCandles, 20)
   const lastCandle = latestCandle(activeCandles)
   const prevCandle = previousCandle(activeCandles)
-  const hoveredChartPoint = hoveredCandleIndex === null ? undefined : chartModel.candles[hoveredCandleIndex]
-  const hoveredCandle = hoveredChartPoint?.candle
-  const hoverTooltipX = hoveredChartPoint ? (hoveredChartPoint.x > chartModel.width - 236 ? hoveredChartPoint.x - 230 : hoveredChartPoint.x + 12) : 0
-  const hoverTooltipY = hoveredChartPoint ? clamp(hoveredChartPoint.closeY - 72, 12, chartModel.priceHeight - 148) : 0
   const chartWindowCandles = useMemo(() => chartModel.candles.map((point) => point.candle), [chartModel])
   const patternSignals = useMemo(() => detectCandlestickPatterns(chartWindowCandles), [chartWindowCandles])
   const recentPatternSignals = patternSignals.slice(-8).reverse()
   const chartTrendPct = candleTrendPct(chartWindowCandles, chartWindowCandles.length)
-  const chartZoomLabel = chartZoomLevel === 1 ? 'Full window' : `${chartZoomLevel.toFixed(1).replace(/\.0$/, '')}x zoom`
   const avgPriceNum = parseNumber(form.averagePrice)
   const quantityNum = parseNumber(form.quantity)
   const investedValue = form.alreadyHold && avgPriceNum && quantityNum ? avgPriceNum * quantityNum : undefined
@@ -4430,13 +4401,47 @@ function App() {
 
   function adaptiveSignalCategory(signal: AdaptiveSignal) {
     const label = signal.label.toLowerCase()
+    const group = signal.group.toLowerCase()
+    // Group-first: business, news, and process evidence get their own decks
+    // instead of falling through into one oversized technical bucket.
+    if (group === 'news') return 'News & Updates'
+    if (group === 'process') return 'Process & Discipline'
+    if (group === 'fundamental' || group === 'statements') {
+      if (
+        label.includes('p/e') ||
+        label.includes('price/book') ||
+        label.includes('valuation') ||
+        label.includes('market cap') ||
+        label.includes('dividend') ||
+        label.includes('debt') ||
+        label.includes('current ratio') ||
+        label.includes('reserves') ||
+        label.includes('borrowings')
+      ) {
+        return 'Valuation & Balance Sheet'
+      }
+      if (label.includes('growth') || label.includes('fcf') || label.includes('cfo') || label.includes('cash')) return 'Growth & Cash Flow'
+      return 'Profitability & Earnings'
+    }
+    if (label.includes('pattern') || label.includes('candle')) return 'Candles & Patterns'
     if (label.includes('trend') || label.includes('moving-average') || label.includes('rsi') || label.includes('macd') || label.includes('momentum')) return 'Trend & Momentum'
-    if (label.includes('atr') || label.includes('bollinger') || label.includes('drawdown') || label.includes('risk') || label.includes('reward') || label.includes('debt') || label.includes('valuation') || label.includes('p/e') || label.includes('price/book') || label.includes('concentration')) return 'Volatility & Risk'
-    if (label.includes('liquidity') || label.includes('volume') || label.includes('vwap') || label.includes('market cap') || label.includes('cash') || label.includes('cfo') || label.includes('fcf')) return 'Liquidity & Execution'
-    return 'Candles, Levels & Patterns'
+    if (group === 'risk' || label.includes('atr') || label.includes('bollinger') || label.includes('drawdown') || label.includes('risk') || label.includes('reward') || label.includes('concentration')) return 'Volatility & Risk'
+    if (label.includes('liquidity') || label.includes('volume') || label.includes('vwap')) return 'Liquidity & Execution'
+    return 'Levels & Structure'
   }
 
-  const adaptiveSignalGroups = ['Trend & Momentum', 'Volatility & Risk', 'Liquidity & Execution', 'Candles, Levels & Patterns']
+  const adaptiveSignalGroups = [
+    'Trend & Momentum',
+    'Candles & Patterns',
+    'Levels & Structure',
+    'Volatility & Risk',
+    'Liquidity & Execution',
+    'Profitability & Earnings',
+    'Valuation & Balance Sheet',
+    'Growth & Cash Flow',
+    'News & Updates',
+    'Process & Discipline',
+  ]
     .map((title) => ({
       title,
       signals: analysis.adaptiveSignals.filter((signal) => adaptiveSignalCategory(signal) === title),
@@ -5265,29 +5270,6 @@ function App() {
     setView('verdict')
   }
 
-  function clearBrowserWorkspace() {
-    setClearDataArmed(false)
-    try {
-      window.localStorage.removeItem(browserWorkspaceKey)
-    } catch {
-      // Local storage can be blocked in some private-browser modes; state reset still works for this tab.
-    }
-    setSnapshot(starterSnapshot)
-    setCacheState(cacheStateFromProvider(starterSnapshot.provider))
-    setForm(initialForm)
-    setDays(730)
-    setFreeRefreshState('idle')
-    setFreeRefreshMessage('')
-    setSyncProgress(0)
-    setSyncCoverage(null)
-    setMappingDrafts({})
-    setMappingState('idle')
-    setMappingStatus('')
-    setUploadState('idle')
-    setUploadMessage('Browser workspace cleared. This tab is now back to a fresh private starting point.')
-    setView('setup')
-  }
-
   function updateMappingDraft(symbol: string, field: keyof SymbolMappingDraft, value: string) {
     setMappingDrafts((current) => ({
       ...current,
@@ -5508,21 +5490,6 @@ function App() {
     setForecastSettings((current) => ({ ...current, [key]: value }))
   }
 
-  function handleChartPointerMove(event: MouseEvent<SVGSVGElement>) {
-    if (!chartModel.candles.length || !chartModel.step) return
-    const rect = event.currentTarget.getBoundingClientRect()
-    const x = ((event.clientX - rect.left) / rect.width) * chartModel.width
-    const index = Math.round((x - chartModel.plotLeft) / chartModel.step - 0.5)
-    setHoveredCandleIndex(clamp(index, 0, chartModel.candles.length - 1))
-  }
-
-  function handleChartMouseOut(event: MouseEvent<SVGSVGElement>) {
-    const relatedTarget = event.relatedTarget
-    if (!relatedTarget || !event.currentTarget.contains(relatedTarget as Node)) {
-      setHoveredCandleIndex(null)
-    }
-  }
-
   const activeWorkspaceTab = [...primaryWorkspaceTabs, ...utilityWorkspaceTabs].find((tab) => tab.id === view)
   const activeWorkspaceLabel = activeWorkspaceTab?.label ?? 'Start'
 
@@ -5543,7 +5510,7 @@ function App() {
         </button>
 
         <div className="app-title-block">
-          <h1>Stock Analysis Agent</h1>
+          <h1>Fund Analyser</h1>
           <span className="active-view-chip" aria-label={`Current tab: ${activeWorkspaceLabel}`}>
             {activeWorkspaceLabel}
           </span>
@@ -5709,7 +5676,20 @@ function App() {
               <div className="form-grid setup-primary-grid">
                 <label className="field">
                   <FieldLabel help={requiredHelp.ticker}>Ticker</FieldLabel>
-                  <input aria-label="Ticker" required value={form.ticker} onChange={(event) => updateForm('ticker', event.target.value.toUpperCase())} />
+                  <input
+                    aria-label="Ticker"
+                    required
+                    value={form.ticker}
+                    onChange={(event) => {
+                      const ticker = event.target.value.toUpperCase()
+                      setForm((current) => ({
+                        ...current,
+                        ticker,
+                        // Seed a practical default so a fresh idea can be sized immediately; user edits still win.
+                        capital: ticker.trim() && !current.ticker.trim() && !current.capital.trim() ? '10000' : current.capital,
+                      }))
+                    }}
+                  />
                 </label>
                 <label className="field">
                   <FieldLabel help={requiredHelp.exchange}>Exchange</FieldLabel>
@@ -6088,50 +6068,58 @@ function App() {
               id="adaptive-score-heading"
               title="Price Drivers Behind This Answer"
             >
-              <div className="component-score-grid">
-                {analysis.scoreComponents.map((component) => (
-                  <article className={`component-score-card tone-${component.tone}`} key={component.label}>
-                    <div>
-                      <span>{component.label}</span>
-                      <strong className="score-with-help">
-                        {component.score}
-                        <span className="read-scale">/100</span>
-                        <HelpTip text={componentDefinition(component)} />
-                      </strong>
-                    </div>
-                    <div className="bar-track">
-                      <div className="bar-fill score-fill" style={percentStyle(component.score)} />
-                    </div>
-                    <p>{componentNarrative(component)}</p>
-                  </article>
-                ))}
-              </div>
+              <FlashcardDeck
+                ariaLabel="Price driver scores"
+                cards={analysis.scoreComponents.map((component) => ({
+                  id: component.label,
+                  content: (
+                    <article className={`component-score-card tone-${component.tone}`}>
+                      <div>
+                        <span>{component.label}</span>
+                        <strong className="score-with-help">
+                          {component.score}
+                          <span className="read-scale">/100</span>
+                          <HelpTip text={componentDefinition(component)} />
+                        </strong>
+                      </div>
+                      <div className="bar-track">
+                        <div className="bar-fill score-fill" style={percentStyle(component.score)} />
+                      </div>
+                      <p>{componentNarrative(component)}</p>
+                    </article>
+                  ),
+                }))}
+              />
 
               <div className="signal-contribution-panel flat-signal-panel">
                 <div className="flat-section-heading">
                   <span className="mini-label">Metric clues</span>
                   <strong>{analysis.adaptiveSignals.length} signals</strong>
                 </div>
-                <div className="adaptive-signal-grid flat-signal-grid">
-                  {adaptiveSignalGroups.flatMap((group) =>
-                    group.signals.map((signal) => (
-                      <article className={`adaptive-signal-card tone-${signal.tone}`} key={`${signal.group}-${signal.label}`}>
-                        <small className="ratio-category-tag">{group.title}</small>
-                        <span>{signal.group}</span>
-                        <strong>{signal.label}</strong>
-                        <small>{signal.value}</small>
-                        <div className="signal-score-line">
-                          <span className="score-with-help">
-                            <b>{signal.score}</b>
-                            <span className="read-scale">/100</span>
-                            <HelpTip text={signalDefinition(signal)} />
-                          </span>
-                        </div>
-                        <p>{signalNarrative(signal)}</p>
-                      </article>
-                    )),
+                <FlashcardDeck
+                  ariaLabel="Metric clue signals"
+                  cards={adaptiveSignalGroups.flatMap((group) =>
+                    group.signals.map((signal) => ({
+                      id: `${signal.group}-${signal.label}`,
+                      category: group.title,
+                      content: (
+                        <article className={`adaptive-signal-card tone-${signal.tone}`}>
+                          <span>{signal.group}</span>
+                          <strong>{signal.label}</strong>
+                          <small>{signal.value}</small>
+                          <div className="signal-score-line">
+                            <span className="score-with-help">
+                              <b>{signal.score}</b>
+                              <span className="read-scale">/100</span>
+                              <HelpTip text={signalDefinition(signal)} />
+                            </span>
+                          </div>
+                          <p>{signalNarrative(signal)}</p>
+                        </article>
+                      ),
+                    })),
                   )}
-                </div>
+                />
               </div>
             </CollapsibleSection>
 
@@ -6211,6 +6199,37 @@ function App() {
       {view === 'coach' ? (
         <>
           <CollapsibleSection
+            action={
+              <div className="ai-coach-header-controls">
+                <div className="ai-coach-mode-segmented" role="radiogroup" aria-label="AI Coach focus">
+                  {([
+                    { scope: 'technical' as AiCoachScope, label: 'Chart', help: 'Explain trend, indicators, candles, volatility, liquidity, support/resistance, and what they can mean for the next move.' },
+                    { scope: 'fundamental' as AiCoachScope, label: 'Company', help: 'Explain business model, ratios, statements, updates, data gaps, and whether the business can support higher prices.' },
+                    { scope: 'verdict' as AiCoachScope, label: 'Verdict', help: 'Explain the final action, what to do next, what not to do, risk plan, and which evidence matters most now.' },
+                  ]).map((option) => (
+                    <button
+                      aria-checked={llmScope === option.scope}
+                      className={`ai-coach-mode-pill ${llmScope === option.scope ? 'active' : ''}`}
+                      key={option.scope}
+                      role="radio"
+                      type="button"
+                      onClick={() => setLlmScope(option.scope)}
+                    >
+                      <span>{option.label}</span>
+                      <HelpTip text={option.help} />
+                    </button>
+                  ))}
+                </div>
+                <button
+                  className="primary-action"
+                  type="button"
+                  onClick={() => void generateAiCoachReview(llmScope)}
+                  disabled={llmState === 'refreshing' || !decisionSymbol}
+                >
+                  {llmState === 'refreshing' ? 'Generating...' : llmResponse?.review ? 'Regenerate Review' : 'Generate AI Review'}
+                </button>
+              </div>
+            }
             className="parent-section ai-coach-section"
             defaultOpen
             description="Choose a coaching focus: price action, business quality, or the final decision."
@@ -6220,32 +6239,6 @@ function App() {
             staticOpen
             title={activeAiCoachCopy.title}
           >
-            <div className="ai-coach-mode-segmented" role="radiogroup" aria-label="AI Coach focus">
-              {([
-                { scope: 'technical' as AiCoachScope, label: 'Chart', help: 'Explain trend, indicators, candles, volatility, liquidity, support/resistance, and what they can mean for the next move.' },
-                { scope: 'fundamental' as AiCoachScope, label: 'Company', help: 'Explain business model, ratios, statements, updates, data gaps, and whether the business can support higher prices.' },
-                { scope: 'verdict' as AiCoachScope, label: 'Verdict', help: 'Explain the final action, what to do next, what not to do, risk plan, and which evidence matters most now.' },
-              ]).map((option) => (
-                <button
-                  aria-checked={llmScope === option.scope}
-                  className={`ai-coach-mode-pill ${llmScope === option.scope ? 'active' : ''}`}
-                  key={option.scope}
-                  role="radio"
-                  type="button"
-                  onClick={() => setLlmScope(option.scope)}
-                >
-                  <span>{option.label}</span>
-                  <HelpTip text={option.help} />
-                </button>
-              ))}
-            </div>
-
-            <div className="ai-coach-review-action">
-              <button type="button" onClick={() => void generateAiCoachReview(llmScope)} disabled={llmState === 'refreshing' || !decisionSymbol}>
-                {llmState === 'refreshing' ? 'Generating...' : llmResponse?.review ? 'Regenerate Review' : 'Generate AI Review'}
-              </button>
-            </div>
-
             {llmMessage && (
               <div className={`refresh-message ${llmState}`}>
                 <p>{llmMessage}</p>
@@ -6335,35 +6328,22 @@ function App() {
                 </div>
 
                 <div className="chart-toolbar">
-                  <div className="segmented chart-timeframes" aria-label="Chart timeframe">
-                    {(Object.keys(chartTimeframes) as ChartTimeframe[]).map((timeframe) => (
-                      <button
-                        className={chartTimeframe === timeframe ? 'active' : ''}
-                        key={timeframe}
-                        type="button"
-                        onClick={() => {
-                          setChartTimeframe(timeframe)
-                          setChartZoomLevel(1)
-                          setChartWindowEnd(null)
-                        }}
-                      >
-                        {chartTimeframes[timeframe].label}
-                      </button>
-                    ))}
-                    <button
-                      className={chartZoomLevel > 1 ? 'active' : ''}
-                      type="button"
-                      onClick={() => {
-                        setChartZoomLevel(1)
-                        setChartWindowEnd(null)
-                      }}
-                    >
-                      Full
-                    </button>
+                  <div className="chart-toolbar-row">
+                    <div className="segmented chart-timeframes" aria-label="Chart timeframe">
+                      {(Object.keys(chartTimeframes) as ChartTimeframe[]).map((timeframe) => (
+                        <button
+                          className={chartTimeframe === timeframe ? 'active' : ''}
+                          key={timeframe}
+                          type="button"
+                          onClick={() => setChartTimeframe(timeframe)}
+                        >
+                          {chartTimeframes[timeframe].label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                  {chartZoomLevel > 1 && <span className="chart-zoom-pill">{chartZoomLabel}</span>}
                   <div className="indicator-switches" aria-label="Chart indicators">
-                    {commonIndicatorKeys.map((indicator) => (
+                    {allIndicatorKeys.map((indicator) => (
                       <button
                         className={chartIndicators[indicator] ? 'active' : ''}
                         key={indicator}
@@ -6375,31 +6355,7 @@ function App() {
                         <HelpTip text={indicatorLabels[indicator].help} />
                       </button>
                     ))}
-                    <button
-                      aria-expanded={showMoreIndicators}
-                      className={`more-indicators-toggle ${moreIndicatorKeys.some((key) => chartIndicators[key]) ? 'active' : ''}`}
-                      type="button"
-                      onClick={() => setShowMoreIndicators((current) => !current)}
-                    >
-                      {showMoreIndicators ? 'Fewer indicators' : 'More indicators'}
-                    </button>
                   </div>
-                  {showMoreIndicators && (
-                    <div className="indicator-switches more-indicators-row" aria-label="More chart indicators">
-                      {moreIndicatorKeys.map((indicator) => (
-                        <button
-                          className={chartIndicators[indicator] ? 'active' : ''}
-                          key={indicator}
-                          type="button"
-                          aria-pressed={chartIndicators[indicator]}
-                          onClick={() => toggleIndicator(indicator)}
-                        >
-                          {indicatorLabels[indicator].label}
-                          <HelpTip text={indicatorLabels[indicator].help} />
-                        </button>
-                      ))}
-                    </div>
-                  )}
                 </div>
 
                 <div className="forecast-controls">
@@ -6537,278 +6493,25 @@ function App() {
                   )}
                 </div>
 
-                <div className="chart-legend" aria-label="Chart legend">
-                  <span>
-                    <i className="legend-swatch up-swatch" />
-                    Bullish candle
-                  </span>
-                  <span>
-                    <i className="legend-swatch down-swatch" />
-                    Bearish candle
-                  </span>
-                  {chartIndicators.sma20 && (
-                    <span>
-                      <i className="legend-line sma20-swatch" />
-                      SMA 20
-                    </span>
-                  )}
-                  {chartIndicators.sma50 && (
-                    <span>
-                      <i className="legend-line sma50-swatch" />
-                      SMA 50
-                    </span>
-                  )}
-                  {chartIndicators.sma100 && (
-                    <span>
-                      <i className="legend-line sma100-swatch" />
-                      SMA 100
-                    </span>
-                  )}
-                  {chartIndicators.sma200 && (
-                    <span>
-                      <i className="legend-line sma200-swatch" />
-                      SMA 200
-                    </span>
-                  )}
-                  {chartIndicators.ema20 && (
-                    <span>
-                      <i className="legend-line ema20-swatch" />
-                      EMA 20
-                    </span>
-                  )}
-                  {chartIndicators.ema50 && (
-                    <span>
-                      <i className="legend-line ema50-swatch" />
-                      EMA 50
-                    </span>
-                  )}
-                  {chartIndicators.vwap && (
-                    <span>
-                      <i className="legend-line vwap-swatch" />
-                      VWAP
-                    </span>
-                  )}
-                  {chartIndicators.bbands && (
-                    <span>
-                      <i className="legend-line bollinger-swatch" />
-                      Bollinger
-                    </span>
-                  )}
-                  {chartIndicators.volume && (
-                    <span>
-                      <i className="legend-swatch volume-swatch" />
-                      Volume
-                    </span>
-                  )}
-                  {chartIndicators.range && (
-                    <span>
-                      <i className="legend-line range-swatch" />
-                      High/low range
-                    </span>
-                  )}
-                  {forecastProjection && (
-                    <span>
-                      <i className="legend-line forecast-base-swatch" />
-                      Base forecast
-                    </span>
-                  )}
-                  {forecastProjection && (
-                    <span>
-                      <i className="legend-swatch forecast-band-swatch" />
-                      Bear/bull range
-                    </span>
-                  )}
-                  {chartIndicators.patterns && (
-                    <span>
-                      <i className="legend-swatch pattern-swatch bullish" />
-                      Bullish pattern
-                    </span>
-                  )}
-                  {chartIndicators.patterns && (
-                    <span>
-                      <i className="legend-swatch pattern-swatch bearish" />
-                      Bearish pattern
-                    </span>
-                  )}
-                  {chartIndicators.patterns && (
-                    <span>
-                      <i className="legend-swatch pattern-swatch neutral" />
-                      Neutral pattern
-                    </span>
-                  )}
-                </div>
-
-                <div className="chart-shell" ref={setChartShellElement}>
-                  <svg
-                    className="candle-chart"
-                    viewBox={`0 0 ${chartModel.width} ${chartModel.totalHeight}`}
-                    role="img"
-                    aria-label="Interactive daily candlestick chart"
-                    onMouseMove={handleChartPointerMove}
-                    onMouseOut={handleChartMouseOut}
-                    onMouseLeave={() => setHoveredCandleIndex(null)}
-                    onPointerLeave={() => setHoveredCandleIndex(null)}
-                  >
-                    {chartModel.candles.length ? (
-                      <>
-                        <text className="axis-title y-axis-title" transform={`translate(18 ${chartModel.priceHeight / 2}) rotate(-90)`}>
-                          Price (INR)
-                        </text>
-                        <text className="axis-title volume-axis-title" x="16" y={chartModel.volumeBase - chartModel.volumeHeight - 5}>
-                          Volume
-                        </text>
-                        <text className="axis-title x-axis-title" x={chartModel.plotLeft + chartModel.plotWidth / 2} y={chartModel.totalHeight - 7}>
-                          Date
-                        </text>
-                        {chartModel.grid.map((line) => (
-                          <g key={line.value}>
-                            <line className="chart-grid-line" x1={chartModel.plotLeft} x2={chartModel.width - chartModel.plotRight} y1={line.y} y2={line.y} />
-                            <text className="chart-axis-label price-axis-label" x={chartModel.width - 12} y={line.y - 4} textAnchor="end">
-                              {formatNumber(line.value)}
-                            </text>
-                          </g>
-                        ))}
-                        {chartModel.xTicks.map((tick) => (
-                          <g key={tick.date}>
-                            <line className="chart-tick-line" x1={tick.x} x2={tick.x} y1={chartModel.volumeBase + 2} y2={chartModel.volumeBase + 10} />
-                            <text className="chart-axis-label x-tick-label" x={tick.x} y={chartModel.volumeBase + 24}>
-                              {tick.date.slice(5)}
-                            </text>
-                          </g>
-                        ))}
-                        {chartModel.forecast && (
-                          <g className="forecast-layer">
-                            <line className="forecast-separator" x1={chartModel.forecast.separatorX} x2={chartModel.forecast.separatorX} y1="0" y2={chartModel.volumeBase} />
-                            {chartModel.forecast.bandPath && <path className="forecast-band" d={chartModel.forecast.bandPath} />}
-                            {chartModel.forecast.lines.map((line) => {
-                              const endPoint = line.points[line.points.length - 1]
-                              return (
-                                <g className={`forecast-case ${line.key}`} key={line.key}>
-                                  <path d={line.path} />
-                                  {line.points.slice(1).map((point) => (
-                                    <circle key={`${line.key}-${point.label}`} cx={point.x} cy={point.y} r={line.key === 'base' ? 3.5 : 2.8} />
-                                  ))}
-                                  <text x={chartModel.width - 12} y={clamp(endPoint.y, 15, chartModel.priceHeight - 6)} textAnchor="end">
-                                    {line.key === 'base' ? 'Base' : line.key === 'bull' ? 'Bull' : 'Bear'} {formatInr(endPoint.price)}
-                                  </text>
-                                </g>
-                              )
-                            })}
-                            <text className="forecast-end-label" x={chartModel.width - 12} y={chartModel.volumeBase + 24} textAnchor="end">
-                              {chartModel.forecast.endLabel}
-                            </text>
-                          </g>
-                        )}
-                        {chartIndicators.range && chartModel.highLine && (
-                          <g>
-                            <line className="range-guide high-guide" x1={chartModel.plotLeft} x2={chartModel.width - chartModel.plotRight} y1={chartModel.highLine.y} y2={chartModel.highLine.y} />
-                            <text className="range-guide-label" x={chartModel.plotLeft + 6} y={chartModel.highLine.y - 5}>
-                              High {formatInr(chartModel.highLine.value)}
-                            </text>
-                          </g>
-                        )}
-                        {chartIndicators.range && chartModel.lowLine && (
-                          <g>
-                            <line className="range-guide low-guide" x1={chartModel.plotLeft} x2={chartModel.width - chartModel.plotRight} y1={chartModel.lowLine.y} y2={chartModel.lowLine.y} />
-                            <text className="range-guide-label" x={chartModel.plotLeft + 6} y={chartModel.lowLine.y + 14}>
-                              Low {formatInr(chartModel.lowLine.value)}
-                            </text>
-                          </g>
-                        )}
-                        {chartIndicators.sma20 && chartModel.sma20Path && <path className="ma-line ma20" d={chartModel.sma20Path} />}
-                        {chartIndicators.sma50 && chartModel.sma50Path && <path className="ma-line ma50" d={chartModel.sma50Path} />}
-                        {chartIndicators.sma100 && chartModel.sma100Path && <path className="ma-line ma100" d={chartModel.sma100Path} />}
-                        {chartIndicators.sma200 && chartModel.sma200Path && <path className="ma-line ma200" d={chartModel.sma200Path} />}
-                        {chartIndicators.ema20 && chartModel.ema20Path && <path className="ma-line ema20" d={chartModel.ema20Path} />}
-                        {chartIndicators.ema50 && chartModel.ema50Path && <path className="ma-line ema50" d={chartModel.ema50Path} />}
-                        {chartIndicators.vwap && chartModel.vwapPath && <path className="ma-line vwap-line" d={chartModel.vwapPath} />}
-                        {chartIndicators.bbands && chartModel.bbUpperPath && <path className="ma-line bollinger-line upper" d={chartModel.bbUpperPath} />}
-                        {chartIndicators.bbands && chartModel.bbMiddlePath && <path className="ma-line bollinger-line middle" d={chartModel.bbMiddlePath} />}
-                        {chartIndicators.bbands && chartModel.bbLowerPath && <path className="ma-line bollinger-line lower" d={chartModel.bbLowerPath} />}
-                        {chartModel.candles.map((point, index) => (
-                          <g className={point.up ? 'candle up-candle' : 'candle down-candle'} key={`${point.candle.date}-${index}`}>
-                            <line x1={point.x} x2={point.x} y1={point.highY} y2={point.lowY} />
-                            <rect
-                              x={point.x - chartModel.candleWidth / 2}
-                              y={point.bodyY}
-                              width={chartModel.candleWidth}
-                              height={point.bodyHeight}
-                              rx="1.4"
-                            />
-                          </g>
-                        ))}
-                        {chartIndicators.patterns &&
-                          recentPatternSignals.map((signal) => {
-                            const point = chartModel.candles[signal.index]
-                            if (!point) return null
-                            const markerY =
-                              signal.bias === 'bearish'
-                                ? Math.max(point.highY - 13, 10)
-                                : signal.bias === 'bullish'
-                                  ? Math.min(point.lowY + 15, chartModel.priceHeight - 8)
-                                  : clamp(point.closeY - 12, 10, chartModel.priceHeight - 8)
-                            const markerText = signal.bias === 'bullish' ? 'B' : signal.bias === 'bearish' ? 'S' : 'N'
-                            return (
-                              <g className={`pattern-marker ${signal.bias}`} key={`${signal.name}-${signal.index}`}>
-                                <title>{`${signal.name}: ${signal.action}`}</title>
-                                <circle cx={point.x} cy={markerY} r="6" />
-                                <text x={point.x} y={markerY + 3}>
-                                  {markerText}
-                                </text>
-                              </g>
-                            )
-                          })}
-                        {chartIndicators.volume &&
-                          chartModel.candles.map((point, index) => (
-                            <rect
-                              className={point.up ? 'volume-bar up-volume' : 'volume-bar down-volume'}
-                              key={`${point.candle.date}-volume-${index}`}
-                              x={point.x - chartModel.candleWidth / 2}
-                              y={point.volumeY}
-                              width={chartModel.candleWidth}
-                              height={point.volumeBarHeight}
-                            />
-                          ))}
-                        <line className="volume-base" x1={chartModel.plotLeft} x2={chartModel.width - chartModel.plotRight} y1={chartModel.volumeBase} y2={chartModel.volumeBase} />
-                        {hoveredChartPoint && (
-                          <g>
-                            <line className="crosshair" x1={hoveredChartPoint.x} x2={hoveredChartPoint.x} y1="0" y2={chartModel.volumeBase} />
-                            <line className="crosshair horizontal" x1={chartModel.plotLeft} x2={chartModel.width - chartModel.plotRight} y1={hoveredChartPoint.closeY} y2={hoveredChartPoint.closeY} />
-                            <circle className="crosshair-dot" cx={hoveredChartPoint.x} cy={hoveredChartPoint.closeY} r="4" />
-                            <g className="chart-hover-card" transform={`translate(${hoverTooltipX} ${hoverTooltipY})`}>
-                              <rect width="220" height="136" rx="7" />
-                              <text x="10" y="18">
-                                {hoveredCandle?.date}
-                              </text>
-                              <text x="10" y="36">
-                                O {formatInr(hoveredCandle?.open)}  H {formatInr(hoveredCandle?.high)}
-                              </text>
-                              <text x="10" y="54">
-                                L {formatInr(hoveredCandle?.low)}  C {formatInr(hoveredCandle?.close)}
-                              </text>
-                              <text x="10" y="72">
-                                Vol {formatNumber(hoveredCandle?.volume)}
-                              </text>
-                              <text x="10" y="90">
-                                SMA20 {formatInr(hoveredChartPoint.sma20)}  EMA20 {formatInr(hoveredChartPoint.ema20)}
-                              </text>
-                              <text x="10" y="108">
-                                SMA50 {formatInr(hoveredChartPoint.sma50)}  VWAP {formatInr(hoveredChartPoint.vwap)}
-                              </text>
-                              <text x="10" y="126">
-                                RSI {formatNumber(hoveredChartPoint.rsi)}  MACD {formatNumber(hoveredChartPoint.macd)}
-                              </text>
-                            </g>
-                          </g>
-                        )}
-                      </>
-                    ) : (
-                      <text className="chart-empty" x="24" y="155">
-                        Refresh EOD data to draw candles
-                      </text>
-                    )}
-                  </svg>
-                </div>
+                <PriceChart
+                  candles={chartWindowCandles}
+                  forecast={
+                    forecastProjection
+                      ? {
+                          tradingDays: forecastProjection.tradingDays,
+                          horizonLabel: forecastProjection.horizonLabel,
+                          cases: forecastProjection.cases.map((forecastCase) => ({ key: forecastCase.key, points: forecastCase.points })),
+                        }
+                      : undefined
+                  }
+                  indicators={chartIndicators}
+                  patterns={recentPatternSignals.map((signal) => ({
+                    date: chartWindowCandles[signal.index]?.date ?? '',
+                    bias: signal.bias,
+                    name: signal.name,
+                  }))}
+                  symbol={analysis.quoteKey}
+                />
 
                 {forecastProjection && (
                   <div className="forecast-summary-panel">
@@ -6870,53 +6573,58 @@ function App() {
                   </div>
                 )}
 
-                {chartIndicators.patterns && (
-                  <CollapsibleSection
-                    className="pattern-findings-panel nested-collapse"
-                    eyebrow="Pattern findings"
-                    headingClassName="subsection-heading"
-                    headingLevel={4}
-                    id="pattern-findings-heading"
-                    titleAddon={<HelpTip text="Candlestick patterns are visual clues, not trade calls. Use them only with trend location, support/resistance, volume, and next-candle confirmation." />}
-                    title="Detected Patterns and How to Use Them"
-                  >
+                {/* Always visible: the Patterns chip only controls the on-chart markers,
+                    not this reference section. */}
+                <CollapsibleSection
+                  className="pattern-findings-panel nested-collapse"
+                  eyebrow="Pattern findings"
+                  headingClassName="subsection-heading"
+                  headingLevel={4}
+                  id="pattern-findings-heading"
+                  titleAddon={<HelpTip text="Candlestick patterns are visual clues, not trade calls. Use them only with trend location, support/resistance, volume, and next-candle confirmation." />}
+                  title="Detected Patterns and How to Use Them"
+                >
                     {patternFindings.length ? (
-                      <div className="pattern-findings-list">
-                        {patternFindings.map((signal) => (
-                          <article className={`pattern-finding ${signal.bias}`} key={`${signal.name}-${signal.index}-finding`}>
-                            <div className="pattern-finding-top">
-                              <span>{signal.kind}</span>
-                              <strong>{signal.name}</strong>
-                              <small>{signal.date} close {formatInr(signal.price)}</small>
-                            </div>
-                            <div className="pattern-finding-body">
-                              <p>
-                                <b>How to spot:</b> {signal.spot}
-                              </p>
-                              <p>
-                                <b>How it looks:</b> {signal.looks}
-                              </p>
-                              <p>
-                                <b>What it means:</b> {signal.explanation}
-                              </p>
-                              <p>
-                                <b>How to use it:</b> {signal.use}
-                              </p>
-                              <p>
-                                <b>Be cautious:</b> {signal.caution}
-                              </p>
-                              <p>
-                                <b>Invalidation:</b> {signal.stopHint}
-                              </p>
-                            </div>
-                          </article>
-                        ))}
-                      </div>
+                      <FlashcardDeck
+                        ariaLabel="Detected candlestick patterns"
+                        cards={patternFindings.map((signal) => ({
+                          id: `${signal.name}-${signal.index}-finding`,
+                          category: signal.bias === 'bullish' ? 'Bullish' : signal.bias === 'bearish' ? 'Bearish' : 'Neutral',
+                          content: (
+                            <article className={`pattern-finding ${signal.bias}`}>
+                              <div className="pattern-finding-top">
+                                <span>{signal.kind}</span>
+                                <strong>{signal.name}</strong>
+                                <small>{signal.date} close {formatInr(signal.price)}</small>
+                              </div>
+                              <div className="pattern-finding-body">
+                                <p>
+                                  <b>How to spot:</b> {signal.spot}
+                                </p>
+                                <p>
+                                  <b>How it looks:</b> {signal.looks}
+                                </p>
+                                <p>
+                                  <b>What it means:</b> {signal.explanation}
+                                </p>
+                                <p>
+                                  <b>How to use it:</b> {signal.use}
+                                </p>
+                                <p>
+                                  <b>Be cautious:</b> {signal.caution}
+                                </p>
+                                <p>
+                                  <b>Invalidation:</b> {signal.stopHint}
+                                </p>
+                              </div>
+                            </article>
+                          ),
+                        }))}
+                      />
                     ) : (
                       <p className="pattern-empty">No recent single or multi-candle pattern was detected in this timeframe and zoom window.</p>
                     )}
-                  </CollapsibleSection>
-                )}
+                </CollapsibleSection>
 
                 <CollapsibleSection
                   className="chart-guide nested-collapse"
@@ -6926,35 +6634,39 @@ function App() {
                   id="chart-guide-heading"
                   title="How to Read This Chart for Non-Intraday Trading"
                 >
-                  <div className="chart-guide-grid">
-                    {chartGuideSections.map((section) => (
-                      <article key={section.title}>
-                        <strong>{section.title}</strong>
-                        <dl className="guide-detail-list">
-                          <div>
-                            <dt>How to spot</dt>
-                            <dd>{section.spot}</dd>
-                          </div>
-                          <div>
-                            <dt>How it looks</dt>
-                            <dd>{section.looks}</dd>
-                          </div>
-                          <div>
-                            <dt>What it means</dt>
-                            <dd>{section.means}</dd>
-                          </div>
-                          <div>
-                            <dt>How to use it</dt>
-                            <dd>{section.use}</dd>
-                          </div>
-                          <div>
-                            <dt>Be cautious</dt>
-                            <dd>{section.caution}</dd>
-                          </div>
-                        </dl>
-                      </article>
-                    ))}
-                  </div>
+                  <FlashcardDeck
+                    ariaLabel="Chart reading guide"
+                    cards={chartGuideSections.map((section) => ({
+                      id: section.title,
+                      content: (
+                        <article className="chart-guide-card">
+                          <strong>{section.title}</strong>
+                          <dl className="guide-detail-list">
+                            <div>
+                              <dt>How to spot</dt>
+                              <dd>{section.spot}</dd>
+                            </div>
+                            <div>
+                              <dt>How it looks</dt>
+                              <dd>{section.looks}</dd>
+                            </div>
+                            <div>
+                              <dt>What it means</dt>
+                              <dd>{section.means}</dd>
+                            </div>
+                            <div>
+                              <dt>How to use it</dt>
+                              <dd>{section.use}</dd>
+                            </div>
+                            <div>
+                              <dt>Be cautious</dt>
+                              <dd>{section.caution}</dd>
+                            </div>
+                          </dl>
+                        </article>
+                      ),
+                    }))}
+                  />
                 </CollapsibleSection>
                 <p className="caption">
                   Use the timeframe and indicator buttons to judge whether price is building demand or running into supply. This is delayed EOD data, so it supports non-intraday analysis rather than live execution.
@@ -6969,7 +6681,7 @@ function App() {
                 id="technical-risk-heading"
                 title="Position, Risk, Range, and Liquidity"
               >
-                <div className="visual-grid subsection-card-grid technical-card-grid">
+                <FlashcardStack ariaLabel="Position, risk, range, and liquidity cards" className="visual-card-deck">
               <article className={`visual-card price-story tone-${trendTone}`}>
                 <div className="visual-card-heading">
                   <div>
@@ -7161,7 +6873,7 @@ function App() {
                   {activeTickerDisplay} needs business-quality confirmation before adding. Weak market cap, ROCE, debt, valuation, or profit trend should reduce buy/add comfort even when the chart gives a short-term bounce.
                 </p>
               </article>
-                </div>
+                </FlashcardStack>
               </CollapsibleSection>
             </div>
           </CollapsibleSection>
@@ -7242,21 +6954,25 @@ function App() {
                   </div>
                   <strong>{activeFundamentals ? `${companyRatioFacts.filter((fact) => fact.value !== '-').length}/${companyRatioFacts.length}` : '0'}</strong>
                 </div>
-                <div className="company-ratio-grid flat-ratio-grid">
-                  {companyRatioGroups.flatMap((group) =>
-                    group.facts.map((fact) => (
-                      <div className={`company-ratio tone-${fact.tone}`} key={`${group.title}-${fact.label}`}>
-                        <small className="ratio-category-tag">{group.title}</small>
-                        <span className="label-with-help">
-                          {fact.label}
-                          <HelpTip text={fact.helper} />
-                        </span>
-                        <strong>{fact.value}</strong>
-                        <p>{ratioNarrative(fact)}</p>
-                      </div>
-                    )),
+                <FlashcardDeck
+                  ariaLabel="Company ratio cards"
+                  cards={companyRatioGroups.flatMap((group) =>
+                    group.facts.map((fact) => ({
+                      id: `${group.title}-${fact.label}`,
+                      category: group.title,
+                      content: (
+                        <div className={`company-ratio tone-${fact.tone}`}>
+                          <span className="label-with-help">
+                            {fact.label}
+                            <HelpTip text={fact.helper} />
+                          </span>
+                          <strong>{fact.value}</strong>
+                          <p>{ratioNarrative(fact)}</p>
+                        </div>
+                      ),
+                    })),
                   )}
-                </div>
+                />
                 <p className="caption">
                   Read ratios in groups. Cheap valuation with weak cash flow can become a trap, while expensive valuation needs growth and margins to keep supporting future price.
                 </p>
@@ -7272,28 +6988,33 @@ function App() {
                   <strong>{companyUpdates.length ? 'Review impact' : 'None found'}</strong>
                 </div>
                 {companyUpdates.length ? (
-                  <div className="company-updates-list">
-                    {companyUpdates.map((update) => (
-                      <article className={`company-update tone-${update.tone ?? 'neutral'}`} key={`${update.title}-${update.date ?? ''}`}>
-                        <div>
-                          <span>{updateKind(update)}</span>
-                          <strong>{update.title}</strong>
-                          {update.date && <small>{update.date}</small>}
-                        </div>
-                        <p>
-                          <strong>Business meaning:</strong> {updateBusinessMeaning(update)}
-                        </p>
-                        <p>
-                          <strong>Price effect:</strong> {updatePriceImpact(update)}
-                        </p>
-                        {update.url && (
-                          <a href={update.url} target="_blank" rel="noreferrer">
-                            Open filing
-                          </a>
-                        )}
-                      </article>
-                    ))}
-                  </div>
+                  <FlashcardDeck
+                    ariaLabel="Recent company updates"
+                    cards={companyUpdates.map((update) => ({
+                      id: `${update.title}-${update.date ?? ''}`,
+                      category: updateKind(update),
+                      content: (
+                        <article className={`company-update tone-${update.tone ?? 'neutral'}`}>
+                          <div>
+                            <span>{updateKind(update)}</span>
+                            <strong>{update.title}</strong>
+                            {update.date && <small>{update.date}</small>}
+                          </div>
+                          <p>
+                            <strong>Business meaning:</strong> {updateBusinessMeaning(update)}
+                          </p>
+                          <p>
+                            <strong>Price effect:</strong> {updatePriceImpact(update)}
+                          </p>
+                          {update.url && (
+                            <a href={update.url} target="_blank" rel="noreferrer">
+                              Open filing
+                            </a>
+                          )}
+                        </article>
+                      ),
+                    }))}
+                  />
                 ) : (
                   <p className="company-summary">
                     No meaningful recent company update was found in the fetched feed. Re-sync later and confirm important events from exchange filings before changing size.
@@ -7312,7 +7033,7 @@ function App() {
                 id="fundamental-quality-heading"
                 title="Quality"
               >
-                <div className="visual-grid subsection-card-grid fundamental-subgrid fundamental-quality-grid">
+                <FlashcardStack ariaLabel="Business quality cards" className="visual-card-deck">
               <article className={`visual-card fundamental-score-card tone-${fundamentalScore >= 70 ? 'positive' : fundamentalScore < 40 ? 'negative' : 'neutral'}`}>
                 <div className="visual-card-heading">
                   <div>
@@ -7382,7 +7103,7 @@ function App() {
                 </div>
                 <p className="caption">Before adding capital, fill the biggest evidence gaps from the annual report, quarterly results, exchange filings, and peer comparison.</p>
               </article>
-                </div>
+                </FlashcardStack>
               </CollapsibleSection>
             </div>
           </CollapsibleSection>
@@ -7499,24 +7220,6 @@ function App() {
                   >
                     {freeRefreshState === 'refreshing' ? 'Syncing...' : 'Sync Market Data'}
                   </button>
-                  <button
-                    aria-label={clearDataArmed ? 'Confirm clear all browser data, this cannot be undone' : 'Clear Browser Data'}
-                    className={`secondary-action danger-action ${clearDataArmed ? 'armed' : ''}`}
-                    type="button"
-                    onClick={() => {
-                      if (clearDataArmed) {
-                        clearBrowserWorkspace()
-                      } else {
-                        setClearDataArmed(true)
-                      }
-                    }}
-                    disabled={freeRefreshState === 'refreshing'}
-                  >
-                    {clearDataArmed ? 'Confirm clear? This cannot be undone' : 'Clear Browser Data'}
-                  </button>
-                  <span className={`status-dot ${uploadState === 'error' ? 'warning' : 'ready'}`}>
-                    {uploadState === 'uploading' ? 'Uploading' : hasUploadedHoldingsFeed ? 'Loaded' : uploadState === 'error' ? 'Check' : 'No file'}
-                  </span>
                   {hasUploadedHoldingsFeed && (
                     <button
                       className="secondary-action danger-action compact-remove-feed"
