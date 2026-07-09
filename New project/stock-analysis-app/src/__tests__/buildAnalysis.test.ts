@@ -99,11 +99,12 @@ describe('buildAnalysis', () => {
     expect(result.ltp).toBe(1350)
   })
 
-  it('treats an existing holding as a holding-review decision, not a fresh entry', () => {
+  it('treats the Sell action as a holding-review decision, not a fresh entry', () => {
     const holdingForm: AnalysisForm = {
       ...initialForm,
       ticker: 'INFY',
       exchange: 'NSE',
+      // The UI's Sell action maps to the existing internal holding-review flag.
       alreadyHold: true,
       quantity: '50',
       averagePrice: '1400',

@@ -680,7 +680,7 @@ const requiredHelp = {
   capital:
     'For a new position, this is the cash you are willing to deploy and is required for sizing. It should be deployable market capital only, not emergency money, fixed-goal money, or retirement-style capital. For an existing holding, it is optional fresh/additional capital only if you are considering adding more.',
   horizon: 'Your intended holding period. Longer horizons give more weight to fundamentals and less to short-term noise.',
-  alreadyHold: 'Turn this on when the stock is already in your portfolio. It makes average price, drawdown, and portfolio weight affect the verdict.',
+  alreadyHold: 'Buy analyses a new position. Sell reviews an existing holding and enables quantity, average price, P&L, and portfolio-weight logic.',
   boughtOn: 'Reference date for your original entry. It is useful context for reviewing whether the thesis has had enough time to work.',
   quantity: 'Current number of shares. It drives current value, P&L, portfolio concentration, and exposure risk.',
   averagePrice: 'Your average buy price. It is used to calculate unrealized gain/loss and breakeven recovery needed.',
@@ -4909,7 +4909,7 @@ function App() {
       `Ticker: ${form.exchange}:${form.ticker.toUpperCase()}`,
       `Exchange: ${form.exchange}`,
       `Horizon: ${horizonLabels[form.horizon]}`,
-      `Already holding: ${form.alreadyHold ? 'Yes' : 'No'}`,
+      `Action: ${form.alreadyHold ? 'Sell' : 'Buy'}`,
       `${form.alreadyHold ? 'Add-more capital' : 'Capital to deploy'}: ${form.alreadyHold && !parseNumber(form.capital) ? 'Not adding' : formatInr(parseNumber(form.capital))}`,
       `Bought on: ${form.boughtOn || '-'}`,
       `Quantity: ${form.quantity || '-'}`,
@@ -5662,15 +5662,6 @@ function App() {
           <CollapsibleSection
             action={
               <div className="research-brief-actions">
-                <button
-                  aria-pressed={form.alreadyHold}
-                  className={`holding-toggle-button ${form.alreadyHold ? 'active' : ''}`}
-                  type="button"
-                  onClick={() => updateForm('alreadyHold', !form.alreadyHold)}
-                >
-                  Already holding
-                  <HelpTip text={requiredHelp.alreadyHold} />
-                </button>
                 <button className="secondary-action" type="button" onClick={() => copyCommand('brief', analysisBrief)}>
                   {copied === 'brief' ? 'Copied' : 'Copy brief'}
                 </button>
@@ -5729,6 +5720,17 @@ function App() {
                 <label className="field">
                   <FieldLabel help={capitalHelpText}>{isHoldingReview ? 'Add-more capital' : 'Capital to deploy'}</FieldLabel>
                   <input aria-label={isHoldingReview ? 'Add-more capital' : 'Capital to deploy'} inputMode="decimal" value={form.capital} onChange={(event) => updateForm('capital', event.target.value)} />
+                </label>
+                <label className="field">
+                  <FieldLabel help={requiredHelp.alreadyHold}>Action</FieldLabel>
+                  <select
+                    aria-label="Action"
+                    value={form.alreadyHold ? 'sell' : 'buy'}
+                    onChange={(event) => updateForm('alreadyHold', event.target.value === 'sell')}
+                  >
+                    <option value="buy">Buy</option>
+                    <option value="sell">Sell</option>
+                  </select>
                 </label>
               </div>
 

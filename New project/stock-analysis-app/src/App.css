@@ -12670,28 +12670,6 @@ body {
   gap: 8px;
 }
 
-.holding-toggle-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  min-height: 38px;
-  padding: 7px 12px;
-  color: var(--text-secondary);
-  white-space: nowrap;
-}
-
-.holding-toggle-button.active {
-  border-color: color-mix(in srgb, var(--accent) 58%, var(--border));
-  color: var(--on-accent);
-  background: var(--accent-strong);
-}
-
-.holding-toggle-button.active .help-tip {
-  border-color: color-mix(in srgb, var(--on-accent) 62%, transparent);
-  color: var(--on-accent);
-}
-
 .setup-parent .input-grid {
   gap: 18px;
 }

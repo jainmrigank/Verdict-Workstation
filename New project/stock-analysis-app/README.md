@@ -38,7 +38,7 @@ It captures:
 - Ticker and exchange.
 - Investment horizon.
 - Fresh-entry capital or add-more capital.
-- Already holding mode.
+- Buy/Sell action selection, where Buy analyses a new position and Sell reviews an existing holding.
 - Bought date, quantity, and average price for holding reviews.
 - Risk profile and market-access mode.
 - History window for market-data refresh.
