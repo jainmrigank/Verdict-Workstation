@@ -49,17 +49,6 @@ const primaryWorkspaceTabs: Array<{ id: View; label: string; caption: string }> 
   { id: 'coach', label: 'AI Coach', caption: 'Ask why' },
 ]
 
-const workspaceTabIcons: Record<View, string> = {
-  setup: 'S',
-  verdict: 'D',
-  technicals: 'C',
-  fundamentals: 'Co',
-  data: 'P',
-  coach: 'AI',
-  reasoning: 'R',
-  glossary: '?',
-}
-
 const utilityWorkspaceTabs: Array<{ id: View; label: string }> = [
   { id: 'reasoning', label: 'Reasoning' },
   { id: 'glossary', label: 'Glossary' },
@@ -5534,6 +5523,9 @@ function App() {
     }
   }
 
+  const activeWorkspaceTab = [...primaryWorkspaceTabs, ...utilityWorkspaceTabs].find((tab) => tab.id === view)
+  const activeWorkspaceLabel = activeWorkspaceTab?.label ?? 'Start'
+
   return (
     <main className="app-shell">
       <header className="topbar app-hero-panel">
@@ -5552,6 +5544,9 @@ function App() {
 
         <div className="app-title-block">
           <h1>Stock Analysis Agent</h1>
+          <span className="active-view-chip" aria-label={`Current tab: ${activeWorkspaceLabel}`}>
+            {activeWorkspaceLabel}
+          </span>
         </div>
 
         <nav className="workspace-nav" aria-label="Analysis workspace">
@@ -5616,15 +5611,16 @@ function App() {
           {primaryWorkspaceTabs.map((tab) => (
             <button
               aria-current={view === tab.id ? 'page' : undefined}
+              aria-label={`${tab.label}: ${tab.caption}`}
               className={`drawer-nav-item ${view === tab.id ? 'active' : ''}`}
               key={tab.id}
+              title={`${tab.label}: ${tab.caption}`}
               type="button"
               onClick={() => {
                 setView(tab.id)
                 setWorkspaceDrawerOpen(false)
               }}
             >
-              <span className="nav-icon" aria-hidden="true">{workspaceTabIcons[tab.id]}</span>
               <span>
                 <strong>{tab.label}</strong>
                 <small>{tab.caption}</small>
@@ -5635,15 +5631,16 @@ function App() {
         <div className="workspace-drawer-section utility-drawer-section" aria-label="Reference tools">
           {utilityWorkspaceTabs.map((tab) => (
             <button
+              aria-label={tab.id === 'reasoning' ? 'Reasoning: Decision trace' : 'Glossary: Term guide'}
               className={`drawer-nav-item ${view === tab.id ? 'active' : ''}`}
               key={tab.id}
+              title={tab.id === 'reasoning' ? 'Reasoning: Decision trace' : 'Glossary: Term guide'}
               type="button"
               onClick={() => {
                 setView(tab.id)
                 setWorkspaceDrawerOpen(false)
               }}
             >
-              <span className="nav-icon" aria-hidden="true">{workspaceTabIcons[tab.id]}</span>
               <span>
                 <strong>{tab.label}</strong>
                 <small>{tab.id === 'reasoning' ? 'Decision trace' : 'Term guide'}</small>
@@ -5654,9 +5651,10 @@ function App() {
             className="drawer-nav-item"
             type="button"
             aria-pressed={theme === 'dark'}
+            aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+            title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
             onClick={() => setTheme((current) => (current === 'dark' ? 'light' : 'dark'))}
           >
-            <span className="nav-icon" aria-hidden="true">{theme === 'dark' ? 'D' : 'L'}</span>
             <span>
               <strong>{theme === 'dark' ? 'Dark mode' : 'Light mode'}</strong>
               <small>Theme</small>
@@ -5671,7 +5669,7 @@ function App() {
         ref={viewAnnouncementRef}
         tabIndex={-1}
       >
-        {[...primaryWorkspaceTabs, ...utilityWorkspaceTabs].find((tab) => tab.id === view)?.label ?? 'Stock Analysis Agent'} section loaded.
+        {activeWorkspaceLabel} section loaded.
       </div>
 
       {view === 'setup' ? (
@@ -5956,7 +5954,7 @@ function App() {
         <>
           <CollapsibleSection
             action={
-              <div className="score-box" style={percentStyle(analysis.score, '--score')}>
+              <div className={`score-box tone-${toneFromScore(analysis.score)}`} style={percentStyle(analysis.score, '--score')}>
                 <strong>{analysis.score}</strong>
                 <span>/100</span>
               </div>
@@ -6109,41 +6107,32 @@ function App() {
                 ))}
               </div>
 
-              <CollapsibleSection
-                className="signal-contribution-panel nested-collapse"
-                headingClassName="subsection-heading"
-                headingLevel={4}
-                id="all-signal-contributions-heading"
-                title="Metric-by-Metric Price Clues"
-              >
-                <div className="signal-category-stack">
-                  {adaptiveSignalGroups.map((group) => (
-                    <section className="signal-category-block" key={group.title}>
-                      <div className="category-strip-heading">
-                        <h4>{group.title}</h4>
-                        <span>{group.signals.length}</span>
-                      </div>
-                      <div className="adaptive-signal-grid">
-                        {group.signals.map((signal) => (
-                          <article className={`adaptive-signal-card tone-${signal.tone}`} key={`${signal.group}-${signal.label}`}>
-                            <span>{signal.group}</span>
-                            <strong>{signal.label}</strong>
-                            <small>{signal.value}</small>
-                            <div className="signal-score-line">
-                              <span className="score-with-help">
-                                <b>{signal.score}</b>
-                                <span className="read-scale">/100</span>
-                                <HelpTip text={signalDefinition(signal)} />
-                              </span>
-                            </div>
-                            <p>{signalNarrative(signal)}</p>
-                          </article>
-                        ))}
-                      </div>
-                    </section>
-                  ))}
+              <div className="signal-contribution-panel flat-signal-panel">
+                <div className="flat-section-heading">
+                  <span className="mini-label">Metric clues</span>
+                  <strong>{analysis.adaptiveSignals.length} signals</strong>
                 </div>
-              </CollapsibleSection>
+                <div className="adaptive-signal-grid flat-signal-grid">
+                  {adaptiveSignalGroups.flatMap((group) =>
+                    group.signals.map((signal) => (
+                      <article className={`adaptive-signal-card tone-${signal.tone}`} key={`${signal.group}-${signal.label}`}>
+                        <small className="ratio-category-tag">{group.title}</small>
+                        <span>{signal.group}</span>
+                        <strong>{signal.label}</strong>
+                        <small>{signal.value}</small>
+                        <div className="signal-score-line">
+                          <span className="score-with-help">
+                            <b>{signal.score}</b>
+                            <span className="read-scale">/100</span>
+                            <HelpTip text={signalDefinition(signal)} />
+                          </span>
+                        </div>
+                        <p>{signalNarrative(signal)}</p>
+                      </article>
+                    )),
+                  )}
+                </div>
+              </div>
             </CollapsibleSection>
 
             <div className="guidance-grid">
@@ -6362,7 +6351,7 @@ function App() {
                       </button>
                     ))}
                     <button
-                      className={chartZoomLevel === 1 ? 'active' : ''}
+                      className={chartZoomLevel > 1 ? 'active' : ''}
                       type="button"
                       onClick={() => {
                         setChartZoomLevel(1)
@@ -7253,27 +7242,20 @@ function App() {
                   </div>
                   <strong>{activeFundamentals ? `${companyRatioFacts.filter((fact) => fact.value !== '-').length}/${companyRatioFacts.length}` : '0'}</strong>
                 </div>
-                <div className="company-ratio-category-stack">
-                  {companyRatioGroups.map((group) => (
-                    <section className="company-ratio-category" key={group.title}>
-                      <div className="category-strip-heading">
-                        <h4>{group.title}</h4>
-                        <span>{group.facts.filter((fact) => fact.value !== '-').length}/{group.facts.length}</span>
+                <div className="company-ratio-grid flat-ratio-grid">
+                  {companyRatioGroups.flatMap((group) =>
+                    group.facts.map((fact) => (
+                      <div className={`company-ratio tone-${fact.tone}`} key={`${group.title}-${fact.label}`}>
+                        <small className="ratio-category-tag">{group.title}</small>
+                        <span className="label-with-help">
+                          {fact.label}
+                          <HelpTip text={fact.helper} />
+                        </span>
+                        <strong>{fact.value}</strong>
+                        <p>{ratioNarrative(fact)}</p>
                       </div>
-                      <div className="company-ratio-grid">
-                        {group.facts.map((fact) => (
-                          <div className={`company-ratio tone-${fact.tone}`} key={`${group.title}-${fact.label}`}>
-                            <span className="label-with-help">
-                              {fact.label}
-                              <HelpTip text={fact.helper} />
-                            </span>
-                            <strong>{fact.value}</strong>
-                            <p>{ratioNarrative(fact)}</p>
-                          </div>
-                        ))}
-                      </div>
-                    </section>
-                  ))}
+                    )),
+                  )}
                 </div>
                 <p className="caption">
                   Read ratios in groups. Cheap valuation with weak cash flow can become a trap, while expensive valuation needs growth and margins to keep supporting future price.
@@ -7480,47 +7462,12 @@ function App() {
       {view === 'data' ? (
         <>
           <CollapsibleSection
-            action={
-              <div className="data-action-row">
-                <div className={`cache-pill portfolio-cache-pill ${cacheState}`}>
-                  <span>{cacheLabel(cacheState)}</span>
-                  <strong>{cacheAge(activeSnapshot.generated_at)}</strong>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => void refreshFreeData({ source: 'data' })}
-                  disabled={freeRefreshState === 'refreshing'}
-                >
-                  {freeRefreshState === 'refreshing' ? 'Syncing...' : 'Sync Market Data'}
-                </button>
-                <button
-                  aria-label={clearDataArmed ? 'Confirm clear all browser data, this cannot be undone' : 'Clear Browser Data'}
-                  className={`secondary-action danger-action ${clearDataArmed ? 'armed' : ''}`}
-                  type="button"
-                  onClick={() => {
-                    if (clearDataArmed) {
-                      clearBrowserWorkspace()
-                    } else {
-                      setClearDataArmed(true)
-                    }
-                  }}
-                  disabled={freeRefreshState === 'refreshing'}
-                >
-                  {clearDataArmed ? 'Confirm clear? This cannot be undone' : 'Clear Browser Data'}
-                </button>
-              </div>
-            }
             className="panel command-panel data-hub-main-panel"
             eyebrow="Portfolio"
             id="portfolio-market-heading"
             staticOpen
             title="Portfolio"
           >
-            {freeRefreshMessage && (
-              <div className={`refresh-message ${freeRefreshState}`}>
-                <p>{freeRefreshMessage}</p>
-              </div>
-            )}
             {freeRefreshState === 'refreshing' && (
               <div className="sync-progress-panel" role="status" aria-live="polite">
                 <div className="sync-progress-top">
@@ -7541,6 +7488,32 @@ function App() {
                   <p>Your active holdings file, latest prices, and row-level analyse actions.</p>
                 </div>
                 <div className="holding-feed-actions">
+                  <div className={`cache-pill portfolio-cache-pill ${cacheState}`}>
+                    <span>{cacheLabel(cacheState)}</span>
+                    <strong>{cacheAge(activeSnapshot.generated_at)}</strong>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void refreshFreeData({ source: 'data' })}
+                    disabled={freeRefreshState === 'refreshing'}
+                  >
+                    {freeRefreshState === 'refreshing' ? 'Syncing...' : 'Sync Market Data'}
+                  </button>
+                  <button
+                    aria-label={clearDataArmed ? 'Confirm clear all browser data, this cannot be undone' : 'Clear Browser Data'}
+                    className={`secondary-action danger-action ${clearDataArmed ? 'armed' : ''}`}
+                    type="button"
+                    onClick={() => {
+                      if (clearDataArmed) {
+                        clearBrowserWorkspace()
+                      } else {
+                        setClearDataArmed(true)
+                      }
+                    }}
+                    disabled={freeRefreshState === 'refreshing'}
+                  >
+                    {clearDataArmed ? 'Confirm clear? This cannot be undone' : 'Clear Browser Data'}
+                  </button>
                   <span className={`status-dot ${uploadState === 'error' ? 'warning' : 'ready'}`}>
                     {uploadState === 'uploading' ? 'Uploading' : hasUploadedHoldingsFeed ? 'Loaded' : uploadState === 'error' ? 'Check' : 'No file'}
                   </span>
@@ -7557,6 +7530,9 @@ function App() {
                   )}
                 </div>
               </div>
+              {freeRefreshMessage && (
+                <p className={`portfolio-helper-message ${freeRefreshState}`}>{freeRefreshMessage}</p>
+              )}
 
               {!hasUploadedHoldingsFeed && (
                 <div className="upload-grid portfolio-upload-grid">
