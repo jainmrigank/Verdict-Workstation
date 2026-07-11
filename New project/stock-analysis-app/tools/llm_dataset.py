@@ -9,7 +9,9 @@ import itertools
 import json
 import os
 import random
+import re
 import sys
+import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,7 +41,138 @@ DESCENDANTS_PER_GOLD = {"train": 11, "validation": 9, "eval": 4}
 
 
 class GeminiQuotaError(RuntimeError):
-    """The free Gemini quota is exhausted; completed dataset work remains valid."""
+    """Structured Gemini quota failure used by resumable dataset commands."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        metric: str = "",
+        quota_id: str = "",
+        dimensions: dict[str, str] | None = None,
+        limit: int | None = None,
+        retry_after_seconds: float | None = None,
+        scope: str = "hard",
+    ) -> None:
+        super().__init__(message)
+        self.metric = metric
+        self.quota_id = quota_id
+        self.dimensions = dimensions or {}
+        self.limit = limit
+        self.retry_after_seconds = retry_after_seconds
+        self.scope = scope
+
+    @property
+    def is_short_window(self) -> bool:
+        return self.scope == "short_window" and self.retry_after_seconds is not None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "message": str(self),
+            "metric": self.metric,
+            "quotaId": self.quota_id,
+            "dimensions": self.dimensions,
+            "limit": self.limit,
+            "retryAfterSeconds": self.retry_after_seconds,
+            "scope": self.scope,
+        }
+
+
+GEMINI_PACING_RPM = 0.0
+GEMINI_LAST_REQUEST_AT = 0.0
+GEMINI_PACING_LOCK = threading.Lock()
+
+
+def configure_gemini_pacing(rpm: float) -> None:
+    global GEMINI_PACING_RPM, GEMINI_LAST_REQUEST_AT
+    GEMINI_PACING_RPM = max(0.0, rpm)
+    GEMINI_LAST_REQUEST_AT = 0.0
+
+
+def pace_gemini_request() -> None:
+    global GEMINI_LAST_REQUEST_AT
+    if GEMINI_PACING_RPM <= 0:
+        return
+    minimum_interval = 60.0 / GEMINI_PACING_RPM
+    with GEMINI_PACING_LOCK:
+        now = time.monotonic()
+        if GEMINI_LAST_REQUEST_AT <= 0:
+            GEMINI_LAST_REQUEST_AT = now
+            return
+        wait = max(0.0, GEMINI_LAST_REQUEST_AT + minimum_interval - now)
+        if wait:
+            time.sleep(wait)
+        GEMINI_LAST_REQUEST_AT = time.monotonic()
+
+
+def _retry_seconds(value: Any) -> float | None:
+    if isinstance(value, str):
+        match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)s", value.strip())
+        return float(match.group(1)) if match else None
+    if isinstance(value, dict):
+        seconds = float(value.get("seconds") or 0)
+        nanos = float(value.get("nanos") or 0)
+        return seconds + nanos / 1_000_000_000
+    return None
+
+
+def parse_gemini_quota_error(detail: str) -> GeminiQuotaError:
+    message = detail[:1000]
+    metric = ""
+    quota_id = ""
+    dimensions: dict[str, str] = {}
+    retry_after: float | None = None
+    limit: int | None = None
+    try:
+        payload = json.loads(detail)
+        error = payload[0].get("error") if isinstance(payload, list) and payload else payload.get("error")
+        if isinstance(error, dict):
+            message = str(error.get("message") or message)
+            for item in error.get("details") or []:
+                if not isinstance(item, dict):
+                    continue
+                item_type = str(item.get("@type") or "")
+                if item_type.endswith("RetryInfo"):
+                    retry_after = _retry_seconds(item.get("retryDelay"))
+                if item_type.endswith("QuotaFailure"):
+                    violation = next((value for value in item.get("violations") or [] if isinstance(value, dict)), {})
+                    metric = str(violation.get("quotaMetric") or "")
+                    quota_id = str(violation.get("quotaId") or "")
+                    dimensions = {
+                        str(key): str(value)
+                        for key, value in (violation.get("quotaDimensions") or {}).items()
+                    }
+                    quota_value = violation.get("quotaValue")
+                    if quota_value is not None:
+                        limit = int(float(quota_value))
+    except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
+        pass
+    if retry_after is None:
+        retry_match = re.search(r"retry in\s+([0-9]+(?:\.[0-9]+)?)s", message, flags=re.IGNORECASE)
+        retry_after = float(retry_match.group(1)) if retry_match else None
+    limit_match = re.search(r"limit:\s*(\d+)", message, flags=re.IGNORECASE)
+    if limit_match:
+        limit = int(limit_match.group(1))
+    lowered = f"{metric} {quota_id} {message}".lower()
+    daily_tokens = ("per_day", "perday", "daily", "requests_per_day")
+    minute_tokens = ("per_minute", "perminute", "requests_per_minute")
+    if any(token in lowered for token in daily_tokens):
+        scope = "daily"
+    elif any(token in lowered for token in minute_tokens):
+        scope = "short_window"
+    elif retry_after is not None and retry_after <= 600:
+        scope = "short_window"
+    else:
+        scope = "hard"
+    return GeminiQuotaError(
+        message,
+        metric=metric,
+        quota_id=quota_id,
+        dimensions=dimensions,
+        limit=limit,
+        retry_after_seconds=retry_after,
+        scope=scope,
+    )
 
 ACTIONS = ["Buy", "Sell"]
 INSTRUMENT_TYPES = ["equity", "etf", "index", "fund", "unknown"]
@@ -277,9 +410,13 @@ def gemini_json(prompt: dict[str, Any], system_prompt: str, temperature: float =
         ],
         "response_format": {"type": "json_object"},
         "temperature": temperature,
+        "max_tokens": int(os.environ.get("GEMINI_DATASET_MAX_TOKENS") or 4096),
     }
     retryable = {429, 500, 502, 503, 504}
-    for attempt in range(3):
+    attempts = max(1, int(os.environ.get("GEMINI_DATASET_ATTEMPTS") or 1))
+    timeout = max(10.0, float(os.environ.get("GEMINI_DATASET_TIMEOUT") or 120))
+    for attempt in range(attempts):
+        pace_gemini_request()
         request = Request(
             f"{base_url}/chat/completions",
             data=json.dumps(body).encode("utf-8"),
@@ -287,7 +424,7 @@ def gemini_json(prompt: dict[str, Any], system_prompt: str, temperature: float =
             method="POST",
         )
         try:
-            with urlopen(request, timeout=120) as response:
+            with urlopen(request, timeout=timeout) as response:
                 payload = json.loads(response.read().decode("utf-8"))
             parsed = json.loads(extract_chat_content(payload))
             if not isinstance(parsed, dict):
@@ -296,16 +433,16 @@ def gemini_json(prompt: dict[str, Any], system_prompt: str, temperature: float =
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             if exc.code == 429:
-                raise GeminiQuotaError(f"Gemini returned HTTP 429: {detail[:1000]}") from exc
-            if exc.code not in retryable or attempt == 2:
+                raise parse_gemini_quota_error(detail) from exc
+            if exc.code not in retryable or attempt == attempts - 1:
                 raise RuntimeError(f"Gemini returned HTTP {exc.code}: {detail[:1000]}") from exc
         except URLError as exc:
-            if attempt == 2:
+            if attempt == attempts - 1:
                 raise RuntimeError(f"Could not reach Gemini: {exc.reason}") from exc
         except (TimeoutError, json.JSONDecodeError) as exc:
-            if attempt == 2:
+            if attempt == attempts - 1:
                 raise RuntimeError(f"Gemini returned an invalid or timed-out response: {exc}") from exc
-        time.sleep(2**attempt)
+        time.sleep(5 * (attempt + 1))
     raise RuntimeError("Gemini request failed after retries.")
 
 
@@ -591,6 +728,11 @@ def export_provider(*, pilot: bool = False) -> dict[str, int]:
         }
         validate_lineage([*splits["pilot_train"], *splits["pilot_validation"]], {"train": 75, "validation": 15})
     else:
+        from tools.reasoning_dataset import verify_evaluation_seal
+
+        seal = verify_evaluation_seal(gold)
+        if not seal["verified"]:
+            raise RuntimeError("Final export blocked by evaluation seal: " + "; ".join(seal["errors"]))
         expanded = read_jsonl(EXPANDED_PATH)
         rows = [*gold, *expanded]
         if len(expanded) != 1080:

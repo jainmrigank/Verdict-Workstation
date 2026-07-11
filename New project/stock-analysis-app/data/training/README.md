@@ -15,13 +15,15 @@ Public snapshot caches, expanded rows, provider exports, model weights, adapters
 ```bash
 python3 tools/reasoning_dataset.py validate-manifest
 python3 tools/reasoning_dataset.py collect
-python3 tools/reasoning_dataset.py generate
+python3 tools/reasoning_dataset.py generate --rpm 15 --wait-on-short-quota --max-wait-seconds 600
 python3 tools/reasoning_dataset.py audit
 python3 tools/review_candidates.py --dataset reasoning
 python3 tools/reasoning_dataset.py approve --requested-by-user
+python3 tools/reasoning_dataset.py seal
+python3 tools/reasoning_dataset.py verify-seal
 ```
 
-`collect` checkpoints 63 timestamped Yahoo/MFapi snapshots in `data/generated`. `generate` checkpoints each completed Gemini response and stops cleanly on free-tier HTTP 429 responses. Re-run it after quota resets.
+`collect` checkpoints 63 timestamped Yahoo/MFapi snapshots in `data/generated`. `generate` paces Gemini at 15 RPM by default, checkpoints every completed response, honors bounded short-window retry delays, and stops cleanly on daily or hard quota limits. Use `--max-new` for a bounded run. A malformed or audit-failing response receives one constrained repair; a second failure is quarantined without discarding successful rows.
 
 Approval requires 75 train, 15 validation, and 30 sealed-evaluation gold rows. All scenarios for one instrument remain in one partition. The review workspace can edit expected JSON and records every grounding, applicability, coverage, and writing-quality check.
 
@@ -41,7 +43,7 @@ python3 tools/llm_dataset.py export --pilot
 python3 tools/gemma_bakeoff.py --dry-run --model gemma4-e4b
 ```
 
-Upload `pilot_train.jsonl` and `pilot_validation.jsonl` to the included Colab notebook. Train `gemma4-e4b`; try `gemma3-12b` only when the free accelerator can load it without truncation.
+Upload `pilot_train.jsonl` and `pilot_validation.jsonl` to the included Colab notebook. Train `gemma4-e4b`; try `gemma4-12b` only when the free accelerator can load it without truncation.
 
 Expand only after the pilot improves on validation:
 
@@ -67,7 +69,7 @@ python3 tools/model_bakeoff_eval.py run --name base-gemini --provider gemini
 python3 tools/model_bakeoff_eval.py run --name tuned-gemma --provider local
 ```
 
-The final 30-case set requires the explicit `--split eval --allow-sealed-eval` gate. Compare reports only after adding the recorded human-score file:
+The final 30-case set requires an intact evaluation seal plus the explicit `--split eval --allow-sealed-eval` gate. Compare reports only after adding the recorded human-score file:
 
 ```bash
 python3 tools/model_bakeoff_eval.py compare \

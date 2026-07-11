@@ -8,7 +8,8 @@ import hashlib
 import json
 import math
 import sys
-from datetime import UTC, datetime
+import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode
@@ -21,13 +22,24 @@ if str(APP_ROOT) not in sys.path:
 
 from server.llm_analysis import canonical_json, retrieve_rule_set
 from tools.approve_candidates import audit_candidate, unsupported_numeric_claims
-from tools.llm_dataset import OUTPUT_SCHEMA, gemini_json, load_local_env, read_jsonl, write_jsonl
+from tools.llm_dataset import (
+    OUTPUT_SCHEMA,
+    GeminiQuotaError,
+    configure_gemini_pacing,
+    gemini_json,
+    load_local_env,
+    read_jsonl,
+    write_jsonl,
+)
 
 
 TRAINING_ROOT = APP_ROOT / "data" / "training"
 MANIFEST_PATH = TRAINING_ROOT / "reasoning_instruments.json"
 GOLD_PATH = TRAINING_ROOT / "reasoning_gold.jsonl"
 SNAPSHOT_PATH = APP_ROOT / "data" / "generated" / "reasoning_public_snapshots.json"
+PROGRESS_PATH = APP_ROOT / "data" / "generated" / "reasoning_generation_progress.json"
+QUARANTINE_ROOT = APP_ROOT / "data" / "generated" / "reasoning_quarantine"
+EVALUATION_SEAL_PATH = TRAINING_ROOT / "evaluation_seal.json"
 REVIEW_CHECKS = ("schema", "verdict", "grounding", "rules", "applicability", "coverage", "writingQuality")
 HORIZONS = ("3-6m", "6-12m", "1-3y", "3y+")
 RISK_PROFILES = ("conservative", "balanced", "balanced aggressive", "aggressive")
@@ -339,12 +351,122 @@ def generate_output(facts: dict[str, Any], rule_set: dict[str, Any]) -> dict[str
             "Use company-specific wording supported by the supplied facts.",
             "Treat company fundamentals as non-applicable for funds, ETFs, and indices.",
             "Return an empty chart.patterns array when uiOptions.patternsEnabled is false.",
+            "Write exactly one concise item of at most 35 words in each applicable narrative array.",
+            "Keep each section summary under 60 words and return three concise reasoning steps and three coaching questions.",
         ],
     }
     return gemini_json(
         prompt,
         "You create high-quality supervised financial-analysis answers. Supplied facts and the deterministic verdict are authoritative. Return JSON only.",
         temperature=0.15,
+    )
+
+
+def repair_output(
+    facts: dict[str, Any],
+    rule_set: dict[str, Any],
+    previous_output: dict[str, Any] | None,
+    errors: list[str],
+) -> dict[str, Any]:
+    prompt = {
+        "task": "Repair one LlmAnalysisV1 response. Return one complete corrected JSON object only.",
+        "facts": facts,
+        "retrievedRuleSet": rule_set,
+        "previousOutput": previous_output,
+        "auditErrors": errors[:20],
+        "outputSchema": OUTPUT_SCHEMA,
+        "requirements": [
+            "Do not change or contradict the deterministic verdict.",
+            "Use only supplied numerical and company facts.",
+            "Use only factRefs present in facts and ruleRefs present in retrievedRuleSet.",
+            "Fill every applicable field and mark non-applicable company analysis honestly.",
+            "Return an empty chart.patterns array when uiOptions.patternsEnabled is false.",
+            "Write exactly one concise item of at most 35 words in each applicable narrative array.",
+            "Keep each section summary under 60 words and return three concise reasoning steps and three coaching questions.",
+        ],
+    }
+    return gemini_json(
+        prompt,
+        "You repair grounded financial-analysis JSON. Facts, retrieved rules, and the deterministic verdict are authoritative. Return JSON only.",
+        temperature=0.05,
+    )
+
+
+def case_row(
+    case_id: str,
+    instrument: dict[str, Any],
+    snapshot: dict[str, Any],
+    facts: dict[str, Any],
+    rule_set: dict[str, Any],
+    output: dict[str, Any],
+) -> dict[str, Any]:
+    if not facts["uiOptions"]["patternsEnabled"] and isinstance(output.get("chart"), dict):
+        output["chart"]["patterns"] = []
+    return {
+        "id": case_id,
+        "lineageId": case_id,
+        "split": instrument["split"],
+        "reviewStatus": "pending",
+        "reviewNotes": "",
+        "facts": facts,
+        "retrievedRuleIds": [rule["id"] for rule in rule_set["rules"]],
+        "retrievedRuleSet": rule_set,
+        "output": output,
+        "provenance": {
+            "kind": "public-market-snapshot",
+            "instrumentId": instrument["id"],
+            "source": snapshot["source"],
+            "sourceUrls": snapshot["sourceUrls"],
+            "capturedAt": snapshot["capturedAt"],
+            "factsHash": hashlib.sha256(canonical_json(facts).encode("utf-8")).hexdigest(),
+        },
+    }
+
+
+def row_audit_errors(row: dict[str, Any]) -> list[str]:
+    errors = audit_candidate(row, require_synthetic=False)
+    unsupported_numbers = unsupported_numeric_claims(row)
+    if unsupported_numbers:
+        errors.append(f"{row.get('id')}: unsupported numeric claims {unsupported_numbers[:8]}")
+    return errors
+
+
+def quarantine_path(case_id: str) -> Path:
+    return QUARANTINE_ROOT / f"{case_id}.json"
+
+
+def quarantined_cases() -> list[str]:
+    if not QUARANTINE_ROOT.exists():
+        return []
+    return sorted(path.stem for path in QUARANTINE_ROOT.glob("gold-*.json"))
+
+
+def split_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    return {split: sum(row.get("split") == split for row in rows) for split in ("train", "validation", "eval")}
+
+
+def write_progress(
+    rows: list[dict[str, Any]],
+    *,
+    generated: int,
+    failures: dict[str, str],
+    quota: GeminiQuotaError | None = None,
+    next_retry_at: str = "",
+) -> None:
+    atomic_json(
+        PROGRESS_PATH,
+        {
+            "schemaVersion": "reasoning-generation-progress.v1",
+            "updatedAt": datetime.now(UTC).isoformat(),
+            "completedCases": len(rows),
+            "completedCaseIds": [str(row.get("id") or "") for row in rows],
+            "splitCounts": split_counts(rows),
+            "generatedThisRun": generated,
+            "failures": failures,
+            "quarantinedCases": quarantined_cases(),
+            "lastQuotaResponse": quota.as_dict() if quota else None,
+            "nextRetryAt": next_retry_at or None,
+        },
     )
 
 
@@ -396,7 +518,12 @@ def collect_snapshots(limit: int = 0) -> dict[str, Any]:
     snapshots = json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8")) if SNAPSHOT_PATH.exists() else {}
     selected = payload["instruments"] if limit <= 0 else payload["instruments"][:limit]
     collected = 0
-    failures: dict[str, str] = {}
+    previous_progress = json.loads(PROGRESS_PATH.read_text(encoding="utf-8")) if PROGRESS_PATH.exists() else {}
+    failures: dict[str, str] = {
+        str(case_id): str(error)
+        for case_id, error in (previous_progress.get("failures") or {}).items()
+        if str(case_id) not in existing_ids
+    }
     for instrument in selected:
         instrument_id = instrument["id"]
         if instrument_id in snapshots:
@@ -410,9 +537,17 @@ def collect_snapshots(limit: int = 0) -> dict[str, Any]:
     return {"available": len(snapshots), "collected": collected, "failed": failures, "path": str(SNAPSHOT_PATH)}
 
 
-def generate_gold(limit: int = 0) -> dict[str, Any]:
+def generate_gold(
+    limit: int = 0,
+    *,
+    max_new: int = 0,
+    rpm: float = 15,
+    wait_on_short_quota: bool = True,
+    max_wait_seconds: float = 600,
+) -> dict[str, Any]:
     if not SNAPSHOT_PATH.exists():
         raise RuntimeError("Collect public snapshots before generating gold examples.")
+    configure_gemini_pacing(rpm)
     snapshots = json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
     rows = read_jsonl(GOLD_PATH)
     existing_ids = {str(row.get("id") or "") for row in rows}
@@ -424,51 +559,113 @@ def generate_gold(limit: int = 0) -> dict[str, Any]:
         cases = cases[:limit]
     generated = 0
     quota_exhausted = False
+    quota: GeminiQuotaError | None = None
+    waited_seconds = 0.0
+    failures: dict[str, str] = {}
+
+    def wait_for_quota(exc: GeminiQuotaError) -> bool:
+        nonlocal quota, waited_seconds
+        quota = exc
+        retry = (exc.retry_after_seconds or 0) + 1
+        can_wait = (
+            wait_on_short_quota
+            and exc.is_short_window
+            and retry > 1
+            and waited_seconds + retry <= max_wait_seconds
+        )
+        next_retry_at = (datetime.now(UTC) + timedelta(seconds=retry)).isoformat() if retry > 1 else ""
+        write_progress(
+            rows,
+            generated=generated,
+            failures=failures,
+            quota=exc,
+            next_retry_at=next_retry_at,
+        )
+        if not can_wait:
+            return False
+        time.sleep(retry)
+        waited_seconds += retry
+        return True
+
+    write_progress(rows, generated=generated, failures=failures)
     for instrument, action in cases:
+        if max_new > 0 and generated >= max_new:
+            break
         case_id = f"gold-{instrument['id']}-{action.lower()}"
         if case_id in existing_ids or instrument["id"] not in snapshots:
             continue
         facts = build_facts(instrument, snapshots[instrument["id"]], action)
         rule_set = retrieve_rule_set(facts)
-        try:
-            output = generate_output(facts, rule_set)
-        except RuntimeError as exc:
-            if "HTTP 429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc):
-                quota_exhausted = True
+        output: dict[str, Any] | None = None
+        first_errors: list[str] = []
+        while True:
+            try:
+                output = generate_output(facts, rule_set)
                 break
-            raise
-        if not facts["uiOptions"]["patternsEnabled"] and isinstance(output.get("chart"), dict):
-            output["chart"]["patterns"] = []
-        row = {
-            "id": case_id,
-            "lineageId": case_id,
-            "split": instrument["split"],
-            "reviewStatus": "pending",
-            "reviewNotes": "",
-            "facts": facts,
-            "retrievedRuleIds": [rule["id"] for rule in rule_set["rules"]],
-            "retrievedRuleSet": rule_set,
-            "output": output,
-            "provenance": {
-                "kind": "public-market-snapshot",
-                "instrumentId": instrument["id"],
-                "source": snapshots[instrument["id"]]["source"],
-                "sourceUrls": snapshots[instrument["id"]]["sourceUrls"],
-                "capturedAt": snapshots[instrument["id"]]["capturedAt"],
-                "factsHash": hashlib.sha256(canonical_json(facts).encode("utf-8")).hexdigest(),
-            },
-        }
-        row_errors = audit_candidate(row, require_synthetic=False)
-        unsupported_numbers = unsupported_numeric_claims(row)
-        if unsupported_numbers:
-            row_errors.append(f"{case_id}: unsupported numeric claims {unsupported_numbers[:8]}")
-        if row_errors:
-            raise RuntimeError("Generated gold row failed strict audit: " + "; ".join(row_errors[:12]))
+            except GeminiQuotaError as exc:
+                if not wait_for_quota(exc):
+                    quota_exhausted = True
+                    break
+            except RuntimeError as exc:
+                first_errors = [f"Initial generation failed: {exc}"]
+                break
+        if quota_exhausted:
+            break
+
+        row = case_row(case_id, instrument, snapshots[instrument["id"]], facts, rule_set, output or {})
+        first_errors.extend(row_audit_errors(row))
+        if first_errors:
+            second_errors: list[str] = []
+            while True:
+                try:
+                    repaired = repair_output(facts, rule_set, output, first_errors)
+                    row = case_row(case_id, instrument, snapshots[instrument["id"]], facts, rule_set, repaired)
+                    second_errors = row_audit_errors(row)
+                    break
+                except GeminiQuotaError as exc:
+                    if not wait_for_quota(exc):
+                        quota_exhausted = True
+                        break
+                except RuntimeError as exc:
+                    second_errors = [f"Repair failed: {exc}"]
+                    break
+            if quota_exhausted:
+                break
+            if second_errors:
+                failures[case_id] = "; ".join(second_errors[:12])
+                atomic_json(
+                    quarantine_path(case_id),
+                    {
+                        "schemaVersion": "reasoning-quarantine.v1",
+                        "caseId": case_id,
+                        "failedAt": datetime.now(UTC).isoformat(),
+                        "initialErrors": first_errors,
+                        "repairErrors": second_errors,
+                        "factsHash": hashlib.sha256(canonical_json(facts).encode("utf-8")).hexdigest(),
+                    },
+                )
+                write_progress(rows, generated=generated, failures=failures)
+                continue
         rows.append(row)
         existing_ids.add(case_id)
         generated += 1
         write_jsonl(GOLD_PATH, rows)
-    return {"examples": len(rows), "generated": generated, "quotaExhausted": quota_exhausted, "path": str(GOLD_PATH)}
+        failed_path = quarantine_path(case_id)
+        if failed_path.exists():
+            failed_path.unlink()
+        failures.pop(case_id, None)
+        write_progress(rows, generated=generated, failures=failures)
+    write_progress(rows, generated=generated, failures=failures, quota=quota)
+    return {
+        "examples": len(rows),
+        "generated": generated,
+        "quotaExhausted": quota_exhausted,
+        "quota": quota.as_dict() if quota else None,
+        "waitedSeconds": round(waited_seconds, 3),
+        "quarantined": quarantined_cases(),
+        "path": str(GOLD_PATH),
+        "progressPath": str(PROGRESS_PATH),
+    }
 
 
 def audit_gold(rows: list[dict[str, Any]] | None = None, *, require_complete: bool = True) -> dict[str, Any]:
@@ -509,7 +706,16 @@ def audit_gold(rows: list[dict[str, Any]] | None = None, *, require_complete: bo
         errors.append(f"Instrument leakage across splits: {leaked}")
     if require_complete and split_counts != {"train": 75, "validation": 15, "eval": 30}:
         errors.append(f"Reasoning gold split is incomplete: {split_counts}")
-    return {"examples": len(rows), "splits": split_counts, "instrumentLeakage": leaked, "errors": errors}
+    quarantined = quarantined_cases()
+    if quarantined:
+        errors.append(f"Unresolved quarantined cases: {quarantined}")
+    return {
+        "examples": len(rows),
+        "splits": split_counts,
+        "instrumentLeakage": leaked,
+        "quarantined": quarantined,
+        "errors": errors,
+    }
 
 
 def approve_gold() -> dict[str, Any]:
@@ -533,6 +739,57 @@ def approve_gold() -> dict[str, Any]:
     return {**result, "approved": len(rows)}
 
 
+def row_hash(row: dict[str, Any]) -> str:
+    return hashlib.sha256(canonical_json(row).encode("utf-8")).hexdigest()
+
+
+def create_evaluation_seal() -> dict[str, Any]:
+    rows = read_jsonl(GOLD_PATH)
+    audit = audit_gold(rows)
+    if audit["errors"]:
+        raise RuntimeError(f"Evaluation sealing blocked by {len(audit['errors'])} audit failures.")
+    eval_rows = [row for row in rows if row.get("split") == "eval"]
+    unapproved = [str(row.get("id")) for row in eval_rows if row.get("reviewStatus") != "approved"]
+    if unapproved:
+        raise RuntimeError(f"Evaluation sealing requires approved rows: {unapproved}")
+    corpus_versions = sorted(
+        {
+            str((row.get("retrievedRuleSet") or {}).get("corpusVersion") or "")
+            for row in eval_rows
+        }
+        - {""}
+    )
+    seal = {
+        "schemaVersion": "reasoning-evaluation-seal.v1",
+        "sealedAt": datetime.now(UTC).isoformat(),
+        "corpusVersions": corpus_versions,
+        "evaluationIds": [str(row["id"]) for row in eval_rows],
+        "rowHashes": {str(row["id"]): row_hash(row) for row in eval_rows},
+    }
+    atomic_json(EVALUATION_SEAL_PATH, seal)
+    return {"sealed": len(eval_rows), "path": str(EVALUATION_SEAL_PATH), "corpusVersions": corpus_versions}
+
+
+def verify_evaluation_seal(rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    if not EVALUATION_SEAL_PATH.exists():
+        return {"verified": False, "errors": [f"Evaluation seal is missing: {EVALUATION_SEAL_PATH}"]}
+    seal = json.loads(EVALUATION_SEAL_PATH.read_text(encoding="utf-8"))
+    rows = rows if rows is not None else read_jsonl(GOLD_PATH)
+    eval_rows = {str(row.get("id")): row for row in rows if row.get("split") == "eval"}
+    expected_ids = [str(row_id) for row_id in seal.get("evaluationIds") or []]
+    errors: list[str] = []
+    if len(expected_ids) != 30 or len(set(expected_ids)) != 30:
+        errors.append("Evaluation seal must contain 30 unique IDs.")
+    if set(eval_rows) != set(expected_ids):
+        errors.append("Evaluation rows do not match the sealed IDs.")
+    sealed_hashes = seal.get("rowHashes") or {}
+    for row_id in expected_ids:
+        row = eval_rows.get(row_id)
+        if row is not None and sealed_hashes.get(row_id) != row_hash(row):
+            errors.append(f"{row_id}: content hash differs from the evaluation seal.")
+    return {"verified": not errors, "evaluationIds": expected_ids, "errors": errors, "path": str(EVALUATION_SEAL_PATH)}
+
+
 def main() -> int:
     load_local_env()
     parser = argparse.ArgumentParser(description=__doc__)
@@ -542,23 +799,39 @@ def main() -> int:
     collect.add_argument("--limit", type=int, default=0)
     generate = subparsers.add_parser("generate")
     generate.add_argument("--limit", type=int, default=0)
+    generate.add_argument("--max-new", type=int, default=0)
+    generate.add_argument("--rpm", type=float, default=15)
+    generate.add_argument("--wait-on-short-quota", action=argparse.BooleanOptionalAction, default=True)
+    generate.add_argument("--max-wait-seconds", type=float, default=600)
     audit = subparsers.add_parser("audit")
     audit.add_argument("--allow-partial", action="store_true")
     approve = subparsers.add_parser("approve")
     approve.add_argument("--requested-by-user", action="store_true")
+    subparsers.add_parser("seal")
+    subparsers.add_parser("verify-seal")
     args = parser.parse_args()
     if args.command == "validate-manifest":
         result = validate_manifest()
     elif args.command == "collect":
         result = collect_snapshots(args.limit)
     elif args.command == "generate":
-        result = generate_gold(args.limit)
+        result = generate_gold(
+            args.limit,
+            max_new=args.max_new,
+            rpm=args.rpm,
+            wait_on_short_quota=args.wait_on_short_quota,
+            max_wait_seconds=args.max_wait_seconds,
+        )
     elif args.command == "audit":
         result = audit_gold(require_complete=not args.allow_partial)
-    else:
+    elif args.command == "approve":
         if not args.requested_by_user:
             raise SystemExit("approve requires --requested-by-user")
         result = approve_gold()
+    elif args.command == "seal":
+        result = create_evaluation_seal()
+    else:
+        result = verify_evaluation_seal()
     print(json.dumps(result, indent=2))
     return 0 if not result.get("errors") else 1
 

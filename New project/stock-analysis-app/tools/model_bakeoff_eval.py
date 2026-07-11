@@ -22,7 +22,16 @@ if str(APP_ROOT) not in os.sys.path:
 from server.llm_analysis import normalise_analysis, validate_analysis
 from tools.approve_candidates import unsupported_numeric_claims
 from tools.evaluate_llm import fact_paths, narrative_items
-from tools.llm_dataset import load_local_env, read_jsonl, write_jsonl
+from tools.llm_dataset import (
+    GeminiQuotaError,
+    configure_gemini_pacing,
+    load_local_env,
+    pace_gemini_request,
+    parse_gemini_quota_error,
+    read_jsonl,
+    write_jsonl,
+)
+from tools.reasoning_dataset import verify_evaluation_seal
 
 
 PROVIDER_ROOT = APP_ROOT / "data" / "training" / "provider"
@@ -51,15 +60,19 @@ def provider_settings(args: argparse.Namespace) -> dict[str, str]:
             "baseUrl": (args.base_url or os.environ.get("GEMINI_BASE_URL") or "https://generativelanguage.googleapis.com/v1beta/openai").rstrip("/"),
             "apiKey": key,
             "model": args.model or os.environ.get("GEMINI_DATASET_MODEL") or os.environ.get("LLM_MODEL") or "gemini-3.5-flash",
+            "provider": "gemini",
         }
     return {
         "baseUrl": (args.base_url or os.environ.get("LOCAL_LLM_BASE_URL") or "http://127.0.0.1:8080/v1").rstrip("/"),
         "apiKey": os.environ.get("LOCAL_LLM_API_KEY") or "local-only",
         "model": args.model or os.environ.get("LOCAL_LLM_MODEL") or "gemma-bakeoff",
+        "provider": "local",
     }
 
 
 def call_chat(messages: list[dict[str, str]], settings: dict[str, str], timeout: float) -> str:
+    if settings["provider"] == "gemini":
+        pace_gemini_request()
     body = {
         "model": settings["model"],
         "temperature": 0.15,
@@ -78,6 +91,8 @@ def call_chat(messages: list[dict[str, str]], settings: dict[str, str], timeout:
             payload = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
+        if exc.code == 429 and settings["provider"] == "gemini":
+            raise parse_gemini_quota_error(detail) from exc
         raise RuntimeError(f"Provider HTTP {exc.code}: {detail[:500]}") from exc
     except (URLError, TimeoutError) as exc:
         raise RuntimeError(f"Provider unavailable: {exc}") from exc
@@ -168,10 +183,40 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     expected = 30 if args.split == "eval" else 15
     if len(rows) != expected:
         raise RuntimeError(f"Expected {expected} {args.split} rows, found {len(rows)}.")
+    if args.split == "eval":
+        verification = verify_evaluation_seal()
+        if not verification["verified"]:
+            raise RuntimeError("Evaluation seal verification failed: " + "; ".join(verification["errors"]))
+        provider_ids = {str(row.get("id") or "") for row in rows}
+        if provider_ids != set(verification["evaluationIds"]):
+            raise RuntimeError("Provider evaluation rows do not match the sealed evaluation IDs.")
     settings = provider_settings(args)
+    configure_gemini_pacing(args.rpm if args.provider == "gemini" else 0)
     REPORT_ROOT.mkdir(parents=True, exist_ok=True)
     responses_path = REPORT_ROOT / f"{args.name}-{args.split}-responses.jsonl"
     existing = {str(row.get("id")): row for row in read_jsonl(responses_path)} if responses_path.exists() else {}
+    quota_waited = 0.0
+    quota_stop: dict[str, Any] | None = None
+
+    def quota_call(messages: list[dict[str, str]]) -> str:
+        nonlocal quota_waited, quota_stop
+        while True:
+            try:
+                return call_chat(messages, settings, args.timeout)
+            except GeminiQuotaError as exc:
+                retry = (exc.retry_after_seconds or 0) + 1
+                can_wait = (
+                    args.wait_on_short_quota
+                    and exc.is_short_window
+                    and retry > 1
+                    and quota_waited + retry <= args.max_wait_seconds
+                )
+                if not can_wait:
+                    quota_stop = exc.as_dict()
+                    raise
+                time.sleep(retry)
+                quota_waited += retry
+
     for row in rows:
         row_id = str(row["id"])
         if row_id in existing:
@@ -182,17 +227,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         error = ""
         repairs = 0
         try:
-            raw = call_chat(messages, settings, args.timeout)
+            raw = quota_call(messages)
             first = evaluate_response(row, raw, time.perf_counter() - started, repairs)
             if not first["schemaValid"]:
                 repairs = 1
                 repair_messages = [*messages, {"role": "assistant", "content": raw}, {"role": "user", "content": "The response failed schema validation. Return one complete corrected JSON object only."}]
-                raw = call_chat(repair_messages, settings, args.timeout)
-        except RuntimeError as exc:
+                raw = quota_call(repair_messages)
+        except (GeminiQuotaError, RuntimeError) as exc:
             error = str(exc)
         evaluated = evaluate_response(row, raw, time.perf_counter() - started, repairs, error)
         existing[row_id] = evaluated
         write_jsonl(responses_path, list(existing.values()))
+        if quota_stop:
+            break
     results = [existing[str(row["id"])] for row in rows if str(row["id"]) in existing]
     count = len(results)
     report = {
@@ -211,6 +258,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "patternsRespectedPct": round(sum(item["patternsRespected"] for item in results) / count * 100, 2) if count else 0,
         "p95LatencySeconds": round(percentile95([item["latencySeconds"] for item in results]), 3),
         "errorRatePct": round(sum(bool(item["error"]) for item in results) / count * 100, 2) if count else 100,
+        "quotaStop": quota_stop,
+        "quotaWaitedSeconds": round(quota_waited, 3),
         "generatedAt": datetime.now(UTC).isoformat(),
         "responsesPath": str(responses_path),
     }
@@ -252,6 +301,9 @@ def main() -> int:
     run_parser.add_argument("--split", choices=("validation", "eval"), default="validation")
     run_parser.add_argument("--allow-sealed-eval", action="store_true")
     run_parser.add_argument("--timeout", type=float, default=120)
+    run_parser.add_argument("--rpm", type=float, default=15)
+    run_parser.add_argument("--wait-on-short-quota", action=argparse.BooleanOptionalAction, default=True)
+    run_parser.add_argument("--max-wait-seconds", type=float, default=600)
     compare_parser = subparsers.add_parser("compare")
     compare_parser.add_argument("--baseline", type=Path, required=True)
     compare_parser.add_argument("--candidate", type=Path, required=True)

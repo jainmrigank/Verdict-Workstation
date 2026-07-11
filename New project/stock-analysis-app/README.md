@@ -176,15 +176,16 @@ The original 120 templated rows now live in `contract_fixtures.jsonl`; they test
 ```bash
 python3 tools/reasoning_dataset.py validate-manifest
 python3 tools/reasoning_dataset.py collect
-python3 tools/reasoning_dataset.py generate
+python3 tools/reasoning_dataset.py generate --rpm 15 --wait-on-short-quota --max-wait-seconds 600
 python3 tools/review_candidates.py --dataset reasoning
 python3 tools/reasoning_dataset.py approve --requested-by-user
+python3 tools/reasoning_dataset.py seal
 python3 tools/llm_dataset.py export --pilot
 ```
 
-Gemini Flash generates and expands the reasoning examples within free-tier quota. Every completed row is checkpointed; an HTTP 429 stops cleanly and can be resumed after quota resets. The complete `RetrievedRuleSetV1` payload is embedded in every provider-neutral training row.
+Gemini Flash generates and expands the reasoning examples within free-tier quota. Generation is paced at 15 RPM, every completed row is checkpointed, bounded short-window quota delays are retried, and daily or hard limits stop safely for a later resume. Twice-invalid answers are quarantined and block approval until regenerated. The complete `RetrievedRuleSetV1` payload is embedded in every provider-neutral training row.
 
-The included `notebooks/gemma_bakeoff_colab.ipynb` trains `Gemma 4 E4B IT` or, when free accelerator memory permits, `Gemma 3 12B IT` with Unsloth QLoRA. Training enforces no truncation, response-only loss, deterministic seeds, and saved run manifests. Model artifacts and generated split files remain untracked.
+The included `notebooks/gemma_bakeoff_colab.ipynb` trains `Gemma 4 E4B IT` or, when free accelerator memory permits, `Gemma 4 12B IT` with Unsloth QLoRA. Training enforces no truncation, response-only loss, deterministic seeds, and saved run manifests. Model artifacts and generated split files remain untracked.
 
 After the 75/15 pilot improves validation quality, `tools/llm_dataset.py expand` creates 1,080 audited descendants and preserves each gold case's split lineage. `tools/model_bakeoff_eval.py` compares base Gemini, untuned Gemma, and tuned Gemma. The 30-case evaluation set requires an explicit sealed-eval flag and promotion remains blocked unless every grounding, schema, completeness, human-quality, reliability, and 120-second latency gate passes. See `data/training/README.md` for the complete commands.
 

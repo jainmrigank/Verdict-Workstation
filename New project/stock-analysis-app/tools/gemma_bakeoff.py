@@ -21,10 +21,10 @@ MODEL_CONFIGS = {
         "chatTemplate": "gemma-4",
         "ggufQuantization": "Q8_0",
     },
-    "gemma3-12b": {
-        "model": "unsloth/gemma-3-12b-it-unsloth-bnb-4bit",
-        "chatTemplate": "gemma3",
-        "ggufQuantization": "q4_k_m",
+    "gemma4-12b": {
+        "model": "unsloth/gemma-4-12B-it",
+        "chatTemplate": "gemma-4",
+        "ggufQuantization": "Q8_0",
     },
 }
 
@@ -163,8 +163,8 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
             output_dir=str(args.output_root / args.model / "checkpoints"),
         ),
     )
-    response_marker = "<|turn>model\n" if args.model == "gemma4-e4b" else "<start_of_turn>model\n"
-    instruction_marker = "<|turn>user\n" if args.model == "gemma4-e4b" else "<start_of_turn>user\n"
+    response_marker = "<|turn>model\n"
+    instruction_marker = "<|turn>user\n"
     trainer = train_on_responses_only(trainer, instruction_part=instruction_marker, response_part=response_marker)
     result = trainer.train()
 

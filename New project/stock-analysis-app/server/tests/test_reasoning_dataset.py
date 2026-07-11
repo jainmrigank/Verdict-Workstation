@@ -6,8 +6,23 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tools.llm_dataset import GeminiQuotaError, expand_to_target, expansion_schedule, provider_row
-from tools.reasoning_dataset import build_facts, validate_manifest
+from tools.llm_dataset import (
+    GeminiQuotaError,
+    configure_gemini_pacing,
+    expand_to_target,
+    expansion_schedule,
+    pace_gemini_request,
+    parse_gemini_quota_error,
+    provider_row,
+)
+from tools.reasoning_dataset import (
+    audit_gold,
+    build_facts,
+    create_evaluation_seal,
+    generate_gold,
+    validate_manifest,
+    verify_evaluation_seal,
+)
 
 
 def gold_row(index: int, split: str) -> dict:
@@ -34,6 +49,70 @@ def gold_row(index: int, split: str) -> dict:
 
 
 class ReasoningDatasetTests(unittest.TestCase):
+    def test_quota_parser_distinguishes_short_and_daily_limits(self) -> None:
+        short = parse_gemini_quota_error(
+            json.dumps(
+                {
+                    "error": {
+                        "message": "Quota exceeded. limit: 20, retry in 43.5s.",
+                        "details": [
+                            {
+                                "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                                "violations": [
+                                    {
+                                        "quotaMetric": "generativelanguage.googleapis.com/generate_content_free_tier_requests",
+                                        "quotaId": "GenerateRequestsPerMinutePerProjectPerModel-FreeTier",
+                                        "quotaDimensions": {"model": "gemini-3.5-flash"},
+                                        "quotaValue": "20",
+                                    }
+                                ],
+                            },
+                            {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "43.5s"},
+                        ],
+                    }
+                }
+            )
+        )
+        self.assertEqual(short.scope, "short_window")
+        self.assertEqual(short.limit, 20)
+        self.assertEqual(short.retry_after_seconds, 43.5)
+        self.assertIn("free_tier_requests", short.metric)
+        self.assertIn("PerMinute", short.quota_id)
+        self.assertEqual(short.dimensions["model"], "gemini-3.5-flash")
+
+        daily = parse_gemini_quota_error(
+            json.dumps(
+                {
+                    "error": {
+                        "message": "Daily quota exhausted. limit: 100",
+                        "details": [
+                            {
+                                "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                                "violations": [
+                                    {
+                                        "quotaMetric": "generativelanguage.googleapis.com/generate_content_free_tier_requests",
+                                        "quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                }
+            )
+        )
+        self.assertEqual(daily.scope, "daily")
+        self.assertIsNone(daily.retry_after_seconds)
+
+    def test_gemini_pacer_holds_requests_to_configured_rpm(self) -> None:
+        configure_gemini_pacing(15)
+        with (
+            patch("tools.llm_dataset.time.monotonic", side_effect=[100.0, 101.0, 104.0]),
+            patch("tools.llm_dataset.time.sleep") as sleep,
+        ):
+            pace_gemini_request()
+            pace_gemini_request()
+        sleep.assert_called_once_with(3.0)
+
     def test_public_manifest_has_exact_leak_proof_split(self) -> None:
         result = validate_manifest()
         self.assertEqual(result["errors"], [])
@@ -101,6 +180,151 @@ class ReasoningDatasetTests(unittest.TestCase):
         self.assertEqual(facts["instrument"]["publicSourceUrls"], snapshot["sourceUrls"])
         self.assertEqual(facts["userContext"]["action"], "Sell")
         self.assertNotIn("clientId", json.dumps(facts))
+
+    def test_generation_retries_same_case_after_short_quota(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot_path = root / "snapshots.json"
+            snapshot_path.write_text(
+                json.dumps({"one": {"source": "yahoo", "sourceUrls": ["https://example.test"], "capturedAt": "2026-07-11T00:00:00+00:00"}}),
+                encoding="utf-8",
+            )
+            quota = GeminiQuotaError("wait", retry_after_seconds=2, scope="short_window")
+            with (
+                patch("tools.reasoning_dataset.SNAPSHOT_PATH", snapshot_path),
+                patch("tools.reasoning_dataset.GOLD_PATH", root / "gold.jsonl"),
+                patch("tools.reasoning_dataset.PROGRESS_PATH", root / "progress.json"),
+                patch("tools.reasoning_dataset.QUARANTINE_ROOT", root / "quarantine"),
+                patch("tools.reasoning_dataset.manifest", return_value={"instruments": [{"id": "one", "actions": ["Buy"], "split": "train"}]}),
+                patch("tools.reasoning_dataset.build_facts", return_value={"uiOptions": {"patternsEnabled": True}}),
+                patch("tools.reasoning_dataset.retrieve_rule_set", return_value={"rules": []}),
+                patch("tools.reasoning_dataset.generate_output", side_effect=[quota, {"decision": {}}]) as generate,
+                patch("tools.reasoning_dataset.row_audit_errors", return_value=[]),
+                patch("tools.reasoning_dataset.time.sleep") as sleep,
+            ):
+                result = generate_gold(rpm=15, max_wait_seconds=10)
+        self.assertEqual(result["generated"], 1)
+        self.assertFalse(result["quotaExhausted"])
+        self.assertEqual(generate.call_count, 2)
+        sleep.assert_called_once_with(3)
+
+    def test_generation_stops_cleanly_on_hard_quota(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot_path = root / "snapshots.json"
+            snapshot_path.write_text(
+                json.dumps({"one": {"source": "yahoo", "sourceUrls": ["https://example.test"], "capturedAt": "2026-07-11T00:00:00+00:00"}}),
+                encoding="utf-8",
+            )
+            quota = GeminiQuotaError("daily", metric="requests_per_day", scope="daily")
+            with (
+                patch("tools.reasoning_dataset.SNAPSHOT_PATH", snapshot_path),
+                patch("tools.reasoning_dataset.GOLD_PATH", root / "gold.jsonl"),
+                patch("tools.reasoning_dataset.PROGRESS_PATH", root / "progress.json"),
+                patch("tools.reasoning_dataset.QUARANTINE_ROOT", root / "quarantine"),
+                patch("tools.reasoning_dataset.manifest", return_value={"instruments": [{"id": "one", "actions": ["Buy"], "split": "train"}]}),
+                patch("tools.reasoning_dataset.build_facts", return_value={"uiOptions": {"patternsEnabled": True}}),
+                patch("tools.reasoning_dataset.retrieve_rule_set", return_value={"rules": []}),
+                patch("tools.reasoning_dataset.generate_output", side_effect=quota),
+                patch("tools.reasoning_dataset.time.sleep") as sleep,
+            ):
+                result = generate_gold()
+                progress = json.loads((root / "progress.json").read_text(encoding="utf-8"))
+        self.assertTrue(result["quotaExhausted"])
+        self.assertEqual(result["generated"], 0)
+        self.assertEqual(progress["lastQuotaResponse"]["scope"], "daily")
+        sleep.assert_not_called()
+
+    def test_second_audit_failure_is_quarantined_without_losing_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot_path = root / "snapshots.json"
+            snapshot_path.write_text(
+                json.dumps({"one": {"source": "yahoo", "sourceUrls": ["https://example.test"], "capturedAt": "2026-07-11T00:00:00+00:00"}}),
+                encoding="utf-8",
+            )
+            with (
+                patch("tools.reasoning_dataset.SNAPSHOT_PATH", snapshot_path),
+                patch("tools.reasoning_dataset.GOLD_PATH", root / "gold.jsonl"),
+                patch("tools.reasoning_dataset.PROGRESS_PATH", root / "progress.json"),
+                patch("tools.reasoning_dataset.QUARANTINE_ROOT", root / "quarantine"),
+                patch("tools.reasoning_dataset.manifest", return_value={"instruments": [{"id": "one", "actions": ["Buy"], "split": "train"}]}),
+                patch("tools.reasoning_dataset.build_facts", return_value={"uiOptions": {"patternsEnabled": True}}),
+                patch("tools.reasoning_dataset.retrieve_rule_set", return_value={"rules": []}),
+                patch("tools.reasoning_dataset.generate_output", return_value={}),
+                patch("tools.reasoning_dataset.repair_output", return_value={}),
+                patch("tools.reasoning_dataset.row_audit_errors", side_effect=[["bad"], ["still bad"]]),
+            ):
+                result = generate_gold()
+                partial_audit = audit_gold([], require_complete=False)
+        self.assertEqual(result["generated"], 0)
+        self.assertEqual(result["quarantined"], ["gold-one-buy"])
+        self.assertTrue(any("quarantined" in error.lower() for error in partial_audit["errors"]))
+
+    def test_generation_repairs_once_and_resumes_with_max_new(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot_path = root / "snapshots.json"
+            snapshot_path.write_text(
+                json.dumps(
+                    {
+                        case_id: {"source": "yahoo", "sourceUrls": ["https://example.test"], "capturedAt": "2026-07-11T00:00:00+00:00"}
+                        for case_id in ("one", "two")
+                    }
+                ),
+                encoding="utf-8",
+            )
+            instruments = [
+                {"id": case_id, "actions": ["Buy"], "split": "train"}
+                for case_id in ("one", "two")
+            ]
+            gold_path = root / "gold.jsonl"
+            patches = (
+                patch("tools.reasoning_dataset.SNAPSHOT_PATH", snapshot_path),
+                patch("tools.reasoning_dataset.GOLD_PATH", gold_path),
+                patch("tools.reasoning_dataset.PROGRESS_PATH", root / "progress.json"),
+                patch("tools.reasoning_dataset.QUARANTINE_ROOT", root / "quarantine"),
+                patch("tools.reasoning_dataset.manifest", return_value={"instruments": instruments}),
+                patch("tools.reasoning_dataset.build_facts", return_value={"uiOptions": {"patternsEnabled": True}}),
+                patch("tools.reasoning_dataset.retrieve_rule_set", return_value={"rules": []}),
+                patch("tools.reasoning_dataset.generate_output", return_value={}),
+                patch("tools.reasoning_dataset.repair_output", return_value={"decision": {}}),
+                patch("tools.reasoning_dataset.row_audit_errors", side_effect=[["bad"], [], []]),
+            )
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], patches[9]:
+                first = generate_gold(max_new=1)
+                second = generate_gold(max_new=1)
+                progress = json.loads((root / "progress.json").read_text(encoding="utf-8"))
+        self.assertEqual(first["generated"], 1)
+        self.assertEqual(second["generated"], 1)
+        self.assertEqual(progress["completedCases"], 2)
+        self.assertEqual(len(progress["completedCaseIds"]), 2)
+
+    def test_evaluation_seal_detects_tampering(self) -> None:
+        rows = []
+        for index in range(30):
+            row = gold_row(index, "eval")
+            row["provenance"] = {"instrumentId": f"instrument-{index}", "source": "yahoo", "kind": "public-market-snapshot"}
+            rows.append(row)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            gold_path = root / "gold.jsonl"
+            seal_path = root / "seal.json"
+            gold_path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+            clean_audit = {"examples": 30, "splits": {"train": 0, "validation": 0, "eval": 30}, "errors": []}
+            with (
+                patch("tools.reasoning_dataset.GOLD_PATH", gold_path),
+                patch("tools.reasoning_dataset.EVALUATION_SEAL_PATH", seal_path),
+                patch("tools.reasoning_dataset.audit_gold", return_value=clean_audit),
+            ):
+                created = create_evaluation_seal()
+                verified = verify_evaluation_seal(rows)
+                rows[0]["output"] = {"tampered": True}
+                tampered = verify_evaluation_seal(rows)
+        self.assertEqual(created["sealed"], 30)
+        self.assertTrue(verified["verified"])
+        self.assertFalse(tampered["verified"])
+        self.assertTrue(any("content hash" in error for error in tampered["errors"]))
 
 
 if __name__ == "__main__":
