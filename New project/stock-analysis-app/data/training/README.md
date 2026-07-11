@@ -27,6 +27,16 @@ python3 tools/reasoning_dataset.py verify-seal
 
 Approval requires 75 train, 15 validation, and 30 sealed-evaluation gold rows. All scenarios for one instrument remain in one partition. The review workspace can edit expected JSON and records every grounding, applicability, coverage, and writing-quality check.
 
+### Teacher bake-off
+
+To compare Cerebras GPT-OSS 120B against the accepted Gemini cases without changing the gold file, set `CEREBRAS_API_KEY` locally and run:
+
+```bash
+python3 tools/teacher_bakeoff.py --provider cerebras --limit 3 --rpm 2
+```
+
+Candidate outputs and the report are checkpointed under ignored `data/generated/teacher_bakeoff`. Cerebras receives the identical facts and `RetrievedRuleSetV1`, with strict `LlmAnalysisV1` constrained decoding. Promote it only after every candidate passes the automated audit and the reviewed usefulness, clarity, grounding, and actionability scores are no more than 0.2 below Gemini. Set `DATASET_LLM_PROVIDER=cerebras` only after that decision; production inference and Gemini embeddings remain independent.
+
 The original fixtures remain independently auditable:
 
 ```bash

@@ -4,16 +4,19 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from tools.llm_dataset import (
     GeminiQuotaError,
+    cerebras_json,
     configure_gemini_pacing,
     expand_to_target,
     expansion_schedule,
     pace_gemini_request,
     parse_gemini_quota_error,
+    parse_cerebras_quota_error,
     provider_row,
+    strict_output_schema,
 )
 from tools.reasoning_dataset import (
     audit_gold,
@@ -50,6 +53,61 @@ def gold_row(index: int, split: str) -> dict:
 
 
 class ReasoningDatasetTests(unittest.TestCase):
+    def test_cerebras_strict_request_uses_isolated_key_and_schema(self) -> None:
+        response = MagicMock()
+        response.read.return_value = json.dumps(
+            {"choices": [{"message": {"content": json.dumps({"status": "ok"})}}]}
+        ).encode("utf-8")
+        response.__enter__.return_value = response
+        schema = {
+            "type": "object",
+            "properties": {"status": {"type": "string"}},
+            "required": ["status"],
+        }
+        configure_gemini_pacing(0)
+        with (
+            patch.dict("tools.llm_dataset.os.environ", {"CEREBRAS_API_KEY": "test-cerebras-key"}, clear=False),
+            patch("tools.llm_dataset.urlopen", return_value=response) as urlopen,
+        ):
+            result = cerebras_json({"task": "test"}, "Return JSON.", schema=schema)
+        request = urlopen.call_args.args[0]
+        body = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(result, {"status": "ok"})
+        self.assertEqual(body["model"], "gpt-oss-120b")
+        self.assertTrue(body["response_format"]["json_schema"]["strict"])
+        self.assertFalse(body["response_format"]["json_schema"]["schema"]["additionalProperties"])
+        self.assertEqual(request.headers["Authorization"], "Bearer test-cerebras-key")
+
+    def test_cerebras_quota_parser_uses_rate_limit_headers(self) -> None:
+        daily = parse_cerebras_quota_error(
+            '{"error":{"message":"Daily request limit reached"}}',
+            {
+                "x-ratelimit-remaining-requests-day": "0",
+                "x-ratelimit-limit-requests-day": "100",
+                "x-ratelimit-reset-requests-day": "3600",
+                "retry-after": "60",
+            },
+        )
+        self.assertEqual(daily.scope, "daily")
+        self.assertEqual(daily.limit, 100)
+        self.assertEqual(daily.retry_after_seconds, 60)
+        self.assertEqual(daily.quota_id, "cerebras-requests-day")
+
+    def test_strict_schema_closes_every_nested_object(self) -> None:
+        schema = {
+            "type": "object",
+            "properties": {
+                "nested": {
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                }
+            },
+        }
+        strict = strict_output_schema(schema)
+        self.assertFalse(strict["additionalProperties"])
+        self.assertFalse(strict["properties"]["nested"]["additionalProperties"])
+        self.assertNotIn("additionalProperties", schema)
+
     def test_quota_parser_distinguishes_short_and_daily_limits(self) -> None:
         short = parse_gemini_quota_error(
             json.dumps(

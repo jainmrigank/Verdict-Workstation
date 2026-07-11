@@ -78,6 +78,9 @@ class GeminiQuotaError(RuntimeError):
         }
 
 
+ProviderQuotaError = GeminiQuotaError
+
+
 GEMINI_PACING_RPM = 0.0
 GEMINI_LAST_REQUEST_AT = 0.0
 GEMINI_PACING_LOCK = threading.Lock()
@@ -173,6 +176,103 @@ def parse_gemini_quota_error(detail: str) -> GeminiQuotaError:
         retry_after_seconds=retry_after,
         scope=scope,
     )
+
+
+def _header_value(headers: Any, name: str) -> str:
+    value = headers.get(name) if headers is not None and hasattr(headers, "get") else None
+    return str(value or "")
+
+
+def parse_cerebras_quota_error(detail: str, headers: Any = None) -> ProviderQuotaError:
+    message = detail[:1000]
+    try:
+        payload = json.loads(detail)
+        error = payload.get("error") if isinstance(payload, dict) else None
+        if isinstance(error, dict):
+            message = str(error.get("message") or message)
+        elif isinstance(payload, dict):
+            message = str(payload.get("message") or message)
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        pass
+    retry_after = _retry_seconds(_header_value(headers, "retry-after"))
+    if retry_after is None:
+        raw_retry = _header_value(headers, "retry-after")
+        try:
+            retry_after = float(raw_retry) if raw_retry else None
+        except ValueError:
+            retry_after = None
+    remaining_day = _header_value(headers, "x-ratelimit-remaining-requests-day")
+    remaining_minute = _header_value(headers, "x-ratelimit-remaining-tokens-minute")
+    reset_day = _header_value(headers, "x-ratelimit-reset-requests-day")
+    reset_minute = _header_value(headers, "x-ratelimit-reset-tokens-minute")
+    dimensions = {
+        key: value
+        for key, value in {
+            "remainingRequestsDay": remaining_day,
+            "remainingTokensMinute": remaining_minute,
+            "resetRequestsDay": reset_day,
+            "resetTokensMinute": reset_minute,
+        }.items()
+        if value
+    }
+    if remaining_day == "0":
+        scope = "daily"
+        quota_id = "cerebras-requests-day"
+        raw_limit = _header_value(headers, "x-ratelimit-limit-requests-day")
+    elif remaining_minute == "0" or retry_after is not None:
+        scope = "short_window"
+        quota_id = "cerebras-tokens-minute"
+        raw_limit = _header_value(headers, "x-ratelimit-limit-tokens-minute")
+    else:
+        scope = "hard"
+        quota_id = "cerebras-unknown"
+        raw_limit = ""
+    try:
+        limit = int(float(raw_limit)) if raw_limit else None
+    except ValueError:
+        limit = None
+    return ProviderQuotaError(
+        message,
+        metric="cerebras-inference",
+        quota_id=quota_id,
+        dimensions=dimensions,
+        limit=limit,
+        retry_after_seconds=retry_after,
+        scope=scope,
+    )
+
+
+def strict_output_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    strict = json.loads(json.dumps(schema))
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            if value.get("type") == "object":
+                value["additionalProperties"] = False
+            for item in value.values():
+                visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+
+    visit(strict)
+    return strict
+
+
+def dataset_provider_name(provider: str | None = None) -> str:
+    selected = (provider or os.environ.get("DATASET_LLM_PROVIDER") or "gemini").strip().lower()
+    if selected not in {"gemini", "cerebras"}:
+        raise RuntimeError(f"Unsupported dataset provider: {selected!r}")
+    return selected
+
+
+def dataset_provider_metadata(provider: str | None = None) -> dict[str, str]:
+    selected = dataset_provider_name(provider)
+    if selected == "cerebras":
+        model = os.environ.get("CEREBRAS_DATASET_MODEL") or "gpt-oss-120b"
+    else:
+        model = os.environ.get("GEMINI_DATASET_MODEL") or os.environ.get("LLM_MODEL") or "gemini-3.5-flash"
+    return {"provider": selected, "model": model}
 
 ACTIONS = ["Buy", "Sell"]
 INSTRUMENT_TYPES = ["equity", "etf", "index", "fund", "unknown"]
@@ -382,18 +482,18 @@ def generate_candidates(count: int = 120) -> list[dict[str, Any]]:
 def extract_chat_content(payload: dict[str, Any]) -> str:
     choices = payload.get("choices")
     if not isinstance(choices, list) or not choices:
-        raise RuntimeError("Gemini returned no response choices.")
+        raise RuntimeError("The provider returned no response choices.")
     message = choices[0].get("message") if isinstance(choices[0], dict) else None
     content = message.get("content") if isinstance(message, dict) else None
     if isinstance(content, str):
         return content
     if isinstance(content, list):
         return "".join(str(part.get("text") or "") for part in content if isinstance(part, dict))
-    raise RuntimeError("Gemini returned an unreadable response body.")
+    raise RuntimeError("The provider returned an unreadable response body.")
 
 
 def gemini_json(prompt: dict[str, Any], system_prompt: str, temperature: float = 0.2) -> dict[str, Any]:
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("LLM_API_KEY")
+    api_key = os.environ.get("GEMINI_DATASET_API_KEY") or os.environ.get("GEMINI_API_KEY") or os.environ.get("LLM_API_KEY")
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY or LLM_API_KEY is required for Gemini dataset work.")
     model = os.environ.get("GEMINI_DATASET_MODEL") or os.environ.get("LLM_MODEL") or "gemini-3.5-flash"
@@ -448,6 +548,82 @@ def gemini_json(prompt: dict[str, Any], system_prompt: str, temperature: float =
     raise RuntimeError("Gemini request failed after retries.")
 
 
+def cerebras_json(
+    prompt: dict[str, Any],
+    system_prompt: str,
+    temperature: float = 0.2,
+    *,
+    schema: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    api_key = os.environ.get("CEREBRAS_API_KEY")
+    if not api_key:
+        raise RuntimeError("CEREBRAS_API_KEY is required for Cerebras dataset work.")
+    model = os.environ.get("CEREBRAS_DATASET_MODEL") or "gpt-oss-120b"
+    base_url = (os.environ.get("CEREBRAS_BASE_URL") or "https://api.cerebras.ai/v1").rstrip("/")
+    response_format: dict[str, Any]
+    if schema:
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "llm_analysis_v1",
+                "strict": True,
+                "schema": strict_output_schema(schema),
+            },
+        }
+    else:
+        response_format = {"type": "json_object"}
+    body: dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
+        ],
+        "response_format": response_format,
+        "temperature": temperature,
+        "reasoning_effort": os.environ.get("CEREBRAS_REASONING_EFFORT") or "medium",
+        "max_completion_tokens": int(os.environ.get("CEREBRAS_MAX_COMPLETION_TOKENS") or 6144),
+        "seed": int(os.environ.get("CEREBRAS_DATASET_SEED") or 560),
+    }
+    timeout = max(10.0, float(os.environ.get("CEREBRAS_DATASET_TIMEOUT") or 120))
+    pace_gemini_request()
+    request = Request(
+        f"{base_url}/chat/completions",
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        parsed = json.loads(extract_chat_content(payload))
+        if not isinstance(parsed, dict):
+            raise RuntimeError("Cerebras JSON response must be an object.")
+        return parsed
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        if exc.code == 429:
+            raise parse_cerebras_quota_error(detail, exc.headers) from exc
+        raise RuntimeError(f"Cerebras returned HTTP {exc.code}: {detail[:1000]}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"Could not reach Cerebras: {exc.reason}") from exc
+    except (TimeoutError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Cerebras returned an invalid or timed-out response: {exc}") from exc
+
+
+def dataset_json(
+    prompt: dict[str, Any],
+    system_prompt: str,
+    temperature: float = 0.2,
+    *,
+    provider: str | None = None,
+    schema: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    selected = dataset_provider_name(provider)
+    if selected == "cerebras":
+        return cerebras_json(prompt, system_prompt, temperature, schema=schema)
+    return gemini_json(prompt, system_prompt, temperature)
+
+
 def gemini_expand(seed: dict[str, Any], count: int) -> list[dict[str, Any]]:
     seed_payload = {
         **seed,
@@ -459,7 +635,7 @@ def gemini_expand(seed: dict[str, Any], count: int) -> list[dict[str, Any]]:
         "output": "Return a JSON object with an examples array. Each example needs facts, retrievedRuleIds, and output.",
         "analysisOutputSchema": OUTPUT_SCHEMA,
     }
-    parsed = gemini_json(
+    parsed = dataset_json(
         prompt,
         "You generate grounded supervised fine-tuning examples for a financial decision-support model. Preserve deterministic verdicts and never invent facts.",
         temperature=0.35,
@@ -501,7 +677,7 @@ def gemini_preflight(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
             ]
         },
     }
-    parsed = gemini_json(
+    parsed = dataset_json(
         prompt,
         "You are a strict financial-analysis dataset evaluator. Treat the supplied facts as the only source of company and numerical truth.",
         temperature=0.0,

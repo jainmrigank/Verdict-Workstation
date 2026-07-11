@@ -27,7 +27,9 @@ from tools.llm_dataset import (
     OUTPUT_SCHEMA,
     GeminiQuotaError,
     configure_gemini_pacing,
-    gemini_json,
+    dataset_json,
+    dataset_provider_metadata,
+    dataset_provider_name,
     load_local_env,
     read_jsonl,
     write_jsonl,
@@ -341,7 +343,12 @@ def build_facts(instrument: dict[str, Any], snapshot: dict[str, Any], action: st
     }
 
 
-def generate_output(facts: dict[str, Any], rule_set: dict[str, Any]) -> dict[str, Any]:
+def generate_output(
+    facts: dict[str, Any],
+    rule_set: dict[str, Any],
+    *,
+    provider: str | None = None,
+) -> dict[str, Any]:
     prompt = {
         "task": "Fill every applicable LlmAnalysisV1 narrative field without changing the deterministic verdict or inventing facts.",
         "facts": facts,
@@ -361,10 +368,12 @@ def generate_output(facts: dict[str, Any], rule_set: dict[str, Any]) -> dict[str
             "Portfolio holdingActions text must contain the exact Buy or Sell action label.",
         ],
     }
-    return gemini_json(
+    return dataset_json(
         prompt,
         "You create high-quality supervised financial-analysis answers. Supplied facts and the deterministic verdict are authoritative. Return JSON only.",
         temperature=0.15,
+        provider=provider,
+        schema=OUTPUT_SCHEMA,
     )
 
 
@@ -373,6 +382,8 @@ def repair_output(
     rule_set: dict[str, Any],
     previous_output: dict[str, Any] | None,
     errors: list[str],
+    *,
+    provider: str | None = None,
 ) -> dict[str, Any]:
     prompt = {
         "task": "Repair one LlmAnalysisV1 response. Return one complete corrected JSON object only.",
@@ -396,10 +407,12 @@ def repair_output(
             "Portfolio holdingActions text must contain the exact Buy or Sell action label.",
         ],
     }
-    return gemini_json(
+    return dataset_json(
         prompt,
         "You repair grounded financial-analysis JSON. Facts, retrieved rules, and the deterministic verdict are authoritative. Return JSON only.",
         temperature=0.05,
+        provider=provider,
+        schema=OUTPUT_SCHEMA,
     )
 
 
@@ -477,6 +490,8 @@ def case_row(
     facts: dict[str, Any],
     rule_set: dict[str, Any],
     output: dict[str, Any],
+    *,
+    provider: str | None = None,
 ) -> dict[str, Any]:
     output = normalise_output_contract(output, facts, rule_set)
     if not facts["uiOptions"]["patternsEnabled"] and isinstance(output.get("chart"), dict):
@@ -498,6 +513,7 @@ def case_row(
             "sourceUrls": snapshot["sourceUrls"],
             "capturedAt": snapshot["capturedAt"],
             "factsHash": hashlib.sha256(canonical_json(facts).encode("utf-8")).hexdigest(),
+            "teacher": dataset_provider_metadata(provider),
         },
     }
 
@@ -623,9 +639,11 @@ def generate_gold(
     rpm: float = 15,
     wait_on_short_quota: bool = True,
     max_wait_seconds: float = 600,
+    provider: str | None = None,
 ) -> dict[str, Any]:
     if not SNAPSHOT_PATH.exists():
         raise RuntimeError("Collect public snapshots before generating gold examples.")
+    selected_provider = dataset_provider_name(provider)
     configure_gemini_pacing(rpm)
     snapshots = json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
     rows = read_jsonl(GOLD_PATH)
@@ -679,7 +697,7 @@ def generate_gold(
         first_errors: list[str] = []
         while True:
             try:
-                output = generate_output(facts, rule_set)
+                output = generate_output(facts, rule_set, provider=selected_provider)
                 break
             except GeminiQuotaError as exc:
                 if not wait_for_quota(exc):
@@ -691,14 +709,36 @@ def generate_gold(
         if quota_exhausted:
             break
 
-        row = case_row(case_id, instrument, snapshots[instrument["id"]], facts, rule_set, output or {})
+        row = case_row(
+            case_id,
+            instrument,
+            snapshots[instrument["id"]],
+            facts,
+            rule_set,
+            output or {},
+            provider=selected_provider,
+        )
         first_errors.extend(row_audit_errors(row))
         if first_errors:
             second_errors: list[str] = []
             while True:
                 try:
-                    repaired = repair_output(facts, rule_set, output, first_errors)
-                    row = case_row(case_id, instrument, snapshots[instrument["id"]], facts, rule_set, repaired)
+                    repaired = repair_output(
+                        facts,
+                        rule_set,
+                        output,
+                        first_errors,
+                        provider=selected_provider,
+                    )
+                    row = case_row(
+                        case_id,
+                        instrument,
+                        snapshots[instrument["id"]],
+                        facts,
+                        rule_set,
+                        repaired,
+                        provider=selected_provider,
+                    )
                     second_errors = row_audit_errors(row)
                     break
                 except GeminiQuotaError as exc:
@@ -721,6 +761,7 @@ def generate_gold(
                         "initialErrors": first_errors,
                         "repairErrors": second_errors,
                         "factsHash": hashlib.sha256(canonical_json(facts).encode("utf-8")).hexdigest(),
+                        "teacher": dataset_provider_metadata(selected_provider),
                     },
                 )
                 write_progress(rows, generated=generated, failures=failures)
@@ -744,6 +785,7 @@ def generate_gold(
         "quarantined": quarantined_cases(),
         "path": str(GOLD_PATH),
         "progressPath": str(PROGRESS_PATH),
+        "teacher": dataset_provider_metadata(selected_provider),
     }
 
 
@@ -882,6 +924,7 @@ def main() -> int:
     generate.add_argument("--rpm", type=float, default=15)
     generate.add_argument("--wait-on-short-quota", action=argparse.BooleanOptionalAction, default=True)
     generate.add_argument("--max-wait-seconds", type=float, default=600)
+    generate.add_argument("--provider", choices=("gemini", "cerebras"), default=None)
     audit = subparsers.add_parser("audit")
     audit.add_argument("--allow-partial", action="store_true")
     approve = subparsers.add_parser("approve")
@@ -900,6 +943,7 @@ def main() -> int:
             rpm=args.rpm,
             wait_on_short_quota=args.wait_on_short_quota,
             max_wait_seconds=args.max_wait_seconds,
+            provider=args.provider,
         )
     elif args.command == "audit":
         result = audit_gold(require_complete=not args.allow_partial)

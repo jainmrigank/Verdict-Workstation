@@ -5,9 +5,11 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tools.gemma_bakeoff import dry_run
 from tools.model_bakeoff_eval import compare, percentile95
+from tools.teacher_bakeoff import run as run_teacher_bakeoff
 
 
 def training_row(index: int, split: str) -> dict:
@@ -25,6 +27,40 @@ def training_row(index: int, split: str) -> dict:
 
 
 class ModelBakeoffTests(unittest.TestCase):
+    def test_teacher_bakeoff_checkpoints_candidate_without_mutating_baseline(self) -> None:
+        baseline = {
+            "id": "gold-one",
+            "split": "train",
+            "facts": {
+                "userContext": {"action": "Buy"},
+                "deterministicAnalysis": {"verdict": "Wait and Watch"},
+                "uiOptions": {"patternsEnabled": False},
+            },
+            "retrievedRuleIds": [],
+            "retrievedRuleSet": {"rules": []},
+            "output": {"decision": {"summary": "Baseline"}},
+        }
+        candidate_output = {"decision": {"summary": "Candidate"}}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            gold_path = root / "gold.jsonl"
+            gold_path.write_text(json.dumps(baseline) + "\n", encoding="utf-8")
+            with (
+                patch("tools.teacher_bakeoff.GOLD_PATH", gold_path),
+                patch("tools.teacher_bakeoff.OUTPUT_ROOT", root / "reports"),
+                patch("tools.teacher_bakeoff.generate_output", return_value=candidate_output),
+                patch("tools.teacher_bakeoff.normalise_output_contract", side_effect=lambda output, _facts, _rules: output),
+                patch("tools.teacher_bakeoff.row_audit_errors", return_value=[]),
+            ):
+                result = run_teacher_bakeoff("cerebras", 1, 0)
+            stored_baseline = json.loads(gold_path.read_text(encoding="utf-8"))
+            candidate_path = Path(result["candidatePath"])
+            stored_candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+        self.assertEqual(result["automatedPasses"], 1)
+        self.assertEqual(stored_baseline["output"]["decision"]["summary"], "Baseline")
+        self.assertEqual(stored_candidate["output"]["decision"]["summary"], "Candidate")
+        self.assertEqual(stored_candidate["candidateTeacher"]["provider"], "cerebras")
+
     def test_pilot_dry_run_enforces_75_15_and_no_lineage_overlap(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
