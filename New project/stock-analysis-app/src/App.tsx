@@ -1227,6 +1227,20 @@ function normaliseBridgeSession(token: string, expiresAt: number): BridgeSession
   }
 }
 
+function usesNgrokBrowserWarningBypass(url: string): boolean {
+  try {
+    const hostname = new URL(url).hostname.toLowerCase()
+    return hostname.endsWith('.ngrok-free.app') || hostname.endsWith('.ngrok-free.dev')
+  } catch {
+    return false
+  }
+}
+
+function addBridgeTransportHeaders(url: string, headers: Headers): Headers {
+  if (usesNgrokBrowserWarningBypass(url)) headers.set('Ngrok-Skip-Browser-Warning', 'true')
+  return headers
+}
+
 function cacheStateFromProvider(provider: string): CacheState {
   if (provider.startsWith('free_')) return 'free'
   if (provider.includes('starter')) return 'sample'
@@ -4130,7 +4144,7 @@ function App() {
         setBridgeAuthState('locked')
         setBridgeAuthMessage('Bridge session expired. Enter the group access code again.')
       }
-      const headers = new Headers(init.headers)
+      const headers = addBridgeTransportHeaders(url, new Headers(init.headers))
       if (activeSession?.token) headers.set('Authorization', `Bearer ${activeSession.token}`)
       const response = await fetch(url, { ...init, headers })
       if (response.status === 401) {
@@ -5628,9 +5642,10 @@ function App() {
     setBridgeAuthState('connecting')
     setBridgeAuthMessage('Checking bridge access...')
     try {
-      const response = await fetch(apiUrl(bridgeUrl, '/api/session'), {
+      const sessionUrl = apiUrl(bridgeUrl, '/api/session')
+      const response = await fetch(sessionUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: addBridgeTransportHeaders(sessionUrl, new Headers({ 'Content-Type': 'application/json' })),
         body: JSON.stringify({ accessCode: bridgeAccessCode }),
       })
       const data = await readResponseJson(response)
@@ -8349,4 +8364,4 @@ export default App
 // export) and exist so the core scoring logic can be unit-tested in isolation from
 // the React component tree. See src/__tests__/buildAnalysis.test.ts.
 // eslint-disable-next-line react-refresh/only-export-components
-export { buildAnalysis, starterSnapshot, initialForm, formatInr, formatPercent, toneFromScore, defaultRiskPercentForProfile, mergeRefreshedSnapshot, normaliseBridgeSession }
+export { buildAnalysis, starterSnapshot, initialForm, formatInr, formatPercent, toneFromScore, defaultRiskPercentForProfile, mergeRefreshedSnapshot, normaliseBridgeSession, usesNgrokBrowserWarningBypass }

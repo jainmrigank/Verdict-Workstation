@@ -564,7 +564,10 @@ class FreeDataHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Days, X-Filename")
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            "Authorization, Content-Type, Ngrok-Skip-Browser-Warning, X-Days, X-Filename",
+        )
         self.end_headers()
 
     def _write_json(self, payload: dict[str, Any], status: int = 200) -> None:

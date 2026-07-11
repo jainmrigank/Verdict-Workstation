@@ -9,6 +9,7 @@ import {
   normaliseBridgeSession,
   starterSnapshot,
   toneFromScore,
+  usesNgrokBrowserWarningBypass,
   type AnalysisForm,
   type Snapshot,
 } from '../App'
@@ -23,6 +24,15 @@ describe('normaliseBridgeSession', () => {
 
   it('keeps an already-normalised millisecond expiry unchanged', () => {
     expect(normaliseBridgeSession('token', 1_783_754_974_000).expiresAt).toBe(1_783_754_974_000)
+  })
+})
+
+describe('usesNgrokBrowserWarningBypass', () => {
+  it('enables the browser-warning bypass only for ngrok free-tier hosts', () => {
+    expect(usesNgrokBrowserWarningBypass('https://example.ngrok-free.dev/api/session')).toBe(true)
+    expect(usesNgrokBrowserWarningBypass('https://example.ngrok-free.app/api/session')).toBe(true)
+    expect(usesNgrokBrowserWarningBypass('https://bridge.example.com/api/session')).toBe(false)
+    expect(usesNgrokBrowserWarningBypass('not a url')).toBe(false)
   })
 })
 
