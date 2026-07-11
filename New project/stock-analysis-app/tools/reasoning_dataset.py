@@ -366,6 +366,10 @@ def generate_output(
             "factRefs must use validFactRefs exactly and must not start with facts.",
             "Every narrative item must include at least one validRuleRef relevant to that section.",
             "Portfolio holdingActions text must contain the exact Buy or Sell action label.",
+            "Buy or Sell is the user's requested action, not the model's recommendation. If the deterministic verdict is Needs Input, never begin an action with Buy or Sell and never instruct execution; explain what evidence is needed before deciding.",
+            "Keep sector and instrument applicability strict. For banks, do not treat debt/equity as ordinary corporate leverage; use only supplied banking evidence or explicitly mark asset quality, margins, capital, and credit evidence unavailable.",
+            "Never add or convert a currency symbol unless that exact currency marker is present in the cited facts. NSE and BSE amounts must never be described as dollars.",
+            "Do not calculate, estimate, round, scale, or convert any number. Quote only exact numerical values already present in validFactRefs, or omit the number.",
         ],
     }
     return dataset_json(
@@ -405,6 +409,10 @@ def repair_output(
             "factRefs must use validFactRefs exactly and must not start with facts.",
             "Every narrative item must include at least one validRuleRef relevant to that section.",
             "Portfolio holdingActions text must contain the exact Buy or Sell action label.",
+            "Buy or Sell is the user's requested action, not the model's recommendation. If the deterministic verdict is Needs Input, never begin an action with Buy or Sell and never instruct execution; explain what evidence is needed before deciding.",
+            "Keep sector and instrument applicability strict. For banks, do not treat debt/equity as ordinary corporate leverage; use only supplied banking evidence or explicitly mark asset quality, margins, capital, and credit evidence unavailable.",
+            "Never add or convert a currency symbol unless that exact currency marker is present in the cited facts. NSE and BSE amounts must never be described as dollars.",
+            "Do not calculate, estimate, round, scale, or convert any number. Quote only exact numerical values already present in validFactRefs, or omit the number.",
         ],
     }
     return dataset_json(

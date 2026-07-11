@@ -77,6 +77,7 @@ class ReasoningDatasetTests(unittest.TestCase):
         self.assertTrue(body["response_format"]["json_schema"]["strict"])
         self.assertFalse(body["response_format"]["json_schema"]["schema"]["additionalProperties"])
         self.assertEqual(request.headers["Authorization"], "Bearer test-cerebras-key")
+        self.assertEqual(request.headers["User-agent"], "stock-analysis-agent/1.0")
 
     def test_cerebras_quota_parser_uses_rate_limit_headers(self) -> None:
         daily = parse_cerebras_quota_error(
@@ -95,17 +96,20 @@ class ReasoningDatasetTests(unittest.TestCase):
 
     def test_strict_schema_closes_every_nested_object(self) -> None:
         schema = {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
             "type": "object",
             "properties": {
                 "nested": {
                     "type": "object",
-                    "properties": {"value": {"type": "string"}},
+                    "properties": {"value": {"type": "string", "minLength": 1}},
                 }
             },
         }
         strict = strict_output_schema(schema)
         self.assertFalse(strict["additionalProperties"])
         self.assertFalse(strict["properties"]["nested"]["additionalProperties"])
+        self.assertNotIn("$schema", strict)
+        self.assertNotIn("minLength", strict["properties"]["nested"]["properties"]["value"])
         self.assertNotIn("additionalProperties", schema)
 
     def test_quota_parser_distinguishes_short_and_daily_limits(self) -> None:

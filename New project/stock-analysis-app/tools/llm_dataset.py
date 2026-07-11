@@ -244,9 +244,12 @@ def parse_cerebras_quota_error(detail: str, headers: Any = None) -> ProviderQuot
 
 def strict_output_schema(schema: dict[str, Any]) -> dict[str, Any]:
     strict = json.loads(json.dumps(schema))
+    unsupported = {"$schema", "$id", "minLength"}
 
     def visit(value: Any) -> None:
         if isinstance(value, dict):
+            for key in unsupported:
+                value.pop(key, None)
             if value.get("type") == "object":
                 value["additionalProperties"] = False
             for item in value.values():
@@ -581,7 +584,7 @@ def cerebras_json(
         "response_format": response_format,
         "temperature": temperature,
         "reasoning_effort": os.environ.get("CEREBRAS_REASONING_EFFORT") or "medium",
-        "max_completion_tokens": int(os.environ.get("CEREBRAS_MAX_COMPLETION_TOKENS") or 6144),
+        "max_completion_tokens": int(os.environ.get("CEREBRAS_MAX_COMPLETION_TOKENS") or 12000),
         "seed": int(os.environ.get("CEREBRAS_DATASET_SEED") or 560),
     }
     timeout = max(10.0, float(os.environ.get("CEREBRAS_DATASET_TIMEOUT") or 120))
@@ -589,7 +592,12 @@ def cerebras_json(
     request = Request(
         f"{base_url}/chat/completions",
         data=json.dumps(body).encode("utf-8"),
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "stock-analysis-agent/1.0",
+        },
         method="POST",
     )
     try:

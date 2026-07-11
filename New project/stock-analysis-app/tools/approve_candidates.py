@@ -31,6 +31,11 @@ REQUIRED_ARRAYS = {
     ),
     "portfolio": ("positionFit", "concentration", "sizing", "holdingActions", "risks"),
 }
+NUMBER_PATTERN = re.compile(r"(?<![A-Za-z0-9])-?\d[\d,]*(?:\.\d+)?")
+DIRECT_ACTION_PATTERN = re.compile(
+    r"^(?:immediately\s+)?(?:buy|sell)\b|^(?:execute|place)\s+(?:the\s+)?(?:buy|sell)\b",
+    re.IGNORECASE,
+)
 
 
 def read_candidates(path: Path = CANDIDATES_PATH) -> list[dict[str, Any]]:
@@ -94,8 +99,23 @@ def audit_candidate(row: dict[str, Any], *, require_synthetic: bool = True) -> l
     holding_actions = (output.get("portfolio") or {}).get("holdingActions") or []
     if action and not any(action.lower() in str(item.get("text") or "").lower() for item in holding_actions if isinstance(item, dict)):
         errors.append(f"{candidate_id}: portfolio action does not match {action}")
+    if expected_verdict.casefold() == "needs input":
+        action_items = [
+            *((output.get("decision") or {}).get("nextActions") or []),
+            *holding_actions,
+        ]
+        direct_actions = [
+            str(item.get("text") or "").strip()
+            for item in action_items
+            if isinstance(item, dict) and DIRECT_ACTION_PATTERN.search(str(item.get("text") or "").strip())
+        ]
+        if direct_actions:
+            errors.append(
+                f"{candidate_id}: Needs Input cannot issue a direct Buy/Sell instruction: {direct_actions[:2]}"
+            )
 
     allowed_paths = fact_paths(facts)
+    indian_listing = str((facts.get("instrument") or {}).get("symbol") or "").upper().startswith(("NSE:", "BSE:"))
     for index, item in enumerate(narrative_items(output)):
         text = str(item.get("text") or "").strip()
         fact_refs = item.get("factRefs") or []
@@ -112,6 +132,8 @@ def audit_candidate(row: dict[str, Any], *, require_synthetic: bool = True) -> l
         unsupported_rules = [ref for ref in rule_refs if ref not in retrieved_rules]
         if unsupported_rules:
             errors.append(f"{candidate_id}: unsupported ruleRefs {unsupported_rules}")
+        if indian_listing and "$" in text:
+            errors.append(f"{candidate_id}: unsupported dollar currency marker in narrative item {index}")
 
     warnings = output.get("warnings")
     if not isinstance(warnings, list):
@@ -136,7 +158,7 @@ def numeric_values(value: Any) -> list[float]:
     elif isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)):
         values.append(float(value))
     elif isinstance(value, str):
-        values.extend(float(match.replace(",", "")) for match in re.findall(r"(?<![A-Za-z])-?\d[\d,]*(?:\.\d+)?", value))
+        values.extend(float(match.replace(",", "")) for match in NUMBER_PATTERN.findall(value))
     return values
 
 
@@ -144,7 +166,7 @@ def unsupported_numeric_claims(row: dict[str, Any]) -> list[float]:
     allowed = numeric_values(row.get("facts") or {})
     unsupported: list[float] = []
     for narrative in narrative_items(row.get("output") or {}):
-        for raw in re.findall(r"(?<![A-Za-z])-?\d[\d,]*(?:\.\d+)?", str(narrative.get("text") or "")):
+        for raw in NUMBER_PATTERN.findall(str(narrative.get("text") or "")):
             claimed = float(raw.replace(",", ""))
             if claimed in {0.0, 1.0, 14.0, 20.0, 50.0, 100.0}:
                 continue

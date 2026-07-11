@@ -74,8 +74,11 @@ def run(provider: str, limit: int, rpm: float) -> dict[str, Any]:
 
     for baseline in baseline_rows:
         row_id = str(baseline["id"])
-        if row_id in candidates and not candidates[row_id].get("candidateAuditErrors"):
-            continue
+        existing = candidates.get(row_id)
+        if existing and not existing.get("candidateAuditErrors"):
+            existing["candidateAuditErrors"] = row_audit_errors(existing)
+            if not existing["candidateAuditErrors"]:
+                continue
         facts = baseline["facts"]
         rule_set = baseline["retrievedRuleSet"]
         output: dict[str, Any] | None = None

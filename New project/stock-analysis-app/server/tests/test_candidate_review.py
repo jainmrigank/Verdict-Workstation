@@ -4,10 +4,52 @@ import unittest
 
 from tools.review_candidates import REVIEW_CHECKS, apply_review
 from tools.llm_dataset import generate_candidates
-from tools.approve_candidates import audit_candidates
+from tools.approve_candidates import audit_candidate, audit_candidates, unsupported_numeric_claims
 
 
 class CandidateReviewTests(unittest.TestCase):
+    def test_needs_input_rejects_direct_trade_instruction(self) -> None:
+        row = generate_candidates(1)[0]
+        row["id"] = "test-direct-action"
+        row["facts"]["userContext"]["action"] = "Sell"
+        row["facts"]["deterministicAnalysis"]["verdict"] = "Needs Input"
+        row["output"]["decision"]["summary"] = "Needs Input before deciding."
+        row["output"]["coach"]["verdictSummary"] = "Needs Input before deciding."
+        row["output"]["portfolio"]["holdingActions"] = [
+            {"text": "Sell the position now.", "factRefs": ["userContext.action"], "ruleRefs": ["test"]}
+        ]
+        errors = audit_candidate(row)
+        self.assertTrue(any("cannot issue a direct Buy/Sell instruction" in error for error in errors))
+
+    def test_numeric_grounding_ignores_indicator_suffixes_and_range_hyphens(self) -> None:
+        row = {
+            "facts": {
+                "technicalEvidence": {"rsi14": 44.28},
+                "userContext": {"horizon": "6-12m"},
+            },
+            "output": {
+                "decision": {
+                    "nextActions": [
+                        {
+                            "text": "RSI14 is 44.28 for the 6-12 month horizon.",
+                            "factRefs": ["technicalEvidence.rsi14", "userContext.horizon"],
+                            "ruleRefs": ["test"],
+                        }
+                    ]
+                }
+            },
+        }
+        self.assertEqual(unsupported_numeric_claims(row), [])
+        row["output"]["decision"]["nextActions"][0]["text"] += " Estimated position value is 25.5%."
+        self.assertEqual(unsupported_numeric_claims(row), [25.5])
+
+    def test_indian_listing_rejects_invented_dollar_currency(self) -> None:
+        row = generate_candidates(1)[0]
+        row["facts"]["instrument"]["symbol"] = "NSE:TEST"
+        row["output"]["decision"]["nextActions"][0]["text"] = "Keep risk within $1000."
+        errors = audit_candidate(row)
+        self.assertTrue(any("unsupported dollar currency marker" in error for error in errors))
+
     def setUp(self) -> None:
         self.rows = [
             {
