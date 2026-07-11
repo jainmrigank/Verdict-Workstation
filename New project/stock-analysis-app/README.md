@@ -169,27 +169,24 @@ python3 tools/evaluate_retrieval.py
 
 The tracked query set covers every Varsity module and app analysis area, with a target of at least 90% top-10 recall.
 
-#### Fine-tuning workflow
+#### No-cost Gemma bake-off
 
-Fine-tuning is deliberately gated so unreviewed synthetic output cannot be submitted:
+The original 120 templated rows now live in `contract_fixtures.jsonl`; they test contracts and edge cases but are not treated as financial-reasoning gold. The real gold pipeline uses 63 timestamped public instruments and creates 75 train, 15 validation, and 30 sealed-evaluation cases without using uploaded holdings.
 
 ```bash
-python3 tools/llm_dataset.py candidates
-python3 tools/llm_dataset.py preflight
-python3 tools/evaluate_llm.py data/training/gold_candidates.jsonl
-python3 tools/review_candidates.py
-# Review workspace: http://127.0.0.1:8791/
-python3 tools/approve_candidates.py
-python3 tools/llm_dataset.py expand
-python3 tools/llm_dataset.py export
-python3 tools/train_vertex.py --training-uri gs://.../train.jsonl --validation-uri gs://.../validation.jsonl
+python3 tools/reasoning_dataset.py validate-manifest
+python3 tools/reasoning_dataset.py collect
+python3 tools/reasoning_dataset.py generate
+python3 tools/review_candidates.py --dataset reasoning
+python3 tools/reasoning_dataset.py approve --requested-by-user
+python3 tools/llm_dataset.py export --pilot
 ```
 
-Gemini Flash performs candidate preflight, approved-example expansion, and production narrative generation. `gemini-embedding-2` remains the retrieval model because generative Flash models do not produce search embeddings. Human approval is still required for all 120 gold candidates; Gemini preflight is advisory and never changes `reviewStatus`.
+Gemini Flash generates and expands the reasoning examples within free-tier quota. Every completed row is checkpointed; an HTTP 429 stops cleanly and can be resumed after quota resets. The complete `RetrievedRuleSetV1` payload is embedded in every provider-neutral training row.
 
-The review workspace requires five checks per candidate, allows corrections to the expected JSON, and records notes before approval. The final Vertex command is a dry run unless `--submit` is supplied. Its source model defaults to the currently documented tunable `gemini-2.5-flash`; set `VERTEX_SOURCE_MODEL` or pass `--source-model` if another Gemini Flash version is enabled for supervised tuning in the target project. See `data/training/README.md` for the review and 900/150/150 split gates.
+The included `notebooks/gemma_bakeoff_colab.ipynb` trains `Gemma 4 E4B IT` or, when free accelerator memory permits, `Gemma 3 12B IT` with Unsloth QLoRA. Training enforces no truncation, response-only loss, deterministic seeds, and saved run manifests. Model artifacts and generated split files remain untracked.
 
-`tools/approve_candidates.py` runs the strict all-candidate audit without changing statuses. A delegated Codex-assisted approval is only written when the user explicitly requests it and the command receives both `--approve` and `--requested-by-user`; the resulting records retain that provenance instead of claiming human review.
+After the 75/15 pilot improves validation quality, `tools/llm_dataset.py expand` creates 1,080 audited descendants and preserves each gold case's split lineage. `tools/model_bakeoff_eval.py` compares base Gemini, untuned Gemma, and tuned Gemma. The 30-case evaluation set requires an explicit sealed-eval flag and promotion remains blocked unless every grounding, schema, completeness, human-quality, reliability, and 120-second latency gate passes. See `data/training/README.md` for the complete commands.
 
 ### Reasoning
 
@@ -367,7 +364,10 @@ Related bridge scripts:
 - `../scripts/kite_refresh.py`: optional Kite-related refresh script.
 - `../scripts/varsity_knowledge_refresh.py`: knowledge refresh utility.
 - `tools/build_varsity_corpus.py`: canonical local-PDF and web-chapter corpus builder.
-- `tools/llm_dataset.py`: reviewed-gold and Gemini Flash dataset pipeline.
+- `tools/reasoning_dataset.py`: public snapshot collection and real reasoning-gold approval pipeline.
+- `tools/llm_dataset.py`: leak-proof Gemini expansion and provider-neutral dataset export.
+- `tools/gemma_bakeoff.py`: Unsloth QLoRA training and GGUF export.
+- `tools/model_bakeoff_eval.py`: resumable Gemini/Gemma evaluation and promotion gates.
 - `tools/review_candidates.py`: local human-review and approval workspace.
 - `tools/approve_candidates.py`: strict grounding audit and provenance-aware delegated approval.
 - `tools/evaluate_llm.py`: deterministic schema and grounding checks.
@@ -393,6 +393,23 @@ Fallback names are also supported:
 The Gemini API's OpenAI-compatible transport is used by both the runtime analyst and offline dataset tools. `GEMINI_DATASET_MODEL` can override the model used for preflight and expansion without changing the deployed runtime model.
 
 For a tuned Vertex endpoint, set `LLM_PROVIDER=vertex`, `VERTEX_TUNED_MODEL_URL`, and Application Default Credentials (or a short-lived `VERTEX_ACCESS_TOKEN`). The base OpenAI-compatible configuration remains the rollback path.
+
+### Optional Local Gemma Setup
+
+Serve the promoted GGUF through a loopback-only `llama.cpp` OpenAI-compatible server, then configure the protected bridge:
+
+```bash
+LLM_PROVIDER=local
+LLM_BASE_URL=http://127.0.0.1:8080/v1
+LLM_API_KEY=local-only
+LLM_MODEL=verdict-gemma
+LOCAL_MODEL_ARTIFACT_HASH=sha256-of-gguf
+LOCAL_MODEL_QUANTIZATION=Q8_0
+LOCAL_LLM_TIMEOUT_SECONDS=120
+LOCAL_LLM_MAX_TOKENS=4096
+```
+
+The bridge rejects a local-model URL that is not loopback, serializes local generations, coalesces duplicate requests, and versions its cache with the artifact hash and quantization. Set `LOCAL_LLM_FALLBACK=gemini` plus `GEMINI_API_KEY` only when free-tier Gemini fallback is desired. A failed local or fallback response never replaces deterministic analysis.
 
 ## Deployment
 

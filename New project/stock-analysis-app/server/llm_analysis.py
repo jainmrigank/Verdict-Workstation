@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 
@@ -31,6 +32,8 @@ RETRIEVED_RULESET_VERSION = "retrieved-rule-set.v1"
 
 ANALYSIS_CACHE: dict[str, dict[str, Any]] = {}
 ANALYSIS_CACHE_LOCK = threading.Lock()
+ANALYSIS_INFLIGHT: dict[str, threading.Event] = {}
+LOCAL_GENERATION_LOCK = threading.BoundedSemaphore(1)
 QUERY_EMBEDDING_CACHE: dict[str, list[float]] = {}
 QUERY_EMBEDDING_CACHE_LOCK = threading.Lock()
 
@@ -759,9 +762,62 @@ def _vertex_token() -> str:
     return result.stdout.strip()
 
 
+def runtime_provider(config: dict[str, str]) -> str:
+    explicit = str(config.get("runtime_provider") or "").strip().lower()
+    if explicit:
+        return explicit
+    configured = os.environ.get("LLM_PROVIDER", "").strip().lower()
+    base_url = str(config.get("base_url") or "")
+    hostname = (urlparse(base_url).hostname or "").lower()
+    if configured in {"local", "local_openai", "llama.cpp", "llamacpp"} or hostname in {"127.0.0.1", "localhost", "::1"}:
+        return "local_openai"
+    return str(config.get("provider") or "openai_compatible")
+
+
+def local_endpoint_is_loopback(config: dict[str, str]) -> bool:
+    hostname = (urlparse(str(config.get("base_url") or "")).hostname or "").lower()
+    return hostname in {"127.0.0.1", "localhost", "::1"}
+
+
+def provider_timeout(config: dict[str, str]) -> float:
+    if runtime_provider(config) == "local_openai":
+        return min(120.0, max(1.0, float(os.environ.get("LOCAL_LLM_TIMEOUT_SECONDS", "120"))))
+    return min(120.0, max(1.0, float(os.environ.get("LLM_TIMEOUT_SECONDS", "45"))))
+
+
+def provider_version(config: dict[str, str]) -> str:
+    provider = runtime_provider(config)
+    components = [provider, str(config.get("model") or "unknown")]
+    if provider == "local_openai":
+        components.extend(
+            [
+                os.environ.get("LOCAL_MODEL_ARTIFACT_HASH", "unversioned"),
+                os.environ.get("LOCAL_MODEL_QUANTIZATION", "unknown-quantization"),
+            ]
+        )
+    return ":".join(components)
+
+
+def gemini_fallback_config() -> dict[str, str] | None:
+    if os.environ.get("LOCAL_LLM_FALLBACK", "").strip().lower() != "gemini":
+        return None
+    api_key = os.environ.get("GEMINI_FALLBACK_API_KEY") or os.environ.get("GEMINI_API_KEY") or os.environ.get("LLM_API_KEY")
+    if not api_key:
+        return None
+    return {
+        "provider": "openai_compatible",
+        "runtime_provider": "openai_compatible",
+        "api_key": api_key,
+        "model": os.environ.get("GEMINI_FALLBACK_MODEL") or os.environ.get("GEMINI_DATASET_MODEL") or "gemini-3.5-flash",
+        "base_url": (os.environ.get("GEMINI_BASE_URL") or "https://generativelanguage.googleapis.com/v1beta/openai").rstrip("/"),
+    }
+
+
 def call_provider(messages: list[dict[str, str]], config: dict[str, str]) -> str:
-    provider = config.get("provider", "openai_compatible")
-    timeout = min(float(os.environ.get("LLM_TIMEOUT_SECONDS", "45")), 20.0)
+    provider = runtime_provider(config)
+    timeout = provider_timeout(config)
+    if provider == "local_openai" and not local_endpoint_is_loopback(config):
+        raise RuntimeError("The local LLM endpoint must be bound to loopback (127.0.0.1, localhost, or ::1).")
     if provider == "vertex":
         url = config.get("vertex_url") or ""
         if not url:
@@ -785,6 +841,8 @@ def call_provider(messages: list[dict[str, str]], config: dict[str, str]) -> str
             "response_format": {"type": "json_object"},
             "messages": messages,
         }
+        if provider == "local_openai":
+            body["max_tokens"] = int(os.environ.get("LOCAL_LLM_MAX_TOKENS", "4096"))
         request = Request(
             f"{config['base_url']}/chat/completions",
             data=json.dumps(body).encode("utf-8"),
@@ -792,30 +850,40 @@ def call_provider(messages: list[dict[str, str]], config: dict[str, str]) -> str
             method="POST",
         )
         extractor = _extract_openai_text
-    for attempt in range(3):
-        try:
-            with urlopen(request, timeout=timeout) as response:
-                return extractor(json.loads(response.read().decode("utf-8")))
-        except HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            if exc.code in {429, 500, 502, 503, 504} and attempt < 2:
-                time.sleep(1.5 * (attempt + 1))
-                continue
-            raise RuntimeError(f"LLM provider returned HTTP {exc.code}: {detail[:1000]}") from exc
-        except URLError as exc:
-            if attempt < 2:
-                time.sleep(1.5 * (attempt + 1))
-                continue
-            raise RuntimeError(f"Could not reach the configured LLM provider: {exc.reason}") from exc
-        except TimeoutError as exc:
-            if attempt < 2:
-                time.sleep(1.5 * (attempt + 1))
-                continue
-            raise RuntimeError("The configured LLM provider timed out after three attempts.") from exc
+    attempts = 1 if provider == "local_openai" else 3
+    acquired = False
+    if provider == "local_openai":
+        acquired = LOCAL_GENERATION_LOCK.acquire(timeout=timeout)
+        if not acquired:
+            raise RuntimeError("The local analyst is busy with another generation. Deterministic analysis remains active.")
+    try:
+        for attempt in range(attempts):
+            try:
+                with urlopen(request, timeout=timeout) as response:
+                    return extractor(json.loads(response.read().decode("utf-8")))
+            except HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")
+                if exc.code in {429, 500, 502, 503, 504} and attempt < attempts - 1:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                raise RuntimeError(f"LLM provider returned HTTP {exc.code}: {detail[:1000]}") from exc
+            except URLError as exc:
+                if attempt < attempts - 1:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                raise RuntimeError(f"Could not reach the configured LLM provider: {exc.reason}") from exc
+            except TimeoutError as exc:
+                if attempt < attempts - 1:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                raise RuntimeError(f"The configured LLM provider timed out after {timeout:.0f} seconds.") from exc
+    finally:
+        if acquired:
+            LOCAL_GENERATION_LOCK.release()
     raise RuntimeError("LLM provider request exhausted its retry budget.")
 
 
-def generate_analysis(context: dict[str, Any], config: dict[str, str] | None) -> dict[str, Any]:
+def _generate_analysis(context: dict[str, Any], config: dict[str, str] | None) -> dict[str, Any]:
     if not config:
         return {
             "configured": False,
@@ -828,7 +896,7 @@ def generate_analysis(context: dict[str, Any], config: dict[str, str] | None) ->
         }
     fingerprint = analysis_context_fingerprint(context)
     active_corpus_version = corpus_version()
-    model_version = f"{config.get('provider', 'gemini')}:{config.get('model', 'vertex')}"
+    model_version = provider_version(config)
     cache_key = f"{model_version}:{active_corpus_version}:{fingerprint}"
     with ANALYSIS_CACHE_LOCK:
         cached = ANALYSIS_CACHE.get(cache_key)
@@ -858,19 +926,29 @@ def generate_analysis(context: dict[str, Any], config: dict[str, str] | None) ->
     repair_note: str | None = None
     last_error = ""
     for _attempt in range(2):
+        response_config = config
+        messages = _analysis_prompt(context, rule_set, repair_note)
         try:
-            content = call_provider(_analysis_prompt(context, rule_set, repair_note), config)
+            content = call_provider(messages, config)
         except RuntimeError as exc:
-            return {
-                "ok": False,
-                "configured": True,
-                "transient": True,
-                "model": config.get("model", "vertex-tuned-model"),
-                "generated_at": utc_now(),
-                "message": "The AI provider is temporarily unavailable. Deterministic analysis remains active.",
-                "error": str(exc),
-                "retrieval": retrieval_summary,
-            }
+            fallback = gemini_fallback_config() if runtime_provider(config) == "local_openai" else None
+            if fallback:
+                try:
+                    content = call_provider(messages, fallback)
+                    response_config = fallback
+                except RuntimeError as fallback_exc:
+                    exc = RuntimeError(f"Local provider failed: {exc}; Gemini fallback failed: {fallback_exc}")
+            if not fallback or response_config is config:
+                return {
+                    "ok": False,
+                    "configured": True,
+                    "transient": True,
+                    "model": config.get("model", "vertex-tuned-model"),
+                    "generated_at": utc_now(),
+                    "message": "The AI provider is temporarily unavailable. Deterministic analysis remains active.",
+                    "error": str(exc),
+                    "retrieval": retrieval_summary,
+                }
         try:
             parsed = json.loads(content)
             analysis = normalise_analysis(parsed, fingerprint, sources)
@@ -881,20 +959,63 @@ def generate_analysis(context: dict[str, Any], config: dict[str, str] | None) ->
                 "ok": True,
                 "configured": True,
                 "cached": False,
-                "model": config.get("model", "vertex-tuned-model"),
+                "model": response_config.get("model", "vertex-tuned-model"),
+                "provider": runtime_provider(response_config),
+                "fallbackUsed": response_config is not config,
                 "generated_at": utc_now(),
                 "retrieval": retrieval_summary,
                 "analysis": analysis,
             }
-            with ANALYSIS_CACHE_LOCK:
-                ANALYSIS_CACHE[cache_key] = result
-                if len(ANALYSIS_CACHE) > 32:
-                    ANALYSIS_CACHE.pop(next(iter(ANALYSIS_CACHE)))
+            if response_config is config:
+                with ANALYSIS_CACHE_LOCK:
+                    ANALYSIS_CACHE[cache_key] = result
+                    if len(ANALYSIS_CACHE) > 32:
+                        ANALYSIS_CACHE.pop(next(iter(ANALYSIS_CACHE)))
             return result
         except (json.JSONDecodeError, ValueError) as exc:
             last_error = str(exc)
             repair_note = f"The previous response failed validation: {last_error}. Return a complete corrected JSON object only."
     raise RuntimeError(f"LLM response failed schema validation after one repair: {last_error}")
+
+
+def generate_analysis(context: dict[str, Any], config: dict[str, str] | None) -> dict[str, Any]:
+    if not config:
+        return _generate_analysis(context, config)
+    fingerprint = analysis_context_fingerprint(context)
+    cache_key = f"{provider_version(config)}:{corpus_version()}:{fingerprint}"
+    owner = False
+    with ANALYSIS_CACHE_LOCK:
+        cached = ANALYSIS_CACHE.get(cache_key)
+        if cached:
+            return {**cached, "cached": True}
+        event = ANALYSIS_INFLIGHT.get(cache_key)
+        if event is None:
+            event = threading.Event()
+            ANALYSIS_INFLIGHT[cache_key] = event
+            owner = True
+    if not owner:
+        wait_timeout = provider_timeout(config) + 5 if runtime_provider(config) == "local_openai" else provider_timeout(config) * 3 + 10
+        if event.wait(timeout=wait_timeout):
+            with ANALYSIS_CACHE_LOCK:
+                cached = ANALYSIS_CACHE.get(cache_key)
+            if cached:
+                return {**cached, "cached": True, "coalesced": True}
+        return {
+            "ok": False,
+            "configured": True,
+            "transient": True,
+            "model": config.get("model", "unknown"),
+            "generated_at": utc_now(),
+            "message": "The shared analysis request did not produce a cacheable response. Deterministic analysis remains active.",
+            "error": "coalesced_generation_unavailable",
+        }
+    try:
+        return _generate_analysis(context, config)
+    finally:
+        with ANALYSIS_CACHE_LOCK:
+            completed = ANALYSIS_INFLIGHT.pop(cache_key, None)
+            if completed:
+                completed.set()
 
 
 def main() -> int:

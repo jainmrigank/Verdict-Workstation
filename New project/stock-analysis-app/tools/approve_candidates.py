@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,7 +19,7 @@ if str(APP_ROOT) not in sys.path:
 from tools.evaluate_llm import fact_paths, narrative_items
 
 
-CANDIDATES_PATH = APP_ROOT / "data" / "training" / "gold_candidates.jsonl"
+CANDIDATES_PATH = APP_ROOT / "data" / "training" / "contract_fixtures.jsonl"
 RULEBOOK_PATH = APP_ROOT / "data" / "reference" / "varsity_rulebook.json"
 REVIEW_CHECKS = ("verdict", "grounding", "rules", "coverage", "gaps")
 REQUIRED_ARRAYS = {
@@ -42,7 +44,7 @@ def write_candidates(rows: list[dict[str, Any]], path: Path = CANDIDATES_PATH) -
     temporary.replace(path)
 
 
-def audit_candidate(row: dict[str, Any]) -> list[str]:
+def audit_candidate(row: dict[str, Any], *, require_synthetic: bool = True) -> list[str]:
     errors: list[str] = []
     candidate_id = str(row.get("id") or "missing-id")
     facts = row.get("facts")
@@ -50,7 +52,7 @@ def audit_candidate(row: dict[str, Any]) -> list[str]:
     retrieved_rules = set(row.get("retrievedRuleIds") or [])
     if not isinstance(facts, dict) or not isinstance(output, dict):
         return [f"{candidate_id}: facts and output must be objects"]
-    if not str((facts.get("instrument") or {}).get("symbol") or "").startswith("TEST:"):
+    if require_synthetic and not str((facts.get("instrument") or {}).get("symbol") or "").startswith("TEST:"):
         errors.append(f"{candidate_id}: instrument must remain synthetic")
     expected_verdict = str((facts.get("deterministicAnalysis") or {}).get("verdict") or "")
     action = str((facts.get("userContext") or {}).get("action") or "")
@@ -68,6 +70,10 @@ def audit_candidate(row: dict[str, Any]) -> list[str]:
         if not str(section_value.get("summary") or "").strip():
             errors.append(f"{candidate_id}: {section}.summary is empty")
         for key in arrays:
+            if section == "chart" and key == "patterns" and not require_synthetic and not bool((facts.get("uiOptions") or {}).get("patternsEnabled")):
+                if not isinstance(section_value.get(key), list):
+                    errors.append(f"{candidate_id}: {section}.{key} must be an array")
+                continue
             if not isinstance(section_value.get(key), list) or not section_value[key]:
                 errors.append(f"{candidate_id}: {section}.{key} must be populated")
 
@@ -112,7 +118,39 @@ def audit_candidate(row: dict[str, Any]) -> list[str]:
         errors.append(f"{candidate_id}: warnings must be an array")
     elif data_state == "incomplete" and not warnings:
         errors.append(f"{candidate_id}: incomplete evidence requires an explicit warning")
+    patterns_enabled = bool((facts.get("uiOptions") or {}).get("patternsEnabled"))
+    patterns = ((output.get("chart") or {}).get("patterns") or []) if isinstance(output.get("chart"), dict) else []
+    if not require_synthetic and not patterns_enabled and patterns:
+        errors.append(f"{candidate_id}: chart.patterns must be empty when patterns are disabled")
     return errors
+
+
+def numeric_values(value: Any) -> list[float]:
+    values: list[float] = []
+    if isinstance(value, dict):
+        for item in value.values():
+            values.extend(numeric_values(item))
+    elif isinstance(value, list):
+        for item in value:
+            values.extend(numeric_values(item))
+    elif isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)):
+        values.append(float(value))
+    elif isinstance(value, str):
+        values.extend(float(match.replace(",", "")) for match in re.findall(r"(?<![A-Za-z])-?\d[\d,]*(?:\.\d+)?", value))
+    return values
+
+
+def unsupported_numeric_claims(row: dict[str, Any]) -> list[float]:
+    allowed = numeric_values(row.get("facts") or {})
+    unsupported: list[float] = []
+    for narrative in narrative_items(row.get("output") or {}):
+        for raw in re.findall(r"(?<![A-Za-z])-?\d[\d,]*(?:\.\d+)?", str(narrative.get("text") or "")):
+            claimed = float(raw.replace(",", ""))
+            if claimed in {0.0, 1.0, 14.0, 20.0, 50.0, 100.0}:
+                continue
+            if not any(abs(claimed - value) <= max(0.02, abs(value) * 0.005) for value in allowed):
+                unsupported.append(claimed)
+    return unsupported
 
 
 def audit_candidates(rows: list[dict[str, Any]]) -> dict[str, Any]:

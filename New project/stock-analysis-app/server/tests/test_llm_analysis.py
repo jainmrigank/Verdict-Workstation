@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import tempfile
+import threading
+import time
 import unittest
 from contextlib import closing
 from pathlib import Path
@@ -10,13 +12,20 @@ from unittest.mock import patch
 
 from server.llm_analysis import (
     ANALYSIS_CACHE,
+    ANALYSIS_CACHE_LOCK,
+    ANALYSIS_INFLIGHT,
     RULEBOOK_PATH,
     analysis_context_fingerprint,
     build_index,
+    call_provider,
+    corpus_version,
     context_fingerprint,
     generate_analysis,
+    local_endpoint_is_loopback,
     lexical_retrieve,
     normalise_analysis,
+    provider_timeout,
+    provider_version,
     retrieve_rule_set,
     validate_analysis,
 )
@@ -103,6 +112,70 @@ class LlmAnalysisTests(unittest.TestCase):
         self.assertFalse(first["cached"])
         self.assertTrue(second["cached"])
         self.assertEqual(provider.call_count, 1)
+
+    def test_malformed_provider_output_gets_one_constrained_repair(self) -> None:
+        ANALYSIS_CACHE.clear()
+        config = {"provider": "openai_compatible", "model": "repair-model", "api_key": "test", "base_url": "https://example.invalid"}
+        with patch("server.llm_analysis.call_provider", side_effect=["not-json", json.dumps(raw_analysis())]) as provider:
+            response = generate_analysis(facts(), config)
+        self.assertTrue(response["ok"])
+        self.assertEqual(provider.call_count, 2)
+
+    def test_local_provider_requires_loopback_and_versions_artifact(self) -> None:
+        local = {"provider": "openai_compatible", "model": "gemma", "base_url": "http://127.0.0.1:8080/v1", "api_key": "local"}
+        remote = {**local, "base_url": "https://models.example.com/v1"}
+        self.assertTrue(local_endpoint_is_loopback(local))
+        self.assertFalse(local_endpoint_is_loopback(remote))
+        with patch.dict(
+            "os.environ",
+            {"LLM_PROVIDER": "local", "LOCAL_MODEL_ARTIFACT_HASH": "abc123", "LOCAL_MODEL_QUANTIZATION": "Q8_0", "LOCAL_LLM_TIMEOUT_SECONDS": "999"},
+            clear=False,
+        ):
+            self.assertIn("abc123", provider_version(local))
+            self.assertIn("Q8_0", provider_version(local))
+            self.assertEqual(provider_timeout(local), 120)
+        with patch.dict("os.environ", {"LLM_PROVIDER": "local"}, clear=False):
+            with self.assertRaisesRegex(RuntimeError, "loopback"):
+                call_provider([], remote)
+
+    def test_local_failure_can_fall_back_to_gemini_without_caching_as_local(self) -> None:
+        ANALYSIS_CACHE.clear()
+        config = {"provider": "openai_compatible", "model": "gemma", "api_key": "local", "base_url": "http://127.0.0.1:8080/v1"}
+        with (
+            patch.dict(
+                "os.environ",
+                {"LLM_PROVIDER": "local", "LOCAL_LLM_FALLBACK": "gemini", "GEMINI_API_KEY": "test-key", "GEMINI_FALLBACK_MODEL": "gemini-test"},
+                clear=False,
+            ),
+            patch("server.llm_analysis.call_provider", side_effect=[RuntimeError("local unavailable"), json.dumps(raw_analysis())]),
+        ):
+            response = generate_analysis(facts(), config)
+        self.assertTrue(response["ok"])
+        self.assertTrue(response["fallbackUsed"])
+        self.assertEqual(response["model"], "gemini-test")
+        self.assertEqual(ANALYSIS_CACHE, {})
+
+    def test_duplicate_inflight_request_reuses_completed_cache(self) -> None:
+        ANALYSIS_CACHE.clear()
+        ANALYSIS_INFLIGHT.clear()
+        config = {"provider": "openai_compatible", "model": "test", "api_key": "test", "base_url": "https://example.invalid"}
+        key = f"{provider_version(config)}:{corpus_version()}:{analysis_context_fingerprint(facts())}"
+        event = threading.Event()
+        ANALYSIS_INFLIGHT[key] = event
+
+        def complete() -> None:
+            time.sleep(0.02)
+            with ANALYSIS_CACHE_LOCK:
+                ANALYSIS_CACHE[key] = {"ok": True, "cached": False}
+            event.set()
+
+        thread = threading.Thread(target=complete)
+        thread.start()
+        response = generate_analysis(facts(), config)
+        thread.join()
+        self.assertTrue(response["cached"])
+        self.assertTrue(response["coalesced"])
+        ANALYSIS_INFLIGHT.clear()
 
     def test_semantic_index_refresh_is_atomic_and_resumable(self) -> None:
         vector = [0.01] * 768

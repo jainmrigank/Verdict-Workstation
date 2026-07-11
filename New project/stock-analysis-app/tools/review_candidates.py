@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a local human-review workspace for the 120 gold candidates."""
+"""Run a local review workspace for reasoning gold or contract fixtures."""
 
 from __future__ import annotations
 
@@ -14,7 +14,11 @@ from urllib.parse import urlparse
 
 
 APP_ROOT = Path(__file__).resolve().parents[1]
-CANDIDATES_PATH = APP_ROOT / "data" / "training" / "gold_candidates.jsonl"
+CANDIDATES_PATH = APP_ROOT / "data" / "training" / "reasoning_gold.jsonl"
+DATASET_PATHS = {
+    "reasoning": CANDIDATES_PATH,
+    "fixtures": APP_ROOT / "data" / "training" / "contract_fixtures.jsonl",
+}
 MAX_REVIEW_BYTES = 2 * 1024 * 1024
 REVIEW_CHECKS = {
     "verdict": "Deterministic verdict is preserved",
@@ -22,6 +26,8 @@ REVIEW_CHECKS = {
     "rules": "ruleRefs are relevant",
     "coverage": "Applicable sections are complete and useful",
     "gaps": "Missing or non-applicable evidence is stated honestly",
+    "applicability": "Funds, ETFs, and indices avoid company-only claims",
+    "writingQuality": "Wording is specific, concise, and non-repetitive",
 }
 WRITE_LOCK = threading.Lock()
 
@@ -315,10 +321,13 @@ class ReviewHandler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
+    global CANDIDATES_PATH
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8791)
+    parser.add_argument("--dataset", choices=sorted(DATASET_PATHS), default="reasoning")
     args = parser.parse_args()
+    CANDIDATES_PATH = DATASET_PATHS[args.dataset]
     server = ThreadingHTTPServer((args.host, args.port), ReviewHandler)
     print(f"Candidate review workspace: http://{args.host}:{args.port}/")
     try:

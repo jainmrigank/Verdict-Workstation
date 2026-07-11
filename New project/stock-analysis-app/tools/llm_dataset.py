@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import itertools
 import json
 import os
@@ -21,15 +22,24 @@ APP_ROOT = Path(__file__).resolve().parents[1]
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
-from tools.approve_candidates import audit_candidate
+from tools.approve_candidates import audit_candidate, unsupported_numeric_claims
 from server.llm_analysis import static_retrieved_rule_set
 
 
 TRAINING_ROOT = APP_ROOT / "data" / "training"
-CANDIDATES_PATH = TRAINING_ROOT / "gold_candidates.jsonl"
+FIXTURES_PATH = TRAINING_ROOT / "contract_fixtures.jsonl"
+GOLD_PATH = TRAINING_ROOT / "reasoning_gold.jsonl"
 EXPANDED_PATH = TRAINING_ROOT / "expanded_examples.jsonl"
-SPLIT_ROOT = TRAINING_ROOT / "vertex"
+SPLIT_ROOT = TRAINING_ROOT / "provider"
+VERTEX_ROOT = TRAINING_ROOT / "vertex"
 OUTPUT_SCHEMA = json.loads((APP_ROOT / "schemas" / "llm_analysis_v1.schema.json").read_text(encoding="utf-8"))
+SPLIT_TARGETS = {"train": 900, "validation": 150, "eval": 150}
+GOLD_TARGETS = {"train": 75, "validation": 15, "eval": 30}
+DESCENDANTS_PER_GOLD = {"train": 11, "validation": 9, "eval": 4}
+
+
+class GeminiQuotaError(RuntimeError):
+    """The free Gemini quota is exhausted; completed dataset work remains valid."""
 
 ACTIONS = ["Buy", "Sell"]
 INSTRUMENT_TYPES = ["equity", "etf", "index", "fund", "unknown"]
@@ -56,7 +66,9 @@ def load_local_env() -> None:
 
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n" for row in rows), encoding="utf-8")
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text("".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n" for row in rows), encoding="utf-8")
+    temporary.replace(path)
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -283,6 +295,8 @@ def gemini_json(prompt: dict[str, Any], system_prompt: str, temperature: float =
             return parsed
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
+            if exc.code == 429:
+                raise GeminiQuotaError(f"Gemini returned HTTP 429: {detail[:1000]}") from exc
             if exc.code not in retryable or attempt == 2:
                 raise RuntimeError(f"Gemini returned HTTP {exc.code}: {detail[:1000]}") from exc
         except URLError as exc:
@@ -363,8 +377,8 @@ def gemini_preflight(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     }
 
 
-def preflight_candidates(limit: int, batch_size: int) -> dict[str, int]:
-    rows = read_jsonl(CANDIDATES_PATH)
+def preflight_candidates(limit: int, batch_size: int, path: Path = GOLD_PATH) -> dict[str, int]:
+    rows = read_jsonl(path)
     selected = rows if limit <= 0 else rows[:limit]
     reviewed = 0
     unavailable = 0
@@ -393,58 +407,203 @@ def preflight_candidates(limit: int, batch_size: int) -> dict[str, int]:
                     "reviewedAt": datetime.now(UTC).isoformat(),
                 }
                 reviewed += 1
-        write_jsonl(CANDIDATES_PATH, rows)
+        write_jsonl(path, rows)
     return {"candidates": len(rows), "modelReviewed": reviewed, "preflightUnavailable": unavailable}
 
 
-def expand_to_target(target: int, batch_size: int) -> list[dict[str, Any]]:
-    approved = [row for row in read_jsonl(CANDIDATES_PATH) if row.get("reviewStatus") == "approved"]
-    if len(approved) < 120:
-        raise RuntimeError(f"120 approved gold examples are required before expansion; found {len(approved)}.")
+def row_fingerprint(row: dict[str, Any]) -> str:
+    content = {"facts": row.get("facts") or {}, "output": row.get("output") or {}}
+    return hashlib.sha256(json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def approved_gold() -> list[dict[str, Any]]:
+    rows = [row for row in read_jsonl(GOLD_PATH) if row.get("reviewStatus") == "approved"]
+    split_counts = {split: sum(row.get("split") == split for row in rows) for split in GOLD_TARGETS}
+    if split_counts != GOLD_TARGETS:
+        raise RuntimeError(f"Approved reasoning-gold gate failed. Expected {GOLD_TARGETS}, found {split_counts}.")
+    return rows
+
+
+def expansion_schedule(gold: list[dict[str, Any]]) -> list[tuple[dict[str, Any], int]]:
+    schedule: list[tuple[dict[str, Any], int]] = []
+    for seed in sorted(gold, key=lambda row: str(row.get("id") or "")):
+        split = str(seed.get("split") or "")
+        for ordinal in range(1, DESCENDANTS_PER_GOLD[split] + 1):
+            schedule.append((seed, ordinal))
+    return schedule
+
+
+def prepare_expanded_row(raw: dict[str, Any], seed: dict[str, Any], ordinal: int) -> dict[str, Any]:
+    facts = raw.get("facts") if isinstance(raw.get("facts"), dict) else {}
+    rule_ids = [str(value) for value in raw.get("retrievedRuleIds") or seed.get("retrievedRuleIds") or []]
+    output = raw.get("output") if isinstance(raw.get("output"), dict) else {}
+    if not bool((facts.get("uiOptions") or {}).get("patternsEnabled")) and isinstance(output.get("chart"), dict):
+        output["chart"]["patterns"] = []
+    lineage_id = str(seed["id"])
+    return {
+        "id": f"synthetic-{lineage_id}-{ordinal:02d}",
+        "lineageId": lineage_id,
+        "split": seed["split"],
+        "reviewStatus": "gemini-generated",
+        "reviewNotes": "Passed strict automated expansion audit; not human-approved gold.",
+        "facts": facts,
+        "retrievedRuleIds": rule_ids,
+        "retrievedRuleSet": static_retrieved_rule_set(rule_ids, facts),
+        "output": output,
+        "provenance": {
+            "kind": "gemini-synthetic-descendant",
+            "parentGoldId": lineage_id,
+            "generatedAt": datetime.now(UTC).isoformat(),
+            "model": os.environ.get("GEMINI_DATASET_MODEL") or os.environ.get("LLM_MODEL") or "gemini-3.5-flash",
+        },
+    }
+
+
+def expand_to_target(target: int, batch_size: int) -> dict[str, Any]:
+    if target != 1200:
+        raise RuntimeError("The leak-proof expansion contract currently requires exactly 1,200 examples.")
+    gold = approved_gold()
     expanded = read_jsonl(EXPANDED_PATH)
-    rng = random.Random(560)
-    while len(approved) + len(expanded) < target:
-        count = min(batch_size, target - len(approved) - len(expanded))
-        seed = rng.choice(approved)
-        new_rows = gemini_expand(seed, count)
-        for row in new_rows:
-            audit_errors = audit_candidate(row)
+    existing_ids = {str(row.get("id") or "") for row in expanded}
+    fingerprints = {row_fingerprint(row) for row in [*gold, *expanded]}
+    schedule = expansion_schedule(gold)
+    generated = 0
+    quota_exhausted = False
+    index = 0
+    while index < len(schedule):
+        seed, ordinal = schedule[index]
+        expected_id = f"synthetic-{seed['id']}-{ordinal:02d}"
+        if expected_id in existing_ids:
+            index += 1
+            continue
+        ordinals = [ordinal]
+        lookahead = index + 1
+        while lookahead < len(schedule) and len(ordinals) < max(1, batch_size):
+            next_seed, next_ordinal = schedule[lookahead]
+            if next_seed["id"] != seed["id"] or f"synthetic-{seed['id']}-{next_ordinal:02d}" in existing_ids:
+                break
+            ordinals.append(next_ordinal)
+            lookahead += 1
+        try:
+            new_rows = gemini_expand(seed, len(ordinals))
+        except GeminiQuotaError:
+            quota_exhausted = True
+            break
+        if len(new_rows) != len(ordinals):
+            raise RuntimeError(f"Gemini returned {len(new_rows)} rows for {len(ordinals)} requested descendants of {seed['id']}.")
+        prepared = [prepare_expanded_row(raw, seed, current_ordinal) for raw, current_ordinal in zip(new_rows, ordinals)]
+        batch_fingerprints: set[str] = set()
+        for row in prepared:
+            audit_errors = audit_candidate(row, require_synthetic=False)
+            unsupported_numbers = unsupported_numeric_claims(row)
+            if unsupported_numbers:
+                audit_errors.append(f"{row['id']}: unsupported numeric claims {unsupported_numbers[:8]}")
+            fingerprint = row_fingerprint(row)
+            if fingerprint in fingerprints or fingerprint in batch_fingerprints:
+                audit_errors.append(f"{row['id']}: duplicate global content fingerprint")
             if audit_errors:
-                raise RuntimeError(f"Gemini expansion failed strict audit: {'; '.join(audit_errors[:8])}")
-            row["id"] = f"gemini-{len(expanded) + 1:04d}"
-            row["reviewStatus"] = "gemini-generated"
-            expanded.append(row)
+                raise RuntimeError(f"Gemini expansion failed strict audit: {'; '.join(audit_errors[:12])}")
+            batch_fingerprints.add(fingerprint)
+        expanded.extend(prepared)
+        fingerprints.update(batch_fingerprints)
+        existing_ids.update(str(row["id"]) for row in prepared)
+        generated += len(prepared)
         write_jsonl(EXPANDED_PATH, expanded)
-    return approved + expanded[: max(0, target - len(approved))]
+        index = lookahead
+    split_counts = {split: sum(row.get("split") == split for row in expanded) for split in SPLIT_TARGETS}
+    return {
+        "gold": len(gold),
+        "expanded": len(expanded),
+        "examples": len(gold) + len(expanded),
+        "generated": generated,
+        "quotaExhausted": quota_exhausted,
+        "expandedSplits": split_counts,
+        "complete": len(expanded) == 1080,
+        "path": str(EXPANDED_PATH),
+    }
+
+
+TRAINING_SYSTEM_PROMPT = (
+    "You are the grounded analyst inside Stock Analysis Agent. Supplied facts and the deterministic verdict are authoritative. "
+    "Use only the supplied RetrievedRuleSetV1 guidance and return complete LlmAnalysisV1 JSON."
+)
+
+
+def training_prompt(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "facts": row["facts"],
+        "retrievedRuleSet": row.get("retrievedRuleSet") or static_retrieved_rule_set(row.get("retrievedRuleIds") or [], row["facts"]),
+        "instruction": "Return LlmAnalysisV1 JSON. Preserve deterministic facts and verdict.",
+    }
+
+
+def provider_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "lineageId": row.get("lineageId") or row["id"],
+        "split": row["split"],
+        "messages": [
+            {"role": "system", "content": TRAINING_SYSTEM_PROMPT},
+            {"role": "user", "content": json.dumps(training_prompt(row), ensure_ascii=False, separators=(",", ":"))},
+            {"role": "assistant", "content": json.dumps(row["output"], ensure_ascii=False, separators=(",", ":"))},
+        ],
+        "metadata": {
+            "reviewStatus": row.get("reviewStatus"),
+            "corpusVersion": (row.get("retrievedRuleSet") or {}).get("corpusVersion"),
+            "retrievalMode": (row.get("retrievedRuleSet") or {}).get("mode"),
+            "instrumentType": (row.get("facts") or {}).get("instrument", {}).get("type"),
+            "action": (row.get("facts") or {}).get("userContext", {}).get("action"),
+        },
+    }
 
 
 def vertex_row(row: dict[str, Any]) -> dict[str, Any]:
-    prompt = {
-        "facts": row["facts"],
-        "retrievedRuleSet": static_retrieved_rule_set(row.get("retrievedRuleIds") or [], row["facts"]),
-        "instruction": "Return LlmAnalysisV1 JSON. Preserve deterministic facts and verdict.",
-    }
+    provider = provider_row(row)
+    system = provider["messages"][0]["content"]
+    user = provider["messages"][1]["content"]
+    assistant = provider["messages"][2]["content"]
     return {
         "contents": [
-            {"role": "user", "parts": [{"text": json.dumps(prompt, ensure_ascii=False, separators=(",", ":"))}]},
-            {"role": "model", "parts": [{"text": json.dumps(row["output"], ensure_ascii=False, separators=(",", ":"))}]},
+            {"role": "user", "parts": [{"text": f"SYSTEM:\n{system}\n\nUSER:\n{user}"}]},
+            {"role": "model", "parts": [{"text": assistant}]},
         ]
     }
 
 
-def export_vertex() -> dict[str, int]:
-    approved = [row for row in read_jsonl(CANDIDATES_PATH) if row.get("reviewStatus") == "approved"]
-    expanded = read_jsonl(EXPANDED_PATH)
-    if len(approved) < 120:
-        raise RuntimeError(f"Export blocked: approve all 120 gold examples first; found {len(approved)}.")
-    rows = approved + expanded
-    if len(rows) < 1200:
-        raise RuntimeError(f"Export blocked: 1200 examples are required; found {len(rows)}.")
-    rng = random.Random(560)
-    rng.shuffle(rows)
-    splits = {"train": rows[:900], "validation": rows[900:1050], "eval": rows[1050:1200]}
+def validate_lineage(rows: list[dict[str, Any]], expected: dict[str, int]) -> None:
+    counts = {split: sum(row.get("split") == split for row in rows) for split in expected}
+    if counts != expected:
+        raise RuntimeError(f"Split gate failed. Expected {expected}, found {counts}.")
+    lineage_splits: dict[str, set[str]] = {}
+    for row in rows:
+        lineage_splits.setdefault(str(row.get("lineageId") or row.get("id") or ""), set()).add(str(row.get("split") or ""))
+    leaked = sorted(lineage for lineage, splits in lineage_splits.items() if len(splits) > 1)
+    if leaked:
+        raise RuntimeError(f"Lineage leakage across splits: {leaked[:12]}")
+
+
+def export_provider(*, pilot: bool = False) -> dict[str, int]:
+    gold = approved_gold()
+    if pilot:
+        splits = {
+            "pilot_train": [row for row in gold if row["split"] == "train"],
+            "pilot_validation": [row for row in gold if row["split"] == "validation"],
+        }
+        validate_lineage([*splits["pilot_train"], *splits["pilot_validation"]], {"train": 75, "validation": 15})
+    else:
+        expanded = read_jsonl(EXPANDED_PATH)
+        rows = [*gold, *expanded]
+        if len(expanded) != 1080:
+            raise RuntimeError(f"Export blocked: expected 1,080 audited descendants, found {len(expanded)}.")
+        validate_lineage(rows, SPLIT_TARGETS)
+        fingerprints = [row_fingerprint(row) for row in rows]
+        if len(set(fingerprints)) != len(fingerprints):
+            raise RuntimeError("Export blocked by duplicate global content fingerprints.")
+        splits = {split: [row for row in rows if row["split"] == split] for split in SPLIT_TARGETS}
     for name, split_rows in splits.items():
-        write_jsonl(SPLIT_ROOT / f"{name}.jsonl", [vertex_row(row) for row in split_rows])
+        write_jsonl(SPLIT_ROOT / f"{name}.jsonl", [provider_row(row) for row in split_rows])
+        if not pilot:
+            write_jsonl(VERTEX_ROOT / f"{name}.jsonl", [vertex_row(row) for row in split_rows])
     return {name: len(rows) for name, rows in splits.items()}
 
 
@@ -452,27 +611,29 @@ def main() -> int:
     load_local_env()
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    candidates = subparsers.add_parser("candidates")
-    candidates.add_argument("--count", type=int, default=120)
+    fixtures = subparsers.add_parser("fixtures")
+    fixtures.add_argument("--count", type=int, default=120)
     expand = subparsers.add_parser("expand")
     expand.add_argument("--target", type=int, default=1200)
     expand.add_argument("--batch-size", type=int, default=4)
     preflight = subparsers.add_parser("preflight")
     preflight.add_argument("--limit", type=int, default=0, help="Review this many candidates; 0 reviews all.")
     preflight.add_argument("--batch-size", type=int, default=4)
-    subparsers.add_parser("export")
+    preflight.add_argument("--fixtures", action="store_true", help="Review contract fixtures instead of real reasoning gold.")
+    export = subparsers.add_parser("export")
+    export.add_argument("--pilot", action="store_true", help="Export only the 75/15 approved-gold pilot train and validation files.")
     args = parser.parse_args()
-    if args.command == "candidates":
+    if args.command == "fixtures":
         rows = generate_candidates(args.count)
-        write_jsonl(CANDIDATES_PATH, rows)
-        print(json.dumps({"candidates": len(rows), "path": str(CANDIDATES_PATH)}, indent=2))
+        write_jsonl(FIXTURES_PATH, rows)
+        print(json.dumps({"fixtures": len(rows), "path": str(FIXTURES_PATH)}, indent=2))
     elif args.command == "expand":
-        rows = expand_to_target(args.target, args.batch_size)
-        print(json.dumps({"examples": len(rows), "path": str(EXPANDED_PATH)}, indent=2))
+        print(json.dumps(expand_to_target(args.target, max(1, args.batch_size)), indent=2))
     elif args.command == "preflight":
-        print(json.dumps(preflight_candidates(args.limit, max(1, args.batch_size)), indent=2))
+        path = FIXTURES_PATH if args.fixtures else GOLD_PATH
+        print(json.dumps(preflight_candidates(args.limit, max(1, args.batch_size), path), indent=2))
     elif args.command == "export":
-        print(json.dumps(export_vertex(), indent=2))
+        print(json.dumps(export_provider(pilot=args.pilot), indent=2))
     return 0
 
 

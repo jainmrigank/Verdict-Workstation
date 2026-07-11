@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stock-analysis-agent.local/schemas/model-bakeoff-report.v1.json",
+  "title": "ModelBakeoffReportV1",
+  "type": "object",
+  "required": ["schemaVersion", "name", "provider", "model", "split", "cases", "schemaValidityPct", "verdictPreservationPct", "averageCompletenessPct", "patternsRespectedPct", "p95LatencySeconds", "errorRatePct"],
+  "properties": {
+    "schemaVersion": { "const": "model-bakeoff-report.v1" },
+    "name": { "type": "string" },
+    "provider": { "enum": ["gemini", "local"] },
+    "model": { "type": "string" },
+    "split": { "enum": ["validation", "eval"] },
+    "cases": { "type": "integer", "minimum": 0 },
+    "schemaValidityPct": { "type": "number", "minimum": 0, "maximum": 100 },
+    "verdictPreservationPct": { "type": "number", "minimum": 0, "maximum": 100 },
+    "averageCompletenessPct": { "type": "number", "minimum": 0, "maximum": 100 },
+    "patternsRespectedPct": { "type": "number", "minimum": 0, "maximum": 100 },
+    "p95LatencySeconds": { "type": "number", "minimum": 0 },
+    "errorRatePct": { "type": "number", "minimum": 0, "maximum": 100 }
+  },
+  "additionalProperties": true
+}
