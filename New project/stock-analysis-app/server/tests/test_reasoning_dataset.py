@@ -20,6 +20,7 @@ from tools.reasoning_dataset import (
     build_facts,
     create_evaluation_seal,
     generate_gold,
+    normalise_output_contract,
     validate_manifest,
     verify_evaluation_seal,
 )
@@ -112,6 +113,31 @@ class ReasoningDatasetTests(unittest.TestCase):
             pace_gemini_request()
             pace_gemini_request()
         sleep.assert_called_once_with(3.0)
+
+    def test_output_contract_normalises_refs_action_and_verdict_without_changing_claims(self) -> None:
+        facts = {
+            "userContext": {"action": "Buy"},
+            "deterministicAnalysis": {"verdict": "Wait and Watch"},
+            "technicalEvidence": {"trend": "mixed"},
+        }
+        output = {
+            "decision": {"summary": "Evidence is mixed.", "nextActions": [{"text": "Wait.", "factRefs": ["facts.technicalEvidence.trend"], "ruleRefs": []}]},
+            "portfolio": {"holdingActions": [{"text": "Start only after confirmation.", "factRefs": ["facts.userContext.action"], "ruleRefs": []}]},
+            "coach": {"verdictSummary": "Evidence is mixed."},
+        }
+        rules = {
+            "rules": [
+                {"id": "decision-rule", "appliesTo": ["decision"]},
+                {"id": "portfolio-rule", "appliesTo": ["portfolio"]},
+            ]
+        }
+        result = normalise_output_contract(output, facts, rules)
+        self.assertEqual(result["decision"]["nextActions"][0]["factRefs"], ["technicalEvidence.trend"])
+        self.assertEqual(result["decision"]["nextActions"][0]["ruleRefs"], ["decision-rule"])
+        self.assertIn("Buy action:", result["portfolio"]["holdingActions"][0]["text"])
+        self.assertIn("Wait and Watch", result["decision"]["summary"])
+        self.assertIn("Wait and Watch", result["coach"]["verdictSummary"])
+        self.assertEqual(output["decision"]["summary"], "Evidence is mixed.")
 
     def test_public_manifest_has_exact_leak_proof_split(self) -> None:
         result = validate_manifest()

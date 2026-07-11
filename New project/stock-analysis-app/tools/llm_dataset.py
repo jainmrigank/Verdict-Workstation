@@ -402,7 +402,7 @@ def gemini_json(prompt: dict[str, Any], system_prompt: str, temperature: float =
         or os.environ.get("LLM_BASE_URL")
         or "https://generativelanguage.googleapis.com/v1beta/openai"
     ).rstrip("/")
-    body = {
+    body: dict[str, Any] = {
         "model": model,
         "messages": [
             {"role": "system", "content": system_prompt},
@@ -410,8 +410,10 @@ def gemini_json(prompt: dict[str, Any], system_prompt: str, temperature: float =
         ],
         "response_format": {"type": "json_object"},
         "temperature": temperature,
-        "max_tokens": int(os.environ.get("GEMINI_DATASET_MAX_TOKENS") or 4096),
     }
+    max_tokens = os.environ.get("GEMINI_DATASET_MAX_TOKENS")
+    if max_tokens:
+        body["max_tokens"] = int(max_tokens)
     retryable = {429, 500, 502, 503, 504}
     attempts = max(1, int(os.environ.get("GEMINI_DATASET_ATTEMPTS") or 1))
     timeout = max(10.0, float(os.environ.get("GEMINI_DATASET_TIMEOUT") or 120))

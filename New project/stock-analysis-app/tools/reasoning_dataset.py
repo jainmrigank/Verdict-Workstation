@@ -22,6 +22,7 @@ if str(APP_ROOT) not in sys.path:
 
 from server.llm_analysis import canonical_json, retrieve_rule_set
 from tools.approve_candidates import audit_candidate, unsupported_numeric_claims
+from tools.evaluate_llm import fact_paths
 from tools.llm_dataset import (
     OUTPUT_SCHEMA,
     GeminiQuotaError,
@@ -345,6 +346,8 @@ def generate_output(facts: dict[str, Any], rule_set: dict[str, Any]) -> dict[str
         "task": "Fill every applicable LlmAnalysisV1 narrative field without changing the deterministic verdict or inventing facts.",
         "facts": facts,
         "retrievedRuleSet": rule_set,
+        "validFactRefs": sorted(fact_paths(facts)),
+        "validRuleRefs": [str(rule.get("id") or "") for rule in rule_set.get("rules") or []],
         "outputSchema": OUTPUT_SCHEMA,
         "requirements": [
             "Every narrative item must cite relevant factRefs and ruleRefs.",
@@ -353,6 +356,9 @@ def generate_output(facts: dict[str, Any], rule_set: dict[str, Any]) -> dict[str
             "Return an empty chart.patterns array when uiOptions.patternsEnabled is false.",
             "Write exactly one concise item of at most 35 words in each applicable narrative array.",
             "Keep each section summary under 60 words and return three concise reasoning steps and three coaching questions.",
+            "factRefs must use validFactRefs exactly and must not start with facts.",
+            "Every narrative item must include at least one validRuleRef relevant to that section.",
+            "Portfolio holdingActions text must contain the exact Buy or Sell action label.",
         ],
     }
     return gemini_json(
@@ -372,6 +378,8 @@ def repair_output(
         "task": "Repair one LlmAnalysisV1 response. Return one complete corrected JSON object only.",
         "facts": facts,
         "retrievedRuleSet": rule_set,
+        "validFactRefs": sorted(fact_paths(facts)),
+        "validRuleRefs": [str(rule.get("id") or "") for rule in rule_set.get("rules") or []],
         "previousOutput": previous_output,
         "auditErrors": errors[:20],
         "outputSchema": OUTPUT_SCHEMA,
@@ -383,6 +391,9 @@ def repair_output(
             "Return an empty chart.patterns array when uiOptions.patternsEnabled is false.",
             "Write exactly one concise item of at most 35 words in each applicable narrative array.",
             "Keep each section summary under 60 words and return three concise reasoning steps and three coaching questions.",
+            "factRefs must use validFactRefs exactly and must not start with facts.",
+            "Every narrative item must include at least one validRuleRef relevant to that section.",
+            "Portfolio holdingActions text must contain the exact Buy or Sell action label.",
         ],
     }
     return gemini_json(
@@ -390,6 +401,73 @@ def repair_output(
         "You repair grounded financial-analysis JSON. Facts, retrieved rules, and the deterministic verdict are authoritative. Return JSON only.",
         temperature=0.05,
     )
+
+
+def normalise_output_contract(
+    output: dict[str, Any],
+    facts: dict[str, Any],
+    rule_set: dict[str, Any],
+) -> dict[str, Any]:
+    normalised = json.loads(json.dumps(output))
+    allowed_facts = fact_paths(facts)
+    rules = [rule for rule in rule_set.get("rules") or [] if isinstance(rule, dict) and rule.get("id")]
+
+    def rule_for(section: str) -> str:
+        requested = {
+            "chart": {"chart", "technical"},
+            "company": {"company", "fundamental"},
+            "portfolio": {"portfolio", "risk", "process"},
+            "reasoning": {"reasoning", "decision"},
+            "coach": {"decision", "reasoning"},
+        }.get(section, {section})
+        applicable = next(
+            (
+                rule
+                for rule in rules
+                if requested & {str(value) for value in rule.get("appliesTo") or []}
+            ),
+            rules[0] if rules else None,
+        )
+        return str(applicable.get("id") or "") if applicable else ""
+
+    def visit(value: Any, section: str) -> None:
+        if isinstance(value, dict):
+            if isinstance(value.get("text"), str):
+                refs: list[str] = []
+                for raw in value.get("factRefs") or []:
+                    ref = str(raw)
+                    candidate = ref.removeprefix("facts.")
+                    refs.append(candidate if candidate in allowed_facts else ref)
+                value["factRefs"] = list(dict.fromkeys(refs))
+                if not value.get("ruleRefs"):
+                    fallback_rule = rule_for(section)
+                    if fallback_rule:
+                        value["ruleRefs"] = [fallback_rule]
+            for item in value.values():
+                visit(item, section)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item, section)
+
+    for section, value in normalised.items():
+        visit(value, str(section))
+
+    action = str((facts.get("userContext") or {}).get("action") or "")
+    holding_actions = ((normalised.get("portfolio") or {}).get("holdingActions") or [])
+    if action and holding_actions and isinstance(holding_actions[0], dict):
+        text = str(holding_actions[0].get("text") or "")
+        if action.casefold() not in text.casefold():
+            holding_actions[0]["text"] = f"{action} action: {text}"
+
+    verdict = str((facts.get("deterministicAnalysis") or {}).get("verdict") or "")
+    for section, key in (("decision", "summary"), ("coach", "verdictSummary")):
+        container = normalised.get(section)
+        if not verdict or not isinstance(container, dict):
+            continue
+        text = str(container.get(key) or "")
+        if verdict.casefold() not in text.casefold():
+            container[key] = f"Deterministic verdict: {verdict}. {text}".strip()
+    return normalised
 
 
 def case_row(
@@ -400,6 +478,7 @@ def case_row(
     rule_set: dict[str, Any],
     output: dict[str, Any],
 ) -> dict[str, Any]:
+    output = normalise_output_contract(output, facts, rule_set)
     if not facts["uiOptions"]["patternsEnabled"] and isinstance(output.get("chart"), dict):
         output["chart"]["patterns"] = []
     return {
