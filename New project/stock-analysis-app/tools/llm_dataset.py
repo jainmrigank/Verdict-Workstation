@@ -84,6 +84,59 @@ ProviderQuotaError = GeminiQuotaError
 GEMINI_PACING_RPM = 0.0
 GEMINI_LAST_REQUEST_AT = 0.0
 GEMINI_PACING_LOCK = threading.Lock()
+PROVIDER_USAGE_LOCK = threading.Lock()
+PROVIDER_USAGE = {
+    "requests": 0,
+    "inputTokens": 0,
+    "cachedInputTokens": 0,
+    "outputTokens": 0,
+    "reasoningTokens": 0,
+    "totalTokens": 0,
+}
+
+
+def reset_provider_usage() -> None:
+    with PROVIDER_USAGE_LOCK:
+        for key in PROVIDER_USAGE:
+            PROVIDER_USAGE[key] = 0
+
+
+def record_provider_usage(payload: dict[str, Any]) -> None:
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    if not isinstance(usage, dict):
+        return
+    prompt_details = usage.get("prompt_tokens_details") or {}
+    completion_details = usage.get("completion_tokens_details") or {}
+    values = {
+        "requests": 1,
+        "inputTokens": int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0),
+        "cachedInputTokens": int(prompt_details.get("cached_tokens") or usage.get("cached_input_tokens") or 0),
+        "outputTokens": int(usage.get("completion_tokens") or usage.get("output_tokens") or 0),
+        "reasoningTokens": int(completion_details.get("reasoning_tokens") or usage.get("reasoning_tokens") or 0),
+        "totalTokens": int(usage.get("total_tokens") or 0),
+    }
+    if not values["totalTokens"]:
+        values["totalTokens"] = values["inputTokens"] + values["outputTokens"]
+    with PROVIDER_USAGE_LOCK:
+        for key, value in values.items():
+            PROVIDER_USAGE[key] += value
+
+
+def provider_usage_snapshot() -> dict[str, int]:
+    with PROVIDER_USAGE_LOCK:
+        return dict(PROVIDER_USAGE)
+
+
+def estimated_provider_cost(provider: str, usage: dict[str, int]) -> float | None:
+    if dataset_provider_name(provider) != "openai":
+        return None
+    input_price = float(os.environ.get("OPENAI_INPUT_PRICE_PER_MILLION") or 0.75)
+    cached_price = float(os.environ.get("OPENAI_CACHED_INPUT_PRICE_PER_MILLION") or 0.075)
+    output_price = float(os.environ.get("OPENAI_OUTPUT_PRICE_PER_MILLION") or 4.50)
+    cached = min(int(usage.get("cachedInputTokens") or 0), int(usage.get("inputTokens") or 0))
+    uncached = max(0, int(usage.get("inputTokens") or 0) - cached)
+    cost = (uncached * input_price + cached * cached_price + int(usage.get("outputTokens") or 0) * output_price) / 1_000_000
+    return round(cost, 6)
 
 
 def configure_gemini_pacing(rpm: float) -> None:
@@ -242,6 +295,47 @@ def parse_cerebras_quota_error(detail: str, headers: Any = None) -> ProviderQuot
     )
 
 
+def parse_openai_quota_error(detail: str, headers: Any = None) -> ProviderQuotaError:
+    message = detail[:1000]
+    error_type = ""
+    error_code = ""
+    try:
+        payload = json.loads(detail)
+        error = payload.get("error") if isinstance(payload, dict) else None
+        if isinstance(error, dict):
+            message = str(error.get("message") or message)
+            error_type = str(error.get("type") or "")
+            error_code = str(error.get("code") or "")
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        pass
+    raw_retry = _header_value(headers, "retry-after")
+    retry_after = _retry_seconds(raw_retry)
+    if retry_after is None:
+        try:
+            retry_after = float(raw_retry) if raw_retry else None
+        except ValueError:
+            retry_after = None
+    lowered = f"{error_type} {error_code} {message}".casefold()
+    hard_markers = ("insufficient_quota", "billing", "credit balance", "spend limit")
+    scope = "hard" if any(marker in lowered for marker in hard_markers) else "short_window"
+    if scope == "short_window" and retry_after is None:
+        retry_after = 60.0
+    raw_limit = _header_value(headers, "x-ratelimit-limit-requests")
+    try:
+        limit = int(float(raw_limit)) if raw_limit else None
+    except ValueError:
+        limit = None
+    return ProviderQuotaError(
+        message,
+        metric="openai-inference",
+        quota_id=error_code or error_type or "openai-rate-limit",
+        dimensions={"requestId": _header_value(headers, "x-request-id")},
+        limit=limit,
+        retry_after_seconds=retry_after,
+        scope=scope,
+    )
+
+
 def strict_output_schema(schema: dict[str, Any]) -> dict[str, Any]:
     strict = json.loads(json.dumps(schema))
     unsupported = {"$schema", "$id", "minLength"}
@@ -252,6 +346,9 @@ def strict_output_schema(schema: dict[str, Any]) -> dict[str, Any]:
                 value.pop(key, None)
             if value.get("type") == "object":
                 value["additionalProperties"] = False
+                properties = value.get("properties")
+                if isinstance(properties, dict):
+                    value["required"] = list(properties)
             for item in value.values():
                 visit(item)
         elif isinstance(value, list):
@@ -264,7 +361,7 @@ def strict_output_schema(schema: dict[str, Any]) -> dict[str, Any]:
 
 def dataset_provider_name(provider: str | None = None) -> str:
     selected = (provider or os.environ.get("DATASET_LLM_PROVIDER") or "gemini").strip().lower()
-    if selected not in {"gemini", "cerebras"}:
+    if selected not in {"gemini", "cerebras", "openai"}:
         raise RuntimeError(f"Unsupported dataset provider: {selected!r}")
     return selected
 
@@ -273,6 +370,8 @@ def dataset_provider_metadata(provider: str | None = None) -> dict[str, str]:
     selected = dataset_provider_name(provider)
     if selected == "cerebras":
         model = os.environ.get("CEREBRAS_DATASET_MODEL") or "gpt-oss-120b"
+    elif selected == "openai":
+        model = os.environ.get("OPENAI_DATASET_MODEL") or "gpt-5.4-mini"
     else:
         model = os.environ.get("GEMINI_DATASET_MODEL") or os.environ.get("LLM_MODEL") or "gemini-3.5-flash"
     return {"provider": selected, "model": model}
@@ -531,6 +630,7 @@ def gemini_json(prompt: dict[str, Any], system_prompt: str, temperature: float =
         try:
             with urlopen(request, timeout=timeout) as response:
                 payload = json.loads(response.read().decode("utf-8"))
+            record_provider_usage(payload)
             parsed = json.loads(extract_chat_content(payload))
             if not isinstance(parsed, dict):
                 raise RuntimeError("Gemini JSON response must be an object.")
@@ -603,6 +703,7 @@ def cerebras_json(
     try:
         with urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
+        record_provider_usage(payload)
         parsed = json.loads(extract_chat_content(payload))
         if not isinstance(parsed, dict):
             raise RuntimeError("Cerebras JSON response must be an object.")
@@ -618,6 +719,74 @@ def cerebras_json(
         raise RuntimeError(f"Cerebras returned an invalid or timed-out response: {exc}") from exc
 
 
+def openai_json(
+    prompt: dict[str, Any],
+    system_prompt: str,
+    temperature: float = 0.2,
+    *,
+    schema: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    api_key = os.environ.get("OPENAI_DATASET_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is required for OpenAI dataset work.")
+    model = os.environ.get("OPENAI_DATASET_MODEL") or "gpt-5.4-mini"
+    base_url = (os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
+    response_format: dict[str, Any]
+    if schema:
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "llm_analysis_v1",
+                "strict": True,
+                "schema": strict_output_schema(schema),
+            },
+        }
+    else:
+        response_format = {"type": "json_object"}
+    body: dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
+        ],
+        "response_format": response_format,
+        "reasoning_effort": os.environ.get("OPENAI_REASONING_EFFORT") or "medium",
+        "max_completion_tokens": int(os.environ.get("OPENAI_MAX_COMPLETION_TOKENS") or 12000),
+    }
+    if body["reasoning_effort"] == "none":
+        body["temperature"] = temperature
+    timeout = max(10.0, float(os.environ.get("OPENAI_DATASET_TIMEOUT") or 180))
+    pace_gemini_request()
+    request = Request(
+        f"{base_url}/chat/completions",
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "stock-analysis-agent/1.0",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        record_provider_usage(payload)
+        parsed = json.loads(extract_chat_content(payload))
+        if not isinstance(parsed, dict):
+            raise RuntimeError("OpenAI JSON response must be an object.")
+        return parsed
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        if exc.code == 429:
+            raise parse_openai_quota_error(detail, exc.headers) from exc
+        raise RuntimeError(f"OpenAI returned HTTP {exc.code}: {detail[:1000]}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"Could not reach OpenAI: {exc.reason}") from exc
+    except (TimeoutError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"OpenAI returned an invalid or timed-out response: {exc}") from exc
+
+
 def dataset_json(
     prompt: dict[str, Any],
     system_prompt: str,
@@ -629,6 +798,8 @@ def dataset_json(
     selected = dataset_provider_name(provider)
     if selected == "cerebras":
         return cerebras_json(prompt, system_prompt, temperature, schema=schema)
+    if selected == "openai":
+        return openai_json(prompt, system_prompt, temperature, schema=schema)
     return gemini_json(prompt, system_prompt, temperature)
 
 

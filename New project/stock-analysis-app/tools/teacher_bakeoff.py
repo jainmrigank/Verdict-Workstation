@@ -22,8 +22,11 @@ from tools.llm_dataset import (
     ProviderQuotaError,
     configure_gemini_pacing,
     dataset_provider_metadata,
+    estimated_provider_cost,
     load_local_env,
+    provider_usage_snapshot,
     read_jsonl,
+    reset_provider_usage,
     write_jsonl,
 )
 from tools.reasoning_dataset import generate_output, normalise_output_contract, repair_output, row_audit_errors
@@ -67,6 +70,7 @@ def run(provider: str, limit: int, rpm: float) -> dict[str, Any]:
     if not baseline_rows:
         raise RuntimeError("Generate at least one accepted gold case before running a teacher bake-off.")
     configure_gemini_pacing(rpm)
+    reset_provider_usage()
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     candidate_path = OUTPUT_ROOT / f"{provider}-candidates.jsonl"
     candidates = {str(row.get("id")): row for row in read_jsonl(candidate_path)}
@@ -75,12 +79,17 @@ def run(provider: str, limit: int, rpm: float) -> dict[str, Any]:
     for baseline in baseline_rows:
         row_id = str(baseline["id"])
         existing = candidates.get(row_id)
-        if existing and not existing.get("candidateAuditErrors"):
+        existing_errors = list((existing or {}).get("candidateAuditErrors") or [])
+        audit_only_errors = bool(existing_errors) and all(
+            str(error).startswith(f"{row_id}:") for error in existing_errors
+        )
+        if existing and (not existing_errors or audit_only_errors):
             existing["candidateAuditErrors"] = row_audit_errors(existing)
             if not existing["candidateAuditErrors"]:
                 continue
         facts = baseline["facts"]
         rule_set = baseline["retrievedRuleSet"]
+        usage_before = provider_usage_snapshot()
         output: dict[str, Any] | None = None
         repairs = 0
         try:
@@ -105,6 +114,11 @@ def run(provider: str, limit: int, rpm: float) -> dict[str, Any]:
         candidate["candidateTeacher"] = metadata
         candidate["candidateRepairs"] = repairs
         candidate["candidateAuditErrors"] = errors
+        usage_after = provider_usage_snapshot()
+        candidate["candidateUsage"] = {
+            key: usage_after.get(key, 0) - usage_before.get(key, 0)
+            for key in usage_after
+        }
         candidate["baselineMetrics"] = output_metrics(baseline["output"])
         candidate["candidateMetrics"] = output_metrics(candidate["output"])
         candidates[row_id] = candidate
@@ -112,6 +126,10 @@ def run(provider: str, limit: int, rpm: float) -> dict[str, Any]:
 
     compared = [candidates[str(row["id"])] for row in baseline_rows if str(row["id"]) in candidates]
     passed = [row for row in compared if not row.get("candidateAuditErrors")]
+    usage_totals = {
+        key: sum(int((row.get("candidateUsage") or {}).get(key) or 0) for row in compared)
+        for key in provider_usage_snapshot()
+    }
     report = {
         "schemaVersion": "teacher-bakeoff-report.v1",
         "generatedAt": datetime.now(UTC).isoformat(),
@@ -120,6 +138,8 @@ def run(provider: str, limit: int, rpm: float) -> dict[str, Any]:
         "comparedCases": len(compared),
         "automatedPasses": len(passed),
         "repairs": sum(int(row.get("candidateRepairs") or 0) for row in compared),
+        "candidateUsage": usage_totals,
+        "estimatedCostUsd": estimated_provider_cost(provider, usage_totals),
         "quotaStop": quota,
         "candidatePath": str(candidate_path),
         "needsHumanReview": [str(row["id"]) for row in passed],
@@ -137,7 +157,7 @@ def run(provider: str, limit: int, rpm: float) -> dict[str, Any]:
 def main() -> int:
     load_local_env()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--provider", choices=("cerebras", "gemini"), default="cerebras")
+    parser.add_argument("--provider", choices=("cerebras", "gemini", "openai"), default="cerebras")
     parser.add_argument("--limit", type=int, default=3)
     parser.add_argument("--rpm", type=float, default=2)
     args = parser.parse_args()

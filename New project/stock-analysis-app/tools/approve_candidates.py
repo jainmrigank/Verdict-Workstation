@@ -33,7 +33,8 @@ REQUIRED_ARRAYS = {
 }
 NUMBER_PATTERN = re.compile(r"(?<![A-Za-z0-9])-?\d[\d,]*(?:\.\d+)?")
 DIRECT_ACTION_PATTERN = re.compile(
-    r"^(?:immediately\s+)?(?:buy|sell)\b|^(?:execute|place)\s+(?:the\s+)?(?:buy|sell)\b",
+    r"^(?:immediately\s+)?(?:buy|sell)(?:\s+(?:the|this|your|all|some)\b|\s+(?:position|holding|stock|shares|now)\b)"
+    r"|^(?:execute|place)\s+(?:the\s+)?(?:buy|sell)\b",
     re.IGNORECASE,
 )
 

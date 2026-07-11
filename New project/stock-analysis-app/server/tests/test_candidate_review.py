@@ -21,6 +21,23 @@ class CandidateReviewTests(unittest.TestCase):
         errors = audit_candidate(row)
         self.assertTrue(any("cannot issue a direct Buy/Sell instruction" in error for error in errors))
 
+    def test_needs_input_allows_sell_intent_to_remain_unconfirmed(self) -> None:
+        row = generate_candidates(1)[0]
+        row["id"] = "test-unconfirmed-action"
+        row["facts"]["userContext"]["action"] = "Sell"
+        row["facts"]["deterministicAnalysis"]["verdict"] = "Needs Input"
+        row["output"]["decision"]["summary"] = "Needs Input before deciding."
+        row["output"]["coach"]["verdictSummary"] = "Needs Input before deciding."
+        row["output"]["portfolio"]["holdingActions"] = [
+            {
+                "text": "Sell remains unconfirmed; review the evidence first.",
+                "factRefs": ["userContext.action"],
+                "ruleRefs": ["test"],
+            }
+        ]
+        errors = audit_candidate(row)
+        self.assertFalse(any("cannot issue a direct Buy/Sell instruction" in error for error in errors))
+
     def test_numeric_grounding_ignores_indicator_suffixes_and_range_hyphens(self) -> None:
         row = {
             "facts": {

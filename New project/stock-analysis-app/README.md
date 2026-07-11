@@ -185,7 +185,13 @@ python3 tools/llm_dataset.py export --pilot
 
 Gemini Flash generates and expands the reasoning examples within free-tier quota. Generation is paced at 15 RPM, every completed row is checkpointed, bounded short-window quota delays are retried, and daily or hard limits stop safely for a later resume. Twice-invalid answers are quarantined and block approval until regenerated. The complete `RetrievedRuleSetV1` payload is embedded in every provider-neutral training row.
 
-The teacher generator is provider-neutral. `tools/teacher_bakeoff.py` can compare Cerebras GPT-OSS 120B against accepted Gemini cases using identical facts, RAG rules, and strict audit gates. Cerebras candidates use constrained `LlmAnalysisV1` JSON decoding and are written only to ignored comparison artifacts; the gold corpus is unchanged until a reviewed teacher is explicitly selected.
+The teacher generator is provider-neutral. `tools/teacher_bakeoff.py` can compare OpenAI GPT-5.4 mini or Cerebras GPT-OSS 120B against accepted Gemini cases using identical facts, RAG rules, and strict audit gates. OpenAI and Cerebras candidates use constrained `LlmAnalysisV1` JSON decoding and are written only to ignored comparison artifacts; the gold corpus is unchanged until a reviewed teacher is explicitly selected. OpenAI reports include prompt, cached, completion, and reasoning-token usage plus an estimated USD cost so a small bake-off can be reviewed before corpus-scale generation.
+
+For an isolated GPT-5.4 mini teacher comparison, keep the production `LLM_MODEL` on Gemini and set only `OPENAI_API_KEY` plus `OPENAI_DATASET_MODEL=gpt-5.4-mini` in `../.env`, then run:
+
+```bash
+python3 tools/teacher_bakeoff.py --provider openai --limit 3 --rpm 2
+```
 
 The included `notebooks/gemma_bakeoff_colab.ipynb` trains `Gemma 4 E4B IT` or, when free accelerator memory permits, `Gemma 4 12B IT` with Unsloth QLoRA. Training enforces no truncation, response-only loss, deterministic seeds, and saved run manifests. Model artifacts and generated split files remain untracked.
 

@@ -932,7 +932,7 @@ def main() -> int:
     generate.add_argument("--rpm", type=float, default=15)
     generate.add_argument("--wait-on-short-quota", action=argparse.BooleanOptionalAction, default=True)
     generate.add_argument("--max-wait-seconds", type=float, default=600)
-    generate.add_argument("--provider", choices=("gemini", "cerebras"), default=None)
+    generate.add_argument("--provider", choices=("gemini", "cerebras", "openai"), default=None)
     audit = subparsers.add_parser("audit")
     audit.add_argument("--allow-partial", action="store_true")
     approve = subparsers.add_parser("approve")

@@ -10,12 +10,17 @@ from tools.llm_dataset import (
     GeminiQuotaError,
     cerebras_json,
     configure_gemini_pacing,
+    estimated_provider_cost,
     expand_to_target,
     expansion_schedule,
+    openai_json,
     pace_gemini_request,
     parse_gemini_quota_error,
     parse_cerebras_quota_error,
+    parse_openai_quota_error,
+    provider_usage_snapshot,
     provider_row,
+    reset_provider_usage,
     strict_output_schema,
 )
 from tools.reasoning_dataset import (
@@ -53,6 +58,51 @@ def gold_row(index: int, split: str) -> dict:
 
 
 class ReasoningDatasetTests(unittest.TestCase):
+    def test_openai_strict_request_is_isolated_and_records_usage(self) -> None:
+        response = MagicMock()
+        response.read.return_value = json.dumps(
+            {
+                "choices": [{"message": {"content": json.dumps({"status": "ok"})}}],
+                "usage": {
+                    "prompt_tokens": 1000,
+                    "completion_tokens": 500,
+                    "total_tokens": 1500,
+                    "prompt_tokens_details": {"cached_tokens": 200},
+                    "completion_tokens_details": {"reasoning_tokens": 300},
+                },
+            }
+        ).encode("utf-8")
+        response.__enter__.return_value = response
+        schema = {
+            "type": "object",
+            "properties": {"status": {"type": "string"}},
+            "required": ["status"],
+        }
+        configure_gemini_pacing(0)
+        reset_provider_usage()
+        with (
+            patch.dict(
+                "tools.llm_dataset.os.environ",
+                {"OPENAI_API_KEY": "test-openai-key", "OPENAI_DATASET_MODEL": "gpt-5.4-mini"},
+                clear=False,
+            ),
+            patch("tools.llm_dataset.urlopen", return_value=response) as urlopen,
+        ):
+            result = openai_json({"task": "test"}, "Return JSON.", schema=schema)
+        request = urlopen.call_args.args[0]
+        body = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(result, {"status": "ok"})
+        self.assertEqual(request.full_url, "https://api.openai.com/v1/chat/completions")
+        self.assertEqual(request.headers["Authorization"], "Bearer test-openai-key")
+        self.assertEqual(body["model"], "gpt-5.4-mini")
+        self.assertEqual(body["reasoning_effort"], "medium")
+        self.assertNotIn("temperature", body)
+        self.assertTrue(body["response_format"]["json_schema"]["strict"])
+        usage = provider_usage_snapshot()
+        self.assertEqual(usage["requests"], 1)
+        self.assertEqual(usage["reasoningTokens"], 300)
+        self.assertEqual(estimated_provider_cost("openai", usage), 0.002865)
+
     def test_cerebras_strict_request_uses_isolated_key_and_schema(self) -> None:
         response = MagicMock()
         response.read.return_value = json.dumps(
@@ -94,6 +144,20 @@ class ReasoningDatasetTests(unittest.TestCase):
         self.assertEqual(daily.retry_after_seconds, 60)
         self.assertEqual(daily.quota_id, "cerebras-requests-day")
 
+    def test_openai_quota_parser_distinguishes_rate_and_billing_limits(self) -> None:
+        short = parse_openai_quota_error(
+            '{"error":{"message":"Rate limit reached","type":"tokens","code":"rate_limit_exceeded"}}',
+            {"retry-after": "2", "x-ratelimit-limit-requests": "500"},
+        )
+        self.assertEqual(short.scope, "short_window")
+        self.assertEqual(short.retry_after_seconds, 2)
+        self.assertEqual(short.limit, 500)
+        hard = parse_openai_quota_error(
+            '{"error":{"message":"Insufficient quota. Check your billing details.","code":"insufficient_quota"}}'
+        )
+        self.assertEqual(hard.scope, "hard")
+        self.assertIsNone(hard.retry_after_seconds)
+
     def test_strict_schema_closes_every_nested_object(self) -> None:
         schema = {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -108,6 +172,8 @@ class ReasoningDatasetTests(unittest.TestCase):
         strict = strict_output_schema(schema)
         self.assertFalse(strict["additionalProperties"])
         self.assertFalse(strict["properties"]["nested"]["additionalProperties"])
+        self.assertEqual(strict["required"], ["nested"])
+        self.assertEqual(strict["properties"]["nested"]["required"], ["value"])
         self.assertNotIn("$schema", strict)
         self.assertNotIn("minLength", strict["properties"]["nested"]["properties"]["value"])
         self.assertNotIn("additionalProperties", schema)
