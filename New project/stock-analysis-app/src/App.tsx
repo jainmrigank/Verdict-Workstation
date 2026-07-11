@@ -1220,6 +1220,13 @@ function writeBridgeSession(session: BridgeSession | null) {
   }
 }
 
+function normaliseBridgeSession(token: string, expiresAt: number): BridgeSession {
+  return {
+    token,
+    expiresAt: expiresAt < 1_000_000_000_000 ? expiresAt * 1000 : expiresAt,
+  }
+}
+
 function cacheStateFromProvider(provider: string): CacheState {
   if (provider.startsWith('free_')) return 'free'
   if (provider.includes('starter')) return 'sample'
@@ -5636,7 +5643,7 @@ function App() {
         setBridgeAuthState('connected')
         setBridgeAuthMessage('This local bridge does not require a group code.')
       } else if (typeof data.token === 'string' && typeof data.expiresAt === 'number') {
-        const session = { token: data.token, expiresAt: data.expiresAt }
+        const session = normaliseBridgeSession(data.token, data.expiresAt)
         setBridgeSession(session)
         writeBridgeSession(session)
         setBridgeAuthState('connected')
@@ -8342,4 +8349,4 @@ export default App
 // export) and exist so the core scoring logic can be unit-tested in isolation from
 // the React component tree. See src/__tests__/buildAnalysis.test.ts.
 // eslint-disable-next-line react-refresh/only-export-components
-export { buildAnalysis, starterSnapshot, initialForm, formatInr, formatPercent, toneFromScore, defaultRiskPercentForProfile, mergeRefreshedSnapshot }
+export { buildAnalysis, starterSnapshot, initialForm, formatInr, formatPercent, toneFromScore, defaultRiskPercentForProfile, mergeRefreshedSnapshot, normaliseBridgeSession }

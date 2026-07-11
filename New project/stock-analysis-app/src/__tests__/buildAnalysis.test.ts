@@ -6,11 +6,25 @@ import {
   formatPercent,
   initialForm,
   mergeRefreshedSnapshot,
+  normaliseBridgeSession,
   starterSnapshot,
   toneFromScore,
   type AnalysisForm,
   type Snapshot,
 } from '../App'
+
+describe('normaliseBridgeSession', () => {
+  it('converts server epoch seconds to browser epoch milliseconds', () => {
+    expect(normaliseBridgeSession('token', 1_783_754_974)).toEqual({
+      token: 'token',
+      expiresAt: 1_783_754_974_000,
+    })
+  })
+
+  it('keeps an already-normalised millisecond expiry unchanged', () => {
+    expect(normaliseBridgeSession('token', 1_783_754_974_000).expiresAt).toBe(1_783_754_974_000)
+  })
+})
 
 describe('formatInr', () => {
   it('formats a positive rupee amount with the currency symbol', () => {
