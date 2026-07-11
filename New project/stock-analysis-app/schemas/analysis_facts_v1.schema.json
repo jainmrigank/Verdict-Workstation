@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stock-analysis-agent.local/schemas/analysis-facts.v1.json",
+  "title": "AnalysisFactsV1",
+  "type": "object",
+  "required": ["schemaVersion", "generatedAt", "instrument", "userContext", "deterministicAnalysis", "technicalEvidence", "fundamentalEvidence", "portfolioEvidence", "dataQuality", "uiOptions"],
+  "properties": {
+    "schemaVersion": { "const": "analysis-facts.v1" },
+    "generatedAt": { "type": "string" },
+    "instrument": { "type": "object" },
+    "userContext": { "type": "object" },
+    "deterministicAnalysis": { "type": "object" },
+    "technicalEvidence": { "type": "object" },
+    "fundamentalEvidence": { "type": "object" },
+    "portfolioEvidence": { "type": "object" },
+    "signals": { "type": "array" },
+    "reasoningTrace": { "type": "array" },
+    "dataQuality": { "type": "object" },
+    "uiOptions": { "type": "object" }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,480 @@
+#!/usr/bin/env python3
+"""Create, expand, and export the grounded analyst training dataset."""
+
+from __future__ import annotations
+
+import argparse
+import itertools
+import json
+import os
+import random
+import sys
+import time
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+
+APP_ROOT = Path(__file__).resolve().parents[1]
+if str(APP_ROOT) not in sys.path:
+    sys.path.insert(0, str(APP_ROOT))
+
+from tools.approve_candidates import audit_candidate
+from server.llm_analysis import static_retrieved_rule_set
+
+
+TRAINING_ROOT = APP_ROOT / "data" / "training"
+CANDIDATES_PATH = TRAINING_ROOT / "gold_candidates.jsonl"
+EXPANDED_PATH = TRAINING_ROOT / "expanded_examples.jsonl"
+SPLIT_ROOT = TRAINING_ROOT / "vertex"
+OUTPUT_SCHEMA = json.loads((APP_ROOT / "schemas" / "llm_analysis_v1.schema.json").read_text(encoding="utf-8"))
+
+ACTIONS = ["Buy", "Sell"]
+INSTRUMENT_TYPES = ["equity", "etf", "index", "fund", "unknown"]
+HORIZONS = ["3-6m", "6-12m", "1-3y", "3y+"]
+TRENDS = ["rising", "mixed", "falling"]
+DATA_STATES = ["complete", "incomplete"]
+RISK_PROFILES = ["conservative", "balanced", "balanced aggressive", "aggressive"]
+
+
+def load_local_env() -> None:
+    env_path = APP_ROOT.parent / ".env"
+    if not env_path.exists():
+        return
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n" for row in rows), encoding="utf-8")
+
+
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def item(text: str, tone: str, facts: list[str], rules: list[str]) -> dict[str, Any]:
+    return {"text": text, "tone": tone, "factRefs": facts, "ruleRefs": rules}
+
+
+def candidate_output(facts: dict[str, Any], rule_ids: list[str]) -> dict[str, Any]:
+    verdict = facts["deterministicAnalysis"]["verdict"]
+    action = facts["userContext"]["action"]
+    trend = facts["technicalEvidence"]["trend"]
+    instrument_type = facts["instrument"]["type"]
+    complete = facts["dataQuality"]["state"] == "complete"
+    tone = "positive" if trend == "rising" and complete else "negative" if trend == "falling" else "neutral"
+    gap_subject = "company and price" if instrument_type == "equity" else "instrument and price"
+    gap = f"The available {gap_subject} evidence is sufficient for a structured review." if complete else "Important evidence is missing, so confidence must remain limited until it is refreshed."
+    if verdict == "Needs Input":
+        next_text = "Do not commit capital or change the holding until the missing evidence is resolved and the deterministic analysis can be rerun."
+    elif verdict == "Buy in Tranches":
+        next_text = "Stage the proposed capital in tranches and keep the deterministic invalidation visible before each addition."
+    elif verdict == "Reduce":
+        next_text = "Follow the deterministic reduction plan without turning a risk-control decision into an attempt to recover the loss immediately."
+    else:
+        next_text = f"Follow the deterministic {verdict} decision and review it against the stated invalidation before changing capital."
+    avoid_text = "Do not override the current plan because of one candle, one ratio, or the desire to recover a loss quickly."
+    supporting_evidence = "business quality and valuation" if instrument_type == "equity" else "underlying exposure, liquidity, tracking, and valuation"
+    driver_text = f"The {trend} price trend is the main timing clue, but it needs agreement from volume and {supporting_evidence}."
+    company_applicable = instrument_type == "equity"
+    if company_applicable:
+        company_text = "Use profitability, balance-sheet strength, cash conversion, valuation, and sector drivers together before raising conviction."
+        company_items = {
+            "businessModel": "Confirm how the business creates value before interpreting its ratios.",
+            "quality": company_text,
+            "profitability": "Profitability should be durable and supported by operating evidence rather than one period.",
+            "balanceSheet": "Debt and liquidity determine how well the business can absorb a weak cycle.",
+            "cashFlow": "Cash generation should support reported profit before earnings quality is treated as strong.",
+            "valuation": "Valuation needs growth and quality support; a low multiple is not automatically cheap.",
+            "sectorDrivers": "Sector-specific operating drivers can matter more than generic ratios.",
+            "catalysts": "Treat only supplied filings or operating improvements as catalysts.",
+            "risks": "Missing or weakening business evidence can cap upside even when price momentum improves.",
+        }
+    else:
+        company_text = f"Company-style fundamentals are not directly applicable to this {instrument_type}; evaluate its mandate, underlying exposure, costs, tracking, liquidity, and concentration instead."
+        company_items = {
+            "businessModel": f"Treat the {instrument_type} structure, mandate, benchmark, and underlying exposure as its business context.",
+            "quality": "Judge portfolio construction, replication quality, governance, liquidity, and consistency with the stated mandate.",
+            "profitability": "Issuer profitability is not directly applicable; inspect the quality and earnings exposure of the underlying holdings when that data is available.",
+            "balanceSheet": "A company balance sheet is not directly applicable; use underlying credit quality, leverage exposure, and counterparty structure where relevant.",
+            "cashFlow": "Company cash flow is not directly applicable; assess distributions, underlying cash generation, and fund flows only when supplied.",
+            "valuation": "Use NAV, premium or discount, underlying portfolio valuation, and costs rather than a standalone company multiple.",
+            "sectorDrivers": "Rates, index composition, sector weights, flows, and mandate-specific drivers can change future returns.",
+            "catalysts": "Rebalancing, flows, rate changes, tracking improvement, and changes in underlying holdings are relevant only when supplied.",
+            "risks": "Tracking error, liquidity, concentration, costs, and underlying exposure can weaken the case even when the chart improves.",
+        }
+    portfolio_text = "Keep the position size consistent with risk capacity and total portfolio concentration."
+    refs = ["deterministicAnalysis.verdict", "technicalEvidence.trend", "dataQuality.state"]
+    rules = rule_ids
+    return {
+        "decision": {
+            "summary": f"This {action.lower()} review keeps the app's {verdict} verdict and explains the evidence that should govern the next action.",
+            "nextActions": [item(next_text, "positive" if complete else "neutral", refs, rules)],
+            "avoid": [item(avoid_text, "negative", refs, rules)],
+            "priceDrivers": [item(driver_text, tone, refs, rules)],
+            "risks": [item("Downside risk rises when the chart, business evidence, or position size stops supporting the thesis.", "negative", refs, rules)],
+            "dataGaps": [item(gap, "neutral" if complete else "negative", ["dataQuality.state"], rules)],
+        },
+        "chart": {
+            "summary": f"The chart trend is {trend}; treat it as timing evidence rather than a guaranteed forecast.",
+            "trend": [item(driver_text, tone, ["technicalEvidence.trend"], rules)],
+            "momentum": [item("Momentum must confirm the broader trend before it deserves more weight.", "neutral", ["technicalEvidence.rsi14"], rules)],
+            "volume": [item("Volume should confirm that price movement has enough participation to be dependable.", "neutral", ["technicalEvidence.averageVolume20"], rules)],
+            "volatility": [item("Position size and invalidation distance should allow for normal volatility without accepting unlimited downside.", "neutral", ["technicalEvidence.atrPct"], rules)],
+            "levels": [item("Use the supplied support, resistance, and invalidation levels as review points, not precise predictions.", "neutral", ["technicalEvidence.support", "technicalEvidence.resistance"], rules)],
+            "patterns": [item("Any detected pattern requires location, volume, and follow-through confirmation.", "neutral", ["uiOptions.patternsEnabled"], rules)],
+        },
+        "company": {
+            "summary": company_text,
+            "businessModel": [item(company_items["businessModel"], "neutral", ["instrument.type"], rules)],
+            "quality": [item(company_items["quality"], tone, ["fundamentalEvidence.quality"] if company_applicable else ["instrument.type"], rules)],
+            "profitability": [item(company_items["profitability"], "neutral", ["fundamentalEvidence.roce"] if company_applicable else ["instrument.type"], rules)],
+            "balanceSheet": [item(company_items["balanceSheet"], "neutral", ["fundamentalEvidence.debtEquity"] if company_applicable else ["instrument.type"], rules)],
+            "cashFlow": [item(company_items["cashFlow"], "neutral", ["fundamentalEvidence.cashFlowQuality"] if company_applicable else ["instrument.type"], rules)],
+            "valuation": [item(company_items["valuation"], "neutral", ["fundamentalEvidence.pe"] if company_applicable else ["instrument.type"], rules)],
+            "sectorDrivers": [item(company_items["sectorDrivers"], "neutral", ["instrument.sector"], rules)],
+            "catalysts": [item(company_items["catalysts"], "neutral", ["fundamentalEvidence.updates"] if company_applicable else ["instrument.type"], rules)],
+            "risks": [item(company_items["risks"], "negative", ["dataQuality.state", "instrument.type"], rules)],
+            "dataGaps": [item(gap, "neutral" if complete else "negative", ["dataQuality.state"], rules)],
+        },
+        "portfolio": {
+            "summary": portfolio_text,
+            "positionFit": [item(portfolio_text, "neutral", ["portfolioEvidence.weight"], rules)],
+            "concentration": [item("A large single-position weight magnifies company-specific mistakes.", "negative", ["portfolioEvidence.weight"], rules)],
+            "sizing": [item("Size new or additional capital from the risk budget and invalidation distance.", "neutral", ["portfolioEvidence.riskBudget"], rules)],
+            "holdingActions": [item(f"For a {action.lower()} review, follow the app verdict rather than treating the action label as a broker order.", "neutral", ["userContext.action"], rules)],
+            "risks": [item("Do not let one position threaten emergency or goal-linked capital.", "negative", ["userContext.riskProfile"], rules)],
+        },
+        "reasoning": {
+            "steps": [
+                {
+                    **item("Connect the authoritative verdict to current price, business, portfolio, and data-quality evidence.", tone, refs, rules),
+                    "evidence": f"The deterministic verdict is {verdict}, the trend is {trend}, and data is {facts['dataQuality']['state']}.",
+                    "implication": "Conviction should rise only when independent evidence agrees and material data gaps are closed.",
+                    "action": next_text,
+                }
+            ]
+        },
+        "coach": {
+            "verdictSummary": f"The {verdict} verdict remains authoritative; use the explanation to execute it with discipline.",
+            "chartSummary": f"The {trend} chart needs confirmation from levels, volume, and risk controls.",
+            "companySummary": company_text,
+            "questionsBeforeAction": [item("What evidence would invalidate the current thesis, and is the resulting loss affordable?", "neutral", refs, rules)],
+        },
+        "warnings": [] if complete else ["Some evidence is missing; do not fill the gap with assumptions."],
+    }
+
+
+def candidate_rule_ids(instrument_type: str, trend: str, complete: bool) -> list[str]:
+    process_rule = "process_process_before_outcome" if complete else "process_objectivity_facts"
+    chart_rule = {
+        "rising": "pdf-m2-c13-moving-averages",
+        "mixed": "pdf-m2-c11-the-support-and-resistance",
+        "falling": "pdf-m2-c12-volumes",
+    }[trend]
+    instrument_rule = {
+        "equity": "pdf-m3-c12-the-investment-due-diligence",
+        "fund": "pdf-m11-c8-the-mutual-fund-fact-sheet",
+        "etf": "pdf-m11-c16-index-funds",
+        "index": "pdf-m11-c16-index-funds",
+        "unknown": "process_flexible_stand_aside",
+    }[instrument_type]
+    return list(dict.fromkeys([process_rule, chart_rule, instrument_rule]))
+
+
+def generate_candidates(count: int = 120) -> list[dict[str, Any]]:
+    combinations = list(itertools.product(ACTIONS, INSTRUMENT_TYPES, HORIZONS, TRENDS, DATA_STATES, RISK_PROFILES))
+    random.Random(560).shuffle(combinations)
+    rows: list[dict[str, Any]] = []
+    for index, (action, instrument_type, horizon, trend, data_state, risk_profile) in enumerate(combinations[:count]):
+        if data_state == "incomplete":
+            verdict = "Needs Input"
+        elif action == "Sell":
+            verdict = "Hold and Watch" if trend != "falling" else "Reduce"
+        else:
+            verdict = "Buy in Tranches" if trend == "rising" else "Wait and Watch"
+        facts = {
+            "schemaVersion": "analysis-facts.v1",
+            "generatedAt": "2026-01-01T00:00:00+00:00",
+            "instrument": {"symbol": f"TEST:{index + 1:03d}", "type": instrument_type, "sector": "Synthetic sector"},
+            "userContext": {"action": action, "horizon": horizon, "riskProfile": risk_profile, "capital": 100000},
+            "deterministicAnalysis": {"verdict": verdict, "confidence": "High" if data_state == "complete" else "Low"},
+            "technicalEvidence": {"trend": trend, "rsi14": 55, "averageVolume20": 100000, "atrPct": 2.4, "support": 95, "resistance": 110},
+            "fundamentalEvidence": {"quality": "mixed", "roce": 15, "debtEquity": 0.4, "cashFlowQuality": "available", "pe": 20, "updates": []},
+            "portfolioEvidence": {"weight": 8 if action == "Sell" else 0, "riskBudget": 1000},
+            "signals": [],
+            "reasoningTrace": [],
+            "dataQuality": {"state": data_state, "missing": [] if data_state == "complete" else ["fundamentals"]},
+            "uiOptions": {"patternsEnabled": index % 2 == 0},
+        }
+        rule_ids = candidate_rule_ids(instrument_type, trend, data_state == "complete")
+        rows.append(
+            {
+                "id": f"gold-candidate-{index + 1:03d}",
+                "reviewStatus": "pending",
+                "reviewNotes": "",
+                "facts": facts,
+                "retrievedRuleIds": rule_ids,
+                "output": candidate_output(facts, rule_ids),
+            }
+        )
+    return rows
+
+
+def extract_chat_content(payload: dict[str, Any]) -> str:
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise RuntimeError("Gemini returned no response choices.")
+    message = choices[0].get("message") if isinstance(choices[0], dict) else None
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(str(part.get("text") or "") for part in content if isinstance(part, dict))
+    raise RuntimeError("Gemini returned an unreadable response body.")
+
+
+def gemini_json(prompt: dict[str, Any], system_prompt: str, temperature: float = 0.2) -> dict[str, Any]:
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("LLM_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY or LLM_API_KEY is required for Gemini dataset work.")
+    model = os.environ.get("GEMINI_DATASET_MODEL") or os.environ.get("LLM_MODEL") or "gemini-3.5-flash"
+    base_url = (
+        os.environ.get("GEMINI_BASE_URL")
+        or os.environ.get("LLM_BASE_URL")
+        or "https://generativelanguage.googleapis.com/v1beta/openai"
+    ).rstrip("/")
+    body = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": temperature,
+    }
+    retryable = {429, 500, 502, 503, 504}
+    for attempt in range(3):
+        request = Request(
+            f"{base_url}/chat/completions",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=120) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            parsed = json.loads(extract_chat_content(payload))
+            if not isinstance(parsed, dict):
+                raise RuntimeError("Gemini JSON response must be an object.")
+            return parsed
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            if exc.code not in retryable or attempt == 2:
+                raise RuntimeError(f"Gemini returned HTTP {exc.code}: {detail[:1000]}") from exc
+        except URLError as exc:
+            if attempt == 2:
+                raise RuntimeError(f"Could not reach Gemini: {exc.reason}") from exc
+        except (TimeoutError, json.JSONDecodeError) as exc:
+            if attempt == 2:
+                raise RuntimeError(f"Gemini returned an invalid or timed-out response: {exc}") from exc
+        time.sleep(2**attempt)
+    raise RuntimeError("Gemini request failed after retries.")
+
+
+def gemini_expand(seed: dict[str, Any], count: int) -> list[dict[str, Any]]:
+    seed_payload = {
+        **seed,
+        "retrievedRuleSet": static_retrieved_rule_set(seed.get("retrievedRuleIds") or [], seed.get("facts") or {}),
+    }
+    prompt = {
+        "task": f"Create {count} diverse synthetic financial-analysis examples based on the approved seed. Preserve the schemas, use synthetic instruments only, and never include personal portfolio data.",
+        "seed": seed_payload,
+        "output": "Return a JSON object with an examples array. Each example needs facts, retrievedRuleIds, and output.",
+        "analysisOutputSchema": OUTPUT_SCHEMA,
+    }
+    parsed = gemini_json(
+        prompt,
+        "You generate grounded supervised fine-tuning examples for a financial decision-support model. Preserve deterministic verdicts and never invent facts.",
+        temperature=0.35,
+    )
+    return [example for example in parsed.get("examples") or [] if isinstance(example, dict)]
+
+
+def gemini_preflight(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    compact_rows = [
+        {
+            "id": row.get("id"),
+            "facts": row.get("facts"),
+            "retrievedRuleIds": row.get("retrievedRuleIds"),
+            "retrievedRuleSet": static_retrieved_rule_set(row.get("retrievedRuleIds") or [], row.get("facts") or {}),
+            "output": row.get("output"),
+        }
+        for row in rows
+    ]
+    prompt = {
+        "task": "Review each candidate for supervised fine-tuning quality. Do not approve it; return an advisory verdict only.",
+        "criteria": [
+            "The deterministic verdict is preserved without contradiction.",
+            "Every numerical or company-specific claim is supported by a fact reference.",
+            "Rule references are relevant to the statement.",
+            "Applicable sections are complete, concise, and actionable.",
+            "Missing or non-applicable evidence is stated honestly.",
+        ],
+        "scoring": "Score grounding, clarity, completeness, and verdictSafety from 1 (unacceptable) to 5 (excellent).",
+        "candidates": compact_rows,
+        "output": {
+            "reviews": [
+                {
+                    "id": "candidate id",
+                    "verdict": "pass or needs_changes",
+                    "scores": {"grounding": 5, "clarity": 5, "completeness": 5, "verdictSafety": 5},
+                    "issues": ["specific issue"],
+                    "suggestedReviewNotes": "short note for the human reviewer",
+                }
+            ]
+        },
+    }
+    parsed = gemini_json(
+        prompt,
+        "You are a strict financial-analysis dataset evaluator. Treat the supplied facts as the only source of company and numerical truth.",
+        temperature=0.0,
+    )
+    reviews = parsed.get("reviews")
+    if not isinstance(reviews, list):
+        raise RuntimeError("Gemini preflight response is missing its reviews array.")
+    return {
+        str(review["id"]): review
+        for review in reviews
+        if isinstance(review, dict) and review.get("id")
+    }
+
+
+def preflight_candidates(limit: int, batch_size: int) -> dict[str, int]:
+    rows = read_jsonl(CANDIDATES_PATH)
+    selected = rows if limit <= 0 else rows[:limit]
+    reviewed = 0
+    unavailable = 0
+    for offset in range(0, len(selected), batch_size):
+        batch = selected[offset : offset + batch_size]
+        try:
+            reviews = gemini_preflight(batch)
+        except RuntimeError as exc:
+            reviews = {}
+            unavailable += len(batch)
+            for row in batch:
+                row["modelReview"] = {
+                    "verdict": "unavailable",
+                    "scores": {},
+                    "issues": [str(exc)],
+                    "suggestedReviewNotes": "Gemini preflight is optional. Continue with human review or retry later.",
+                    "model": os.environ.get("GEMINI_DATASET_MODEL") or os.environ.get("LLM_MODEL") or "gemini-3.5-flash",
+                    "reviewedAt": datetime.now(UTC).isoformat(),
+                }
+        for row in batch:
+            review = reviews.get(str(row.get("id")))
+            if review:
+                row["modelReview"] = {
+                    **review,
+                    "model": os.environ.get("GEMINI_DATASET_MODEL") or os.environ.get("LLM_MODEL") or "gemini-3.5-flash",
+                    "reviewedAt": datetime.now(UTC).isoformat(),
+                }
+                reviewed += 1
+        write_jsonl(CANDIDATES_PATH, rows)
+    return {"candidates": len(rows), "modelReviewed": reviewed, "preflightUnavailable": unavailable}
+
+
+def expand_to_target(target: int, batch_size: int) -> list[dict[str, Any]]:
+    approved = [row for row in read_jsonl(CANDIDATES_PATH) if row.get("reviewStatus") == "approved"]
+    if len(approved) < 120:
+        raise RuntimeError(f"120 approved gold examples are required before expansion; found {len(approved)}.")
+    expanded = read_jsonl(EXPANDED_PATH)
+    rng = random.Random(560)
+    while len(approved) + len(expanded) < target:
+        count = min(batch_size, target - len(approved) - len(expanded))
+        seed = rng.choice(approved)
+        new_rows = gemini_expand(seed, count)
+        for row in new_rows:
+            audit_errors = audit_candidate(row)
+            if audit_errors:
+                raise RuntimeError(f"Gemini expansion failed strict audit: {'; '.join(audit_errors[:8])}")
+            row["id"] = f"gemini-{len(expanded) + 1:04d}"
+            row["reviewStatus"] = "gemini-generated"
+            expanded.append(row)
+        write_jsonl(EXPANDED_PATH, expanded)
+    return approved + expanded[: max(0, target - len(approved))]
+
+
+def vertex_row(row: dict[str, Any]) -> dict[str, Any]:
+    prompt = {
+        "facts": row["facts"],
+        "retrievedRuleSet": static_retrieved_rule_set(row.get("retrievedRuleIds") or [], row["facts"]),
+        "instruction": "Return LlmAnalysisV1 JSON. Preserve deterministic facts and verdict.",
+    }
+    return {
+        "contents": [
+            {"role": "user", "parts": [{"text": json.dumps(prompt, ensure_ascii=False, separators=(",", ":"))}]},
+            {"role": "model", "parts": [{"text": json.dumps(row["output"], ensure_ascii=False, separators=(",", ":"))}]},
+        ]
+    }
+
+
+def export_vertex() -> dict[str, int]:
+    approved = [row for row in read_jsonl(CANDIDATES_PATH) if row.get("reviewStatus") == "approved"]
+    expanded = read_jsonl(EXPANDED_PATH)
+    if len(approved) < 120:
+        raise RuntimeError(f"Export blocked: approve all 120 gold examples first; found {len(approved)}.")
+    rows = approved + expanded
+    if len(rows) < 1200:
+        raise RuntimeError(f"Export blocked: 1200 examples are required; found {len(rows)}.")
+    rng = random.Random(560)
+    rng.shuffle(rows)
+    splits = {"train": rows[:900], "validation": rows[900:1050], "eval": rows[1050:1200]}
+    for name, split_rows in splits.items():
+        write_jsonl(SPLIT_ROOT / f"{name}.jsonl", [vertex_row(row) for row in split_rows])
+    return {name: len(rows) for name, rows in splits.items()}
+
+
+def main() -> int:
+    load_local_env()
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    candidates = subparsers.add_parser("candidates")
+    candidates.add_argument("--count", type=int, default=120)
+    expand = subparsers.add_parser("expand")
+    expand.add_argument("--target", type=int, default=1200)
+    expand.add_argument("--batch-size", type=int, default=4)
+    preflight = subparsers.add_parser("preflight")
+    preflight.add_argument("--limit", type=int, default=0, help="Review this many candidates; 0 reviews all.")
+    preflight.add_argument("--batch-size", type=int, default=4)
+    subparsers.add_parser("export")
+    args = parser.parse_args()
+    if args.command == "candidates":
+        rows = generate_candidates(args.count)
+        write_jsonl(CANDIDATES_PATH, rows)
+        print(json.dumps({"candidates": len(rows), "path": str(CANDIDATES_PATH)}, indent=2))
+    elif args.command == "expand":
+        rows = expand_to_target(args.target, args.batch_size)
+        print(json.dumps({"examples": len(rows), "path": str(EXPANDED_PATH)}, indent=2))
+    elif args.command == "preflight":
+        print(json.dumps(preflight_candidates(args.limit, max(1, args.batch_size)), indent=2))
+    elif args.command == "export":
+        print(json.dumps(export_vertex(), indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

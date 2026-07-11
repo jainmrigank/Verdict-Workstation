@@ -21,7 +21,7 @@ This is an educational decision-support tool. It is not investment advice, a liv
 ## Main Workflow
 
 1. Open the Start tab and fill the Research Brief.
-2. Choose whether this is a fresh entry or an already-held position.
+2. Choose Buy for a fresh entry or Sell to review an already-held position.
 3. Enter the ticker, exchange, horizon, capital or add-more capital, and optional holding details.
 4. Add risk controls such as invalidation price, target price, max risk, risk profile, market access, and personal filters.
 5. Click Analyse in the header to refresh/load evidence through the bridge when available.
@@ -136,15 +136,60 @@ It supports:
 
 Uploaded holdings are personal financial data. Treat them as local/private and do not commit generated cache or holdings files.
 
-### AI Coach
+### Grounded Analyst and AI Coach
 
-The AI Coach tab can explain the current analysis in three scopes:
+After Analyse completes its market-data refresh, the app makes one grounded-analysis request and reuses the validated response across Decision, Chart, Company, Portfolio, Reasoning, and AI Coach. The deterministic engine remains authoritative for prices, calculations, scores, position sizing, and the verdict.
+
+The AI Coach presents the shared response in three scopes:
 
 - Chart: price action, indicators, candles, patterns, liquidity, and volatility.
 - Company: business model, ratios, statements, filings, and missing evidence.
 - Verdict: final action, risk controls, what to do next, and what not to do.
 
-AI Coach calls go through `POST /api/llm/verdict` on the Python bridge. LLM provider secrets stay on the bridge machine and must not be placed in `VITE_` variables.
+Full analysis calls go through `POST /api/llm/analysis`; `POST /api/llm/verdict` remains as a compatibility endpoint. The bridge retrieves up to 10 relevant paraphrased Varsity rules, combines them with exact structured facts, validates the model JSON, retries one malformed response, and leaves deterministic content in place when the provider is unavailable. LLM provider secrets stay on the bridge machine and must not be placed in `VITE_` variables.
+
+Retrieval uses the internal versioned `RetrievedRuleSetV1` contract. It records the corpus and embedding versions, query fingerprint, filters, hybrid scores, paraphrased guidance, applicability, and source references. The identical payload is used by base Gemini today and exported with fine-tuning examples later, so switching generation models does not require rebuilding RAG.
+
+#### Varsity RAG corpus
+
+The tracked rulebook stores chapter titles, source metadata, and paraphrased analytical guidance, not raw chapter prose.
+
+```bash
+python3 tools/build_varsity_corpus.py --include-web
+python3 -m server.llm_analysis build-index
+```
+
+Add `--embeddings` to the second command after setting `GEMINI_API_KEY` to build and query 768-dimensional `gemini-embedding-2` vectors. Semantic builds are resumable and use a staging database; the last complete index remains active until all 787 expected vectors are present. Unchanged content hashes reuse existing vectors. Without a complete vector index, retrieval automatically uses the local lexical index.
+
+Run the reviewed retrieval benchmark with:
+
+```bash
+python3 tools/evaluate_retrieval.py
+```
+
+The tracked query set covers every Varsity module and app analysis area, with a target of at least 90% top-10 recall.
+
+#### Fine-tuning workflow
+
+Fine-tuning is deliberately gated so unreviewed synthetic output cannot be submitted:
+
+```bash
+python3 tools/llm_dataset.py candidates
+python3 tools/llm_dataset.py preflight
+python3 tools/evaluate_llm.py data/training/gold_candidates.jsonl
+python3 tools/review_candidates.py
+# Review workspace: http://127.0.0.1:8791/
+python3 tools/approve_candidates.py
+python3 tools/llm_dataset.py expand
+python3 tools/llm_dataset.py export
+python3 tools/train_vertex.py --training-uri gs://.../train.jsonl --validation-uri gs://.../validation.jsonl
+```
+
+Gemini Flash performs candidate preflight, approved-example expansion, and production narrative generation. `gemini-embedding-2` remains the retrieval model because generative Flash models do not produce search embeddings. Human approval is still required for all 120 gold candidates; Gemini preflight is advisory and never changes `reviewStatus`.
+
+The review workspace requires five checks per candidate, allows corrections to the expected JSON, and records notes before approval. The final Vertex command is a dry run unless `--submit` is supplied. Its source model defaults to the currently documented tunable `gemini-2.5-flash`; set `VERTEX_SOURCE_MODEL` or pass `--source-model` if another Gemini Flash version is enabled for supervised tuning in the target project. See `data/training/README.md` for the review and 900/150/150 split gates.
+
+`tools/approve_candidates.py` runs the strict all-candidate audit without changing statuses. A delegated Codex-assisted approval is only written when the user explicitly requests it and the command receives both `--approve` and `--requested-by-user`; the resulting records retain that provenance instead of claiming human review.
 
 ### Reasoning
 
@@ -213,10 +258,12 @@ Free public data is best effort. Availability varies by exchange, symbol, provid
 
 - The frontend is a static browser app.
 - Workspace state is saved in `localStorage` under `verdict-workstation:browser-workspace:v1`.
-- Uploaded holdings are parsed by the bridge and copied into the local snapshot flow.
+- Uploaded holdings are parsed in bridge memory and returned directly to the requesting browser. The workbook, holdings rows, and upload metadata are not persisted by the bridge.
+- Holdings and portfolio workspace state remain in browser `localStorage`; bearer sessions use tab-scoped `sessionStorage`.
+- Only non-personal market-data cache entries are persisted server-side.
 - AI provider credentials are read only by the Python bridge.
 - `VITE_` variables are public at build time and must not contain secrets.
-- Public deployments need a separate HTTPS bridge if refresh, upload, mapping, or AI Coach should work outside localhost.
+- Private-group deployments need a protected HTTPS bridge if refresh, upload, mapping, or AI Coach should work outside localhost.
 
 ## Local Setup
 
@@ -283,13 +330,32 @@ VITE_MARKET_DATA_BASE_URL=https://your-bridge-url
 
 Bridge endpoints used by the app:
 
+- `POST /api/session`
 - `GET /api/free-data/latest`
+- `GET /api/symbols/search`
 - `POST /api/free-data/refresh`
 - `POST /api/portfolio/upload?days=...`
 - `POST /api/portfolio/clear`
 - `POST /api/symbol-map/upsert`
+- `POST /api/llm/analysis`
 - `POST /api/llm/verdict`
 - `POST /api/server/restart`
+
+All `/api/` routes except `/api/session` require a short-lived signed bearer token when group access is enabled. The frontend keeps that token in `sessionStorage` and sends it for search, market data, uploads, mappings, RAG-backed analysis, and compatibility calls.
+
+### Private-group bridge protection
+
+For access beyond the bridge machine, configure a shared code, an independent signing secret, and an exact frontend origin:
+
+```bash
+BRIDGE_GROUP_ACCESS_CODE=your-long-shared-code
+BRIDGE_TOKEN_SECRET=your-long-random-signing-secret
+MARKET_DATA_ALLOW_ORIGIN=https://your-frontend.example
+```
+
+Users enter the shared code under **Private bridge** in the app menu. `POST /api/session` exchanges it for a short-lived HMAC-signed token; the code itself is not saved in browser storage. Configure token lifetime and limits with `BRIDGE_TOKEN_TTL_SECONDS`, `BRIDGE_RATE_LIMIT_PER_MINUTE`, and `BRIDGE_SESSION_ATTEMPTS_PER_MINUTE`.
+
+Remote access fails closed when an external origin is configured without `BRIDGE_GROUP_ACCESS_CODE`. Wildcard origins are rejected. Use an HTTPS tunnel or hosted HTTPS bridge, keep Gemini and bridge secrets server-side, and allow only the exact frontend origin. A later public release can replace code validation with OIDC/JWT while preserving the bearer-token and RAG contracts.
 
 Related bridge scripts:
 
@@ -300,15 +366,21 @@ Related bridge scripts:
 - `../scripts/holdings_parser.py`: Zerodha-style XLSX holdings parser.
 - `../scripts/kite_refresh.py`: optional Kite-related refresh script.
 - `../scripts/varsity_knowledge_refresh.py`: knowledge refresh utility.
+- `tools/build_varsity_corpus.py`: canonical local-PDF and web-chapter corpus builder.
+- `tools/llm_dataset.py`: reviewed-gold and Gemini Flash dataset pipeline.
+- `tools/review_candidates.py`: local human-review and approval workspace.
+- `tools/approve_candidates.py`: strict grounding audit and provenance-aware delegated approval.
+- `tools/evaluate_llm.py`: deterministic schema and grounding checks.
+- `tools/train_vertex.py`: gated Gemini Flash Vertex tuning submission.
 
-## Optional AI Coach Setup
+## Optional Grounded Analyst Setup
 
 Set these on the machine running the bridge:
 
 ```bash
-LLM_API_KEY=...
-LLM_MODEL=...
-LLM_BASE_URL=https://api.openai.com/v1
+GEMINI_API_KEY=...
+LLM_MODEL=gemini-3.5-flash
+LLM_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
 LLM_TEMPERATURE=0.2
 LLM_TIMEOUT_SECONDS=45
 ```
@@ -318,7 +390,9 @@ Fallback names are also supported:
 - `OPENAI_API_KEY`
 - `OPENAI_MODEL`
 
-`LLM_BASE_URL` can point to an OpenAI-compatible provider.
+The Gemini API's OpenAI-compatible transport is used by both the runtime analyst and offline dataset tools. `GEMINI_DATASET_MODEL` can override the model used for preflight and expansion without changing the deployed runtime model.
+
+For a tuned Vertex endpoint, set `LLM_PROVIDER=vertex`, `VERTEX_TUNED_MODEL_URL`, and Application Default Credentials (or a short-lived `VERTEX_ACCESS_TOKEN`). The base OpenAI-compatible configuration remains the rollback path.
 
 ## Deployment
 

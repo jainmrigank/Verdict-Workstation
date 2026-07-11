@@ -25,9 +25,18 @@ import free_data_refresh as data_refresh
 from holdings_parser import holdings_to_symbols, parse_holdings_xlsx
 
 
+APP_BACKEND_ROOT = Path(__file__).resolve().parent.parent / "stock-analysis-app"
+if str(APP_BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(APP_BACKEND_ROOT))
+
+from server.bridge_security import BridgeSecurity
+from server.llm_analysis import generate_analysis
+
+
 UPLOAD_DIR = data_refresh.CACHE_DIR / "uploads"
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 MAX_LLM_CONTEXT_BYTES = 512 * 1024
+MAX_JSON_REQUEST_BYTES = 1024 * 1024
 SERVER_STARTED_AT = datetime.now(timezone.utc).isoformat()
 
 PDF_FOUNDATION_RULES: list[dict[str, Any]] = [
@@ -152,7 +161,7 @@ def configured_allowed_origins() -> list[str]:
     return [origin.strip().rstrip("/") for origin in os.environ.get("MARKET_DATA_ALLOW_ORIGIN", "").split(",") if origin.strip()]
 
 
-def is_private_origin(origin: str) -> bool:
+def is_loopback_origin(origin: str) -> bool:
     try:
         parsed = urlparse(origin)
         hostname = parsed.hostname
@@ -161,7 +170,7 @@ def is_private_origin(origin: str) -> bool:
         if hostname in {"localhost", "127.0.0.1", "::1"}:
             return True
         ip = ipaddress.ip_address(hostname)
-        return ip.is_private or ip.is_loopback
+        return ip.is_loopback
     except ValueError:
         return False
 
@@ -170,9 +179,36 @@ def allowed_origin(origin: str | None, allowed_origins: list[str]) -> str | None
     if not origin:
         return None
     clean_origin = origin.rstrip("/")
-    if "*" in allowed_origins or clean_origin in allowed_origins or is_private_origin(clean_origin):
+    if clean_origin in allowed_origins or is_loopback_origin(clean_origin):
         return clean_origin
     return None
+
+
+def has_external_origins(origins: list[str]) -> bool:
+    return any(origin != "*" and not is_loopback_origin(origin) for origin in origins)
+
+
+def sanitise_public_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    public_snapshot = {**snapshot, "holdings": []}
+    public_snapshot.pop("upload", None)
+    return public_snapshot
+
+
+def purge_legacy_portfolio_state() -> None:
+    module = refresh_module()
+    module.write_json(module.HOLDINGS_PATH, [])
+    upload_path = UPLOAD_DIR / "latest_holdings_upload.xlsx"
+    if upload_path.exists():
+        upload_path.unlink()
+    for path in (module.CACHE_DIR / "latest.json", module.APP_SNAPSHOT):
+        if not path.exists():
+            continue
+        try:
+            snapshot = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(snapshot, dict) and (snapshot.get("holdings") or snapshot.get("upload")):
+                module.write_json(path, sanitise_public_snapshot(snapshot))
+        except (OSError, json.JSONDecodeError):
+            continue
 
 
 def spawn_relauncher(host: str, port: int, command: list[str], cwd: str) -> None:
@@ -217,23 +253,34 @@ def llm_setup_payload() -> dict[str, Any]:
         "configured": False,
         "message": "AI Coach is not configured on the data bridge yet.",
         "setup": [
-            "Set LLM_API_KEY on the machine running scripts/market_data_server.py.",
-            "Set LLM_MODEL to the model name you want to use.",
-            "Optional: set LLM_BASE_URL for an OpenAI-compatible provider. If omitted, https://api.openai.com/v1 is used.",
+            "Set GEMINI_API_KEY or LLM_API_KEY on the machine running scripts/market_data_server.py.",
+            "Set LLM_MODEL to the Gemini Flash model name you want to use.",
+            "LLM_BASE_URL defaults to the Gemini API OpenAI-compatible endpoint.",
             "Restart scripts/market_data_server.py after setting the variables.",
         ],
     }
 
 
 def llm_config() -> dict[str, str] | None:
-    api_key = os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
-    model = os.environ.get("LLM_MODEL") or os.environ.get("OPENAI_MODEL")
+    provider = os.environ.get("LLM_PROVIDER", "gemini").strip().lower()
+    if provider == "vertex":
+        vertex_url = os.environ.get("VERTEX_TUNED_MODEL_URL", "").strip()
+        if not vertex_url:
+            return None
+        return {
+            "provider": "vertex",
+            "model": os.environ.get("LLM_MODEL", "gemini-3.5-flash-tuned"),
+            "vertex_url": vertex_url,
+        }
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    model = os.environ.get("LLM_MODEL") or os.environ.get("OPENAI_MODEL") or "gemini-3.5-flash"
     if not api_key or not model:
         return None
     return {
+        "provider": "openai_compatible",
         "api_key": api_key,
         "model": model,
-        "base_url": os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
+        "base_url": os.environ.get("LLM_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai").rstrip("/"),
     }
 
 
@@ -280,6 +327,117 @@ def attach_server_trading_knowledge(context: dict[str, Any]) -> dict[str, Any]:
     knowledge.update(server_knowledge)
     enriched["tradingGuardrails"] = knowledge
     return enriched
+
+
+def yahoo_search_url(query: str, limit: int) -> str:
+    from urllib.parse import urlencode
+
+    params = urlencode(
+        {
+            "q": query,
+            "quotesCount": max(1, min(limit, 20)),
+            "newsCount": 0,
+            "enableFuzzyQuery": "true",
+            "quotesQueryId": "tss_match_phrase_query",
+        }
+    )
+    return f"https://query2.finance.yahoo.com/v1/finance/search?{params}"
+
+
+def search_symbol_from_yahoo(raw_symbol: str) -> tuple[str, str] | None:
+    symbol = raw_symbol.strip().upper()
+    if symbol.endswith(".NS"):
+        return "NSE", symbol.removesuffix(".NS")
+    if symbol.endswith(".BO"):
+        return "BSE", symbol.removesuffix(".BO")
+    return None
+
+
+def merge_symbol_search_result(results: dict[str, dict[str, Any]], row: dict[str, Any]) -> None:
+    exchange = str(row.get("exchange") or "").strip().upper()
+    tradingsymbol = str(row.get("tradingsymbol") or "").strip().upper()
+    if exchange not in {"NSE", "BSE"} or not tradingsymbol:
+        return
+    key = f"{exchange}:{tradingsymbol}"
+    existing = results.get(key)
+    if existing and int(existing.get("priority") or 0) >= int(row.get("priority") or 0):
+        return
+    results[key] = {
+        "exchange": exchange,
+        "tradingsymbol": tradingsymbol,
+        "symbol": key,
+        "name": str(row.get("name") or "").strip(),
+        "meta": str(row.get("meta") or "").strip(),
+        "source": str(row.get("source") or "").strip(),
+        "priority": int(row.get("priority") or 0),
+    }
+
+
+def market_symbol_search(query: str, limit: int = 12) -> dict[str, Any]:
+    clean_query = " ".join(query.strip().split())
+    capped_limit = max(1, min(limit, 20))
+    results: dict[str, dict[str, Any]] = {}
+    errors: list[str] = []
+
+    if not clean_query:
+        return {"query": clean_query, "results": [], "errors": []}
+
+    try:
+        for result in data_refresh.fetch_screener_search(clean_query):
+            url = str(result.get("url") or "")
+            code = data_refresh.screener_code_from_url(url)
+            if not code:
+                continue
+            exchange = "BSE" if code.isdigit() else "NSE"
+            merge_symbol_search_result(
+                results,
+                {
+                    "exchange": exchange,
+                    "tradingsymbol": code,
+                    "name": result.get("name") or "",
+                    "meta": "Screener company search",
+                    "source": "screener",
+                    "priority": 80,
+                },
+            )
+    except Exception as exc:
+        errors.append(f"Screener search unavailable: {exc}")
+
+    try:
+        payload = data_refresh.fetch_json(yahoo_search_url(clean_query, capped_limit))
+        for quote in payload.get("quotes", []) if isinstance(payload, dict) else []:
+            if not isinstance(quote, dict):
+                continue
+            raw_symbol = str(quote.get("symbol") or "")
+            parsed = search_symbol_from_yahoo(raw_symbol)
+            if not parsed:
+                continue
+            exchange, tradingsymbol = parsed
+            quote_type = str(quote.get("quoteType") or quote.get("typeDisp") or "").strip()
+            exchange_display = str(quote.get("exchDisp") or quote.get("exchange") or "").strip()
+            merge_symbol_search_result(
+                results,
+                {
+                    "exchange": exchange,
+                    "tradingsymbol": tradingsymbol,
+                    "name": quote.get("longname") or quote.get("shortname") or quote.get("name") or "",
+                    "meta": " | ".join(part for part in [quote_type, exchange_display] if part),
+                    "source": "yahoo",
+                    "priority": 70,
+                },
+            )
+    except Exception as exc:
+        errors.append(f"Yahoo search unavailable: {exc}")
+
+    rows = sorted(
+        results.values(),
+        key=lambda row: (
+            -int(row.get("priority") or 0),
+            not str(row.get("tradingsymbol") or "").startswith(clean_query.upper()),
+            str(row.get("symbol") or ""),
+        ),
+    )
+    return {"query": clean_query, "results": rows[:capped_limit], "errors": errors}
 
 
 def build_llm_prompt(context: dict[str, Any]) -> list[dict[str, str]]:
@@ -395,7 +553,8 @@ class FreeDataHandler(BaseHTTPRequestHandler):
     server_version = "MarketDataServer/1.0"
 
     def log_message(self, format: str, *args: Any) -> None:
-        print(f"{self.address_string()} - {format % args}")
+        path = urlparse(self.path).path
+        print(f"{self.client_address[0]} - {self.command} {path}")
 
     def _set_headers(self, status: int = 200, content_type: str = "application/json") -> None:
         self.send_response(status)
@@ -405,18 +564,73 @@ class FreeDataHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Days, X-Filename")
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Days, X-Filename")
         self.end_headers()
 
     def _write_json(self, payload: dict[str, Any], status: int = 200) -> None:
         self._set_headers(status)
         self.wfile.write(json.dumps(payload, indent=2, sort_keys=True).encode("utf-8"))
 
+    def _client_ip(self) -> str:
+        return str(self.client_address[0])
+
+    def _is_remote_request(self) -> bool:
+        origin = self.headers.get("Origin")
+        if origin:
+            return not is_loopback_origin(origin)
+        try:
+            return not ipaddress.ip_address(self._client_ip()).is_loopback
+        except ValueError:
+            return True
+
+    def _guard_request(self, path: str) -> bool:
+        origin = self.headers.get("Origin")
+        if origin and not allowed_origin(origin, getattr(self.server, "allowed_origins", [])):
+            self._write_json({"error": "Origin is not allowed.", "code": "origin_not_allowed"}, status=403)
+            return False
+        if path in {"/health", "/api/session"} or not path.startswith("/api/"):
+            return True
+        security: BridgeSecurity = self.server.security
+        if self.server.external_access and self._is_remote_request() and not security.enabled:
+            self._write_json(
+                {
+                    "error": "Remote bridge access is disabled until a group access code is configured.",
+                    "code": "bridge_auth_not_configured",
+                },
+                status=503,
+            )
+            return False
+        auth = security.validate_authorization(self.headers.get("Authorization"))
+        if not auth.ok:
+            self._write_json(
+                {"error": "Bridge session is missing or expired.", "code": auth.code, "authRequired": True},
+                status=401,
+            )
+            return False
+        if not security.allow_request(auth.session_id, self._client_ip()):
+            self._write_json({"error": "Bridge request limit reached. Try again shortly.", "code": "rate_limited"}, status=429)
+            return False
+        return True
+
+    def _read_json(self, max_bytes: int = MAX_JSON_REQUEST_BYTES) -> dict[str, Any]:
+        length = int(self.headers.get("Content-Length", "0"))
+        if length < 0 or length > max_bytes:
+            raise ValueError("request_too_large")
+        body = self.rfile.read(length).decode("utf-8") if length else "{}"
+        payload = json.loads(body or "{}")
+        if not isinstance(payload, dict):
+            raise ValueError("request_must_be_object")
+        return payload
+
     def do_OPTIONS(self) -> None:
         self._set_headers(204)
 
     def do_GET(self) -> None:
-        if self.path == "/health":
+        parsed = urlparse(self.path)
+        if not self._guard_request(parsed.path):
+            return
+        if parsed.path == "/health":
+            security: BridgeSecurity = self.server.security
             self._write_json(
                 {
                     "ok": True,
@@ -424,21 +638,40 @@ class FreeDataHandler(BaseHTTPRequestHandler):
                     "server_version": self.server_version,
                     "started_at": SERVER_STARTED_AT,
                     "supports_restart": True,
+                    "auth_required": security.enabled or self.server.external_access,
+                    "portfolio_storage": "browser-local",
                 },
             )
             return
-        if self.path == "/api/free-data/latest":
+        if parsed.path == "/api/free-data/latest":
             latest = data_refresh.CACHE_DIR / "latest.json"
             if not latest.exists():
                 self._write_json({"error": "No market-data cache yet"}, status=404)
                 return
-            self._set_headers(200)
-            self.wfile.write(latest.read_bytes())
+            try:
+                payload = json.loads(latest.read_text(encoding="utf-8"))
+                self._write_json(sanitise_public_snapshot(payload))
+            except json.JSONDecodeError:
+                self._write_json({"error": "Market-data cache is invalid."}, status=500)
+            return
+        if parsed.path == "/api/symbols/search":
+            query_params = parse_qs(parsed.query)
+            query = (query_params.get("q") or [""])[0]
+            try:
+                limit = int((query_params.get("limit") or ["12"])[0])
+            except ValueError:
+                limit = 12
+            self._write_json(market_symbol_search(query, limit))
             return
         self._write_json({"error": "Not found"}, status=404)
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if not self._guard_request(parsed.path):
+            return
+        if parsed.path == "/api/session":
+            self._handle_session()
+            return
         if parsed.path == "/api/free-data/refresh":
             self._handle_free_data_refresh()
             return
@@ -457,7 +690,28 @@ class FreeDataHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/llm/verdict":
             self._handle_llm_verdict()
             return
+        if parsed.path == "/api/llm/analysis":
+            self._handle_llm_analysis()
+            return
         self._write_json({"error": "Not found"}, status=404)
+
+    def _handle_session(self) -> None:
+        security: BridgeSecurity = self.server.security
+        if not security.allow_session_attempt(self._client_ip()):
+            self._write_json({"error": "Too many access attempts. Try again shortly.", "code": "rate_limited"}, status=429)
+            return
+        try:
+            payload = self._read_json(16 * 1024)
+            result = security.issue_token(str(payload.get("accessCode") or ""))
+            self._write_json({"ok": True, **result})
+        except ValueError as exc:
+            if str(exc) == "invalid_access_code":
+                self._write_json({"error": "Access code is not valid.", "code": "invalid_access_code"}, status=401)
+                return
+            status = 413 if str(exc) == "request_too_large" else 400
+            self._write_json({"error": "Session request is invalid.", "code": str(exc)}, status=status)
+        except json.JSONDecodeError:
+            self._write_json({"error": "Session request must be valid JSON.", "code": "invalid_json"}, status=400)
 
     def _handle_server_restart(self) -> None:
         try:
@@ -487,22 +741,22 @@ class FreeDataHandler(BaseHTTPRequestHandler):
 
     def _handle_free_data_refresh(self) -> None:
         try:
-            length = int(self.headers.get("Content-Length", "0"))
-            body = self.rfile.read(length).decode("utf-8") if length else "{}"
-            payload = json.loads(body or "{}")
+            payload = self._read_json()
             symbols = payload.get("symbols") or None
             if isinstance(symbols, str):
                 symbols = symbols.split()
             days = int(payload.get("days") or 730)
-            include_holdings = bool(payload.get("includeHoldings", True))
             module = refresh_module()
             snapshot = module.refresh_free_data(
                 symbols=symbols,
                 days=days,
-                include_holdings=include_holdings,
-                return_holdings=include_holdings,
+                include_holdings=False,
+                return_holdings=False,
             )
-            self._write_json(snapshot)
+            self._write_json(sanitise_public_snapshot(snapshot))
+        except ValueError as exc:
+            status = 413 if str(exc) == "request_too_large" else 400
+            self._write_json({"error": "Market-data refresh request is invalid.", "code": str(exc)}, status=status)
         except Exception as exc:  # Keep local UI errors visible.
             self._write_json({"error": str(exc)}, status=500)
 
@@ -525,42 +779,45 @@ class FreeDataHandler(BaseHTTPRequestHandler):
                 self._write_json({"error": "No symbols could be inferred from the uploaded holdings."}, status=400)
                 return
 
-            UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-            (UPLOAD_DIR / "latest_holdings_upload.xlsx").write_bytes(data)
             module = refresh_module()
-            module.write_json(module.HOLDINGS_PATH, holdings)
-            snapshot = module.refresh_free_data(symbols=symbols, days=days, include_holdings=True)
-            resolved_symbols = holdings_to_symbols(snapshot.get("holdings") or holdings)
+            snapshot = module.refresh_free_data(
+                symbols=symbols,
+                days=days,
+                include_holdings=False,
+                return_holdings=False,
+            )
+            merged_holdings = module.merge_holdings_prices(
+                holdings,
+                snapshot.get("quotes") or {},
+                snapshot.get("symbol_aliases") or {},
+            )
+            resolved_symbols = holdings_to_symbols(merged_holdings or holdings)
+            snapshot["holdings"] = merged_holdings
             snapshot["upload"] = {
                 "filename": filename,
                 "holdings_count": len(holdings),
                 "symbols": resolved_symbols or symbols,
             }
-            module.write_json(module.CACHE_DIR / "latest.json", snapshot)
-            module.write_json(module.APP_SNAPSHOT, snapshot)
             self._write_json(snapshot)
         except Exception as exc:
             self._write_json({"error": str(exc)}, status=500)
 
     def _handle_portfolio_clear(self) -> None:
         try:
-            module = refresh_module()
-            module.write_json(module.HOLDINGS_PATH, [])
-            upload_path = UPLOAD_DIR / "latest_holdings_upload.xlsx"
-            if upload_path.exists():
-                upload_path.unlink()
-            self._write_json({"ok": True, "message": "Uploaded holdings feed cleared."})
+            purge_legacy_portfolio_state()
+            self._write_json({"ok": True, "message": "No portfolio data is stored on the bridge."})
         except Exception as exc:
             self._write_json({"error": str(exc)}, status=500)
 
     def _handle_symbol_map_upsert(self) -> None:
         try:
-            length = int(self.headers.get("Content-Length", "0"))
-            body = self.rfile.read(length).decode("utf-8") if length else "{}"
-            payload = json.loads(body or "{}")
+            payload = self._read_json(64 * 1024)
             module = refresh_module()
             mapping = module.upsert_symbol_mapping(payload)
             self._write_json({"ok": True, "mapping": mapping})
+        except ValueError as exc:
+            status = 413 if str(exc) == "request_too_large" else 400
+            self._write_json({"error": "Symbol mapping request is invalid.", "code": str(exc)}, status=status)
         except Exception as exc:
             self._write_json({"error": str(exc)}, status=500)
 
@@ -583,6 +840,28 @@ class FreeDataHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._write_json({"error": str(exc)}, status=500)
 
+    def _handle_llm_analysis(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length <= 0:
+                self._write_json({"error": "No analysis facts received."}, status=400)
+                return
+            if length > MAX_LLM_CONTEXT_BYTES:
+                self._write_json({"error": "Analysis facts are too large. Send only the selected instrument."}, status=413)
+                return
+            body = self.rfile.read(length).decode("utf-8")
+            payload = json.loads(body or "{}")
+            context = payload.get("context")
+            if not isinstance(context, dict):
+                self._write_json({"error": "Analysis facts must be a JSON object."}, status=400)
+                return
+            if context.get("schemaVersion") != "analysis-facts.v1":
+                self._write_json({"error": "Unsupported analysis facts schema."}, status=400)
+                return
+            self._write_json(generate_analysis(context, llm_config()))
+        except Exception as exc:
+            self._write_json({"error": str(exc)}, status=500)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the local market-data refresh server.")
@@ -591,7 +870,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--allow-origin",
         action="append",
-        default=configured_allowed_origins(),
+        default=[],
         help="Extra browser origin allowed to call this bridge, e.g. https://your-public-app.example",
     )
     return parser
@@ -600,9 +879,17 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     load_local_env()
     args = build_parser().parse_args()
+    args.allow_origin = list(dict.fromkeys([*configured_allowed_origins(), *args.allow_origin]))
+    if "*" in args.allow_origin:
+        print("Wildcard bridge origins are not allowed. Configure each HTTPS app origin explicitly.")
+        return 1
+    security = BridgeSecurity.from_env()
+    purge_legacy_portfolio_state()
     try:
         server = ThreadingHTTPServer((args.host, args.port), FreeDataHandler)
         server.allowed_origins = args.allow_origin
+        server.external_access = has_external_origins(args.allow_origin)
+        server.security = security
     except OSError as exc:
         if getattr(exc, "errno", None) in {errno.EADDRINUSE, errno.EPERM}:
             print(
@@ -611,7 +898,10 @@ def main() -> int:
             )
             return 1
         raise
-    print(f"Market data server listening on http://{args.host}:{args.port}")
+    auth_mode = "group-token" if security.enabled else "local-only"
+    print(f"Market data server listening on http://{args.host}:{args.port} ({auth_mode}, browser-local portfolios)")
+    if server.external_access and not security.enabled:
+        print("Remote API requests are blocked until BRIDGE_GROUP_ACCESS_CODE is configured.")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

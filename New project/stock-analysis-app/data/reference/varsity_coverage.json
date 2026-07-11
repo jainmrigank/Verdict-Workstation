@@ -1,0 +1,165 @@
+{
+  "schemaVersion": "varsity-coverage.v1",
+  "generatedAt": "2026-07-10T05:44:48.177517+00:00",
+  "sources": [
+    {
+      "id": "pdf-module-11",
+      "type": "local-pdf-extract",
+      "label": "Personal Finance",
+      "sourceFile": "tmp/pdfs/zerodha_varsity_modules/extracted_text/Module11_Personal_Finance.txt",
+      "contentHash": "534860a6b9167ff3d6240b7ef21fc87fabe87596082869d08c90badeb202054a",
+      "status": "ready",
+      "chapterCount": 30
+    },
+    {
+      "id": "pdf-module-10",
+      "type": "local-pdf-extract",
+      "label": "Trading Systems",
+      "sourceFile": "tmp/pdfs/zerodha_varsity_modules/extracted_text/Module_10_Trading_Systems.txt",
+      "contentHash": "22f9b379003b0f857c24f03235b64a9f8946087b1c17cdb8d3ef764892658988",
+      "status": "ready",
+      "chapterCount": 1
+    },
+    {
+      "id": "pdf-module-13",
+      "type": "local-pdf-extract",
+      "label": "Integrated Financial Modelling",
+      "sourceFile": "tmp/pdfs/zerodha_varsity_modules/extracted_text/Module_13.txt",
+      "contentHash": "2dc45cb22fb964aee8129d2b31def5a85cd2ac482fd2d311f0c3a8d9c7a26e8e",
+      "status": "ready",
+      "chapterCount": 18
+    },
+    {
+      "id": "pdf-module-14",
+      "type": "local-pdf-extract",
+      "label": "Insurance",
+      "sourceFile": "tmp/pdfs/zerodha_varsity_modules/extracted_text/Module_14_Personal_Finance_Insurance.txt",
+      "contentHash": "d878371640a84b25f3678a1af8a4502ad6726c1523170275d65b71f90f8cc78b",
+      "status": "ready",
+      "chapterCount": 9
+    },
+    {
+      "id": "pdf-module-1",
+      "type": "local-pdf-extract",
+      "label": "Introduction to Stock Markets",
+      "sourceFile": "tmp/pdfs/zerodha_varsity_modules/extracted_text/Module_1_Introduction_to_Stock_Markets.txt",
+      "contentHash": "ba1c7eb1be24a855b1a411b6c61d8f92227f141e84742f605c5b36527d6fefeb",
+      "status": "ready",
+      "chapterCount": 1
+    },
+    {
+      "id": "pdf-module-2",
+      "type": "local-pdf-extract",
+      "label": "Technical Analysis",
+      "sourceFile": "tmp/pdfs/zerodha_varsity_modules/extracted_text/Module_2_Technical_Analysis.txt",
+      "contentHash": "37b947f4b5c305d7bb0796977a2b56708f95455430a9f06d5175414e8606e52f",
+      "status": "ready",
+      "chapterCount": 19
+    },
+    {
+      "id": "pdf-module-3",
+      "type": "local-pdf-extract",
+      "label": "Fundamental Analysis",
+      "sourceFile": "tmp/pdfs/zerodha_varsity_modules/extracted_text/Module_3_Fundamental_Analysis.txt",
+      "contentHash": "3f1e96c02dd5a13070acc67c763623ff736e17b70c79777bf7421d9a76623e73",
+      "status": "ready",
+      "chapterCount": 17
+    },
+    {
+      "id": "pdf-module-4",
+      "type": "local-pdf-extract",
+      "label": "Futures Trading",
+      "sourceFile": "tmp/pdfs/zerodha_varsity_modules/extracted_text/Module_4_Futures_Trading.txt",
+      "contentHash": "932ea12b32e0a1e1929cbf717fdaf498e5e144963234eba559f97f9c384887f6",
+      "status": "ready",
+      "chapterCount": 1
+    },
+    {
+      "id": "pdf-module-5",
+      "type": "local-pdf-extract",
+      "label": "Options Theory",
+      "sourceFile": "tmp/pdfs/zerodha_varsity_modules/extracted_text/Module_5_Options_Theory_for_Professional_Trading.txt",
+      "contentHash": "60e3da079c01d75f1a8b914a7d952795c0eeff010415aaeeb6046b81f7a098f5",
+      "status": "ready",
+      "chapterCount": 23
+    },
+    {
+      "id": "pdf-module-6",
+      "type": "local-pdf-extract",
+      "label": "Option Strategies",
+      "sourceFile": "tmp/pdfs/zerodha_varsity_modules/extracted_text/Module_6_Option_Strategies.txt",
+      "contentHash": "d26f28f2c796f75976ef239b375a2c99ff4893f9d1bd1e8b56ec988c1f80f77a",
+      "status": "ready",
+      "chapterCount": 13
+    },
+    {
+      "id": "pdf-module-7",
+      "type": "local-pdf-extract",
+      "label": "Markets and Taxation",
+      "sourceFile": "tmp/pdfs/zerodha_varsity_modules/extracted_text/Module_7_Markets_Taxation.txt",
+      "contentHash": "00320b0acd4d845081777810b7605b2db57e3a2c71e147aa9aa2672f36ad1b81",
+      "status": "ready",
+      "chapterCount": 3
+    },
+    {
+      "id": "pdf-module-8",
+      "type": "local-pdf-extract",
+      "label": "Currency and Commodity Futures",
+      "sourceFile": "tmp/pdfs/zerodha_varsity_modules/extracted_text/Module_8_Currency_and_Commodity_Futures.txt",
+      "contentHash": "43971e7f12218ddb5a3917fd7e8e0c427402ea5d4468900350f34c795b5f8340",
+      "status": "ready",
+      "chapterCount": 1
+    },
+    {
+      "id": "pdf-module-9",
+      "type": "local-pdf-extract",
+      "label": "Risk Management and Trading Psychology",
+      "sourceFile": "tmp/pdfs/zerodha_varsity_modules/extracted_text/Module_9_Risk_Management_Trading_Psychology.txt",
+      "contentHash": "d5249863eca003d018731298613854dc783420f502813da4ddad74a2c6dbc6a5",
+      "status": "ready",
+      "chapterCount": 1
+    },
+    {
+      "id": "web-module-innerworth",
+      "type": "web-module",
+      "label": "Innerworth",
+      "sourceUrl": "https://zerodha.com/varsity/module/innerworth/",
+      "status": "ready",
+      "error": "",
+      "chapterCount": 603
+    },
+    {
+      "id": "web-module-sector-analysis",
+      "type": "web-module",
+      "label": "Sector Analysis",
+      "sourceUrl": "https://zerodha.com/varsity/module/sector-analysis/",
+      "status": "ready",
+      "error": "",
+      "chapterCount": 17
+    },
+    {
+      "id": "web-module-social-stock-exchange",
+      "type": "web-module",
+      "label": "Social Stock Exchanges",
+      "sourceUrl": "https://zerodha.com/varsity/module/social-stock-exchanges-sses/",
+      "status": "ready",
+      "error": "",
+      "chapterCount": 4
+    },
+    {
+      "id": "web-module-national-pension-system",
+      "type": "web-module",
+      "label": "National Pension System",
+      "sourceUrl": "https://zerodha.com/varsity/module/national-pension-scheme/",
+      "status": "ready",
+      "error": "",
+      "chapterCount": 9
+    }
+  ],
+  "readySources": 17,
+  "pendingOrFailedSources": 0,
+  "chapterRuleCount": 787,
+  "duplicates": [
+    "pdf-m3-c9-the-financial-ratio-analysis-part-1"
+  ]
+}

@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "retrieved-rule-set.v1",
+  "title": "RetrievedRuleSetV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "corpusVersion",
+    "embeddingModel",
+    "embeddingDimensions",
+    "queryFingerprint",
+    "mode",
+    "filters",
+    "rules"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "retrieved-rule-set.v1" },
+    "corpusVersion": { "type": "string", "minLength": 8 },
+    "embeddingModel": { "type": "string" },
+    "embeddingDimensions": { "type": "integer", "minimum": 0 },
+    "queryFingerprint": { "type": "string", "minLength": 8 },
+    "mode": { "enum": ["lexical", "hybrid", "training"] },
+    "filters": {
+      "type": "object",
+      "required": ["instrumentType", "action", "horizon", "sector", "requestedAreas"],
+      "properties": {
+        "instrumentType": { "type": "string" },
+        "action": { "type": "string" },
+        "horizon": { "type": "string" },
+        "sector": { "type": "string" },
+        "requestedAreas": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "rules": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "required": [
+          "id", "module", "chapter", "title", "principle", "checklist", "action", "caution",
+          "appliesTo", "instrumentTypes", "horizons", "actions", "sectors", "source", "score", "rank"
+        ],
+        "properties": {
+          "id": { "type": "string" },
+          "module": { "type": "string" },
+          "chapter": { "type": "string" },
+          "title": { "type": "string" },
+          "principle": { "type": "string" },
+          "checklist": { "type": "array", "items": { "type": "string" } },
+          "action": { "type": "string" },
+          "caution": { "type": "string" },
+          "appliesTo": { "type": "array", "items": { "type": "string" } },
+          "instrumentTypes": { "type": "array", "items": { "type": "string" } },
+          "horizons": { "type": "array", "items": { "type": "string" } },
+          "actions": { "type": "array", "items": { "type": "string" } },
+          "sectors": { "type": "array", "items": { "type": "string" } },
+          "source": {
+            "type": "object",
+            "required": ["pages", "url"],
+            "properties": {
+              "pages": { "type": "string" },
+              "url": { "type": "string" }
+            }
+          },
+          "score": { "type": "number" },
+          "rank": { "type": "integer", "minimum": 1 }
+        }
+      }
+    }
+  }
+}

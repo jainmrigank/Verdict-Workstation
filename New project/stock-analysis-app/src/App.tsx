@@ -1,7 +1,12 @@
-import { type CSSProperties, type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
+import { type CSSProperties, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import { FlashcardDeck, FlashcardStack } from './FlashcardDeck'
 import { PriceChart } from './PriceChart'
+import {
+  narrativeTexts,
+  type LlmAnalysisResponse,
+  type LlmNarrativeItem,
+} from './llmAnalysis'
 import {
   sectorOperatingRules,
   tradingDerivedRules,
@@ -19,6 +24,8 @@ type CacheState = 'loading' | 'live' | 'free' | 'sample'
 export type { CacheState, Exchange, RiskMode, RiskProfile, Horizon, TradeAccess, ProfitTrend, ConstraintKey, AnalysisForm, AnalysisResult, Snapshot }
 type RefreshState = 'idle' | 'refreshing' | 'done' | 'error'
 type UploadState = 'idle' | 'uploading' | 'done' | 'error'
+type BridgeAuthState = 'idle' | 'connecting' | 'connected' | 'locked' | 'error'
+type BridgeSession = { token: string; expiresAt: number }
 type ThemeMode = 'dark' | 'light'
 type AiCoachScope = 'verdict' | 'technical' | 'fundamental'
 type ChartTimeframe = '1D' | '1M' | '3M' | '6M' | '1Y' | 'ALL'
@@ -224,31 +231,6 @@ type SymbolMappingDraft = {
 
 type MappingSaveState = 'idle' | 'saving' | 'done' | 'error'
 
-type LlmReview = {
-  headline?: string
-  plainEnglishVerdict?: string
-  whatToDoNext?: string[]
-  whatNotToDo?: string[]
-  keyEvidence?: string[]
-  practicalPrinciples?: string[]
-  riskPlan?: string[]
-  dataGaps?: string[]
-  questionsBeforeAction?: string[]
-  confidenceNote?: string
-}
-
-type LlmVerdictResponse = {
-  ok?: boolean
-  configured?: boolean
-  scope?: AiCoachScope
-  message?: string
-  setup?: string[]
-  model?: string
-  generated_at?: string
-  review?: LlmReview
-  error?: string
-}
-
 type BrowserWorkspace = {
   version: 1
   snapshot: Snapshot
@@ -412,6 +394,20 @@ type Snapshot = {
   }
 }
 
+type TickerSuggestion = {
+  id: string
+  exchange: Exchange
+  tradingsymbol: string
+  symbol: string
+  name: string
+  meta: string
+  searchText: string
+  priority: number
+  source?: string
+}
+
+type TickerSearchState = 'idle' | 'searching' | 'done' | 'error'
+
 type ConstraintKey = 'avoidHighDebt' | 'avoidSmallCaps' | 'avoidLowLiquidity' | 'avoidIntraday' | 'noAveragingDown'
 
 type AnalysisForm = {
@@ -515,6 +511,15 @@ const initialForm: AnalysisForm = {
     avoidIntraday: true,
     noAveragingDown: true,
   },
+}
+
+const defaultCapitalSeed = '10000'
+
+function withSeededBuyCapital(form: AnalysisForm) {
+  if (form.ticker.trim() && !form.alreadyHold && !form.capital.trim()) {
+    return { ...form, capital: defaultCapitalSeed }
+  }
+  return form
 }
 
 const browserWorkspaceKey = 'verdict-workstation:browser-workspace:v1'
@@ -875,6 +880,38 @@ function AiReviewListCard({
   )
 }
 
+function GroundedAnalysisStrip({
+  items,
+  state,
+  summary,
+  title,
+}: {
+  items?: LlmNarrativeItem[]
+  state: RefreshState
+  summary?: string
+  title: string
+}) {
+  const textItems = narrativeTexts(items).slice(0, 4)
+  if (state !== 'refreshing' && !summary && !textItems.length) return null
+  return (
+    <section className={`grounded-analysis-strip ${state}`} aria-live="polite">
+      <div className="grounded-analysis-heading">
+        <span>Grounded analyst</span>
+        <strong>{title}</strong>
+        {state === 'refreshing' && <small>Reading current facts and relevant Varsity rules...</small>}
+      </div>
+      {summary && <p>{summary}</p>}
+      {textItems.length > 0 && (
+        <ul>
+          {textItems.map((item) => (
+            <li key={item}>{item}</li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}
+
 function SymbolCoverageList({ emptyLabel, items, tone }: { emptyLabel: string; items: string[]; tone: SignalTone }) {
   if (!items.length) {
     return <span className="coverage-empty">{emptyLabel}</span>
@@ -1114,9 +1151,7 @@ function cacheLabel(cacheState: CacheState) {
   return 'Sample data'
 }
 
-function marketDataBaseUrl() {
-  const configured = import.meta.env.VITE_MARKET_DATA_BASE_URL
-  if (configured) return configured.replace(/\/$/, '')
+function localMarketDataBaseUrl() {
   const hostname = window.location.hostname || '127.0.0.1'
   const normalizedHost = hostname.toLowerCase()
   const isLocalBridgeHost =
@@ -1133,9 +1168,56 @@ function marketDataBaseUrl() {
   return `http://${apiHost}:8787`
 }
 
+function normalizedMarketDataUrl(value?: string) {
+  const clean = (value ?? '').trim().replace(/\/+$/, '')
+  return clean === '.' ? '' : clean
+}
+
+function marketDataBaseUrl() {
+  const configured = normalizedMarketDataUrl(import.meta.env.VITE_MARKET_DATA_BASE_URL)
+  if (configured) return configured
+  return localMarketDataBaseUrl()
+}
+
+function marketDataSearchBaseUrls(primaryBaseUrl: string) {
+  const urls = [normalizedMarketDataUrl(primaryBaseUrl), normalizedMarketDataUrl(localMarketDataBaseUrl())]
+  const seen = new Set<string>()
+  return urls.filter((url) => {
+    if (!url || seen.has(url)) return false
+    seen.add(url)
+    return true
+  })
+}
+
 function apiUrl(baseUrl: string, path: string) {
   if (!baseUrl) return path.startsWith('/') ? path : `/${path}`
   return `${baseUrl}${path.startsWith('/') ? path : `/${path}`}`
+}
+
+const bridgeSessionStorageKey = 'verdict-workstation:bridge-session:v1'
+
+function readBridgeSession(): BridgeSession | null {
+  try {
+    const raw = window.sessionStorage.getItem(bridgeSessionStorageKey)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as Partial<BridgeSession>
+    if (typeof parsed.token !== 'string' || typeof parsed.expiresAt !== 'number' || parsed.expiresAt <= Date.now()) {
+      window.sessionStorage.removeItem(bridgeSessionStorageKey)
+      return null
+    }
+    return { token: parsed.token, expiresAt: parsed.expiresAt }
+  } catch {
+    return null
+  }
+}
+
+function writeBridgeSession(session: BridgeSession | null) {
+  try {
+    if (session) window.sessionStorage.setItem(bridgeSessionStorageKey, JSON.stringify(session))
+    else window.sessionStorage.removeItem(bridgeSessionStorageKey)
+  } catch {
+    // Private browsing can disable storage; the in-memory session still works.
+  }
 }
 
 function cacheStateFromProvider(provider: string): CacheState {
@@ -1338,6 +1420,115 @@ function splitMarketSymbol(symbol: string) {
   const tradingsymbol = rest.length ? rest.join(':') : rawExchange
   const exchange = rest.length && (rawExchange === 'BSE' || rawExchange === 'NSE') ? rawExchange : 'NSE'
   return { exchange, tradingsymbol }
+}
+
+function exchangeFromValue(value?: string): Exchange | undefined {
+  const exchange = value?.trim().toUpperCase()
+  if (exchange === 'BSE' || exchange === 'NSE') return exchange
+  return undefined
+}
+
+function buildTickerSuggestions(snapshot: Snapshot): TickerSuggestion[] {
+  const suggestions = new Map<string, TickerSuggestion>()
+
+  const addSuggestion = (input: {
+    exchange?: string
+    tradingsymbol?: string
+    symbol?: string
+    name?: string
+    meta?: string
+    searchAliases?: string[]
+    priority?: number
+  }) => {
+    const rawSymbol = input.symbol?.trim().toUpperCase()
+    const parsed = splitMarketSymbol(rawSymbol ?? `${input.exchange ?? ''}:${input.tradingsymbol ?? ''}`)
+    const explicitSymbolExchange = rawSymbol?.includes(':') ? exchangeFromValue(rawSymbol.split(':')[0]) : undefined
+    const exchange = exchangeFromValue(input.exchange) ?? explicitSymbolExchange ?? (rawSymbol?.includes(':') ? undefined : exchangeFromValue(parsed.exchange))
+    const tradingsymbol = (input.tradingsymbol ?? parsed.tradingsymbol).trim().toUpperCase()
+    if (!exchange || !tradingsymbol) return
+    const symbol = `${exchange}:${tradingsymbol}`
+    const existing = suggestions.get(symbol)
+    const name = input.name?.trim() || existing?.name || ''
+    const meta = input.meta?.trim() || existing?.meta || ''
+    const priority = Math.max(input.priority ?? 0, existing?.priority ?? 0)
+    const searchText = uniqueSymbols([
+      symbol,
+      tradingsymbol,
+      name,
+      meta,
+      ...(input.searchAliases ?? []),
+      existing?.searchText,
+    ]).join(' ')
+    suggestions.set(symbol, {
+      id: symbol,
+      exchange,
+      tradingsymbol,
+      symbol,
+      name,
+      meta,
+      searchText,
+      priority,
+    })
+  }
+
+  snapshot.symbols.forEach((row) => {
+    addSuggestion({
+      exchange: row.exchange,
+      tradingsymbol: row.tradingsymbol,
+      symbol: row.kite_key || row.input,
+      name: row.name,
+      meta: [row.instrument_type, row.segment].filter(Boolean).join(' | '),
+      searchAliases: [row.input, row.screener, row.yahoo].filter((value): value is string => Boolean(value)),
+      priority: 4,
+    })
+  })
+  snapshot.upload?.symbols.forEach((symbol) => addSuggestion({ symbol, priority: 3 }))
+  snapshot.holdings.forEach((holding) => {
+    addSuggestion({
+      exchange: holding.exchange,
+      tradingsymbol: holding.tradingsymbol,
+      symbol: holdingKey(holding),
+      meta: [holding.sector, holding.product, holding.isin].filter(Boolean).join(' | '),
+      searchAliases: [holding.isin].filter((value): value is string => Boolean(value)),
+      priority: 5,
+    })
+  })
+  Object.entries(snapshot.fundamentals ?? {}).forEach(([symbol, fundamentals]) => {
+    addSuggestion({
+      symbol,
+      name: fundamentals.name,
+      meta: [fundamentals.sector, fundamentals.industry].filter(Boolean).join(' | '),
+      priority: 2,
+    })
+  })
+  Object.keys(snapshot.quotes).forEach((symbol) => addSuggestion({ symbol, priority: 1 }))
+  Object.keys(snapshot.candles).forEach((symbol) => addSuggestion({ symbol, priority: 1 }))
+
+  return Array.from(suggestions.values()).sort((a, b) => b.priority - a.priority || a.symbol.localeCompare(b.symbol))
+}
+
+function tickerSuggestionFromApi(row: unknown, index: number): TickerSuggestion | null {
+  if (!row || typeof row !== 'object') return null
+  const candidate = row as Record<string, unknown>
+  const exchange = exchangeFromValue(String(candidate.exchange ?? ''))
+  const tradingsymbol = String(candidate.tradingsymbol ?? '').trim().toUpperCase()
+  if (!exchange || !tradingsymbol) return null
+  const symbol = `${exchange}:${tradingsymbol}`
+  const name = String(candidate.name ?? '').trim()
+  const meta = String(candidate.meta ?? '').trim()
+  const source = String(candidate.source ?? '').trim()
+  const searchText = uniqueSymbols([symbol, tradingsymbol, name, meta, source]).join(' ')
+  return {
+    id: `api:${symbol}:${source || index}`,
+    exchange,
+    tradingsymbol,
+    symbol,
+    name,
+    meta,
+    searchText,
+    priority: Number(candidate.priority ?? 100) || 100,
+    source,
+  }
 }
 
 function defaultYahooSymbol(symbol: string) {
@@ -3772,7 +3963,11 @@ function App() {
   const [glossarySearch, setGlossarySearch] = useState('')
   const [mobileContextExpanded, setMobileContextExpanded] = useState(false)
   const [workspaceDrawerOpen, setWorkspaceDrawerOpen] = useState(false)
-  const [form, setForm] = useState<AnalysisForm>(() => storedWorkspace?.form ?? initialForm)
+  const [bridgeSession, setBridgeSession] = useState<BridgeSession | null>(() => readBridgeSession())
+  const [bridgeAccessCode, setBridgeAccessCode] = useState('')
+  const [bridgeAuthState, setBridgeAuthState] = useState<BridgeAuthState>(() => (readBridgeSession() ? 'connected' : 'idle'))
+  const [bridgeAuthMessage, setBridgeAuthMessage] = useState(() => (readBridgeSession() ? 'Private bridge session active.' : ''))
+  const [form, setForm] = useState<AnalysisForm>(() => withSeededBuyCapital(storedWorkspace?.form ?? initialForm))
   const [days, setDays] = useState(() => storedWorkspace?.days ?? 730)
   const [copied, setCopied] = useState<string | null>(null)
   const [freeRefreshState, setFreeRefreshState] = useState<RefreshState>('idle')
@@ -3786,9 +3981,15 @@ function App() {
   const [uploadMessage, setUploadMessage] = useState('')
   const [llmState, setLlmState] = useState<RefreshState>('idle')
   const [llmMessage, setLlmMessage] = useState('')
-  const [llmResponse, setLlmResponse] = useState<LlmVerdictResponse | null>(null)
+  const [llmResponse, setLlmResponse] = useState<LlmAnalysisResponse | null>(null)
   const [llmScope, setLlmScope] = useState<AiCoachScope>('verdict')
+  const pendingGroundedAnalysisRef = useRef(false)
   const [holdingContextMessage, setHoldingContextMessage] = useState('')
+  const [tickerTypeaheadOpen, setTickerTypeaheadOpen] = useState(false)
+  const [tickerActiveSuggestionIndex, setTickerActiveSuggestionIndex] = useState(0)
+  const [remoteTickerSuggestions, setRemoteTickerSuggestions] = useState<TickerSuggestion[]>([])
+  const [tickerSearchState, setTickerSearchState] = useState<TickerSearchState>('idle')
+  const [tickerSearchMessage, setTickerSearchMessage] = useState('')
   const [theme, setTheme] = useState<ThemeMode>('dark')
   const [chartTimeframe, setChartTimeframe] = useState<ChartTimeframe>('6M')
   const [forecastSettings, setForecastSettings] = useState<ForecastSettings>(initialForecastSettings)
@@ -3836,6 +4037,26 @@ function App() {
     () => (activeSnapshot.upload ? activeSnapshot : { ...activeSnapshot, holdings: [], upload: undefined }),
     [activeSnapshot],
   )
+  const tickerSuggestionPool = useMemo(() => buildTickerSuggestions(activeSnapshotForAnalysis), [activeSnapshotForAnalysis])
+  const localTickerSuggestions = useMemo(() => {
+    const query = form.ticker.trim().toUpperCase()
+    if (!query) return tickerSuggestionPool.slice(0, 8)
+    const terms = query.split(/\s+/).filter(Boolean)
+    return tickerSuggestionPool
+      .map((suggestion) => {
+        const haystack = suggestion.searchText.toUpperCase()
+        if (!terms.every((term) => haystack.includes(term))) return null
+        const exact = suggestion.symbol === query || suggestion.tradingsymbol === query
+        const prefix = suggestion.tradingsymbol.startsWith(query) || suggestion.symbol.startsWith(query)
+        const namePrefix = suggestion.name.toUpperCase().startsWith(query)
+        const score = suggestion.priority * 10 + (exact ? 120 : 0) + (prefix ? 70 : 0) + (namePrefix ? 35 : 0)
+        return { suggestion, score }
+      })
+      .filter((item): item is { suggestion: TickerSuggestion; score: number } => Boolean(item))
+      .sort((a, b) => b.score - a.score || a.suggestion.symbol.localeCompare(b.suggestion.symbol))
+      .map((item) => item.suggestion)
+      .slice(0, 8)
+  }, [form.ticker, tickerSuggestionPool])
   const missingDataIssues = useMemo(
     () => (syncCoverage ? buildMissingDataIssues(activeSnapshotForAnalysis, syncCoverage) : []),
     [activeSnapshotForAnalysis, syncCoverage],
@@ -3892,6 +4113,102 @@ function App() {
   const lanAppCommand = 'cd stock-analysis-app && npm run dev:lan'
   const productionBuildCommand = 'cd stock-analysis-app && npm run build'
   const publicAppCommand = 'cd stock-analysis-app && npm run preview:lan'
+  const bridgeFetch = useCallback(
+    async (url: string, init: RequestInit = {}) => {
+      let activeSession = bridgeSession
+      if (activeSession && activeSession.expiresAt <= Date.now()) {
+        activeSession = null
+        setBridgeSession(null)
+        writeBridgeSession(null)
+        setBridgeAuthState('locked')
+        setBridgeAuthMessage('Bridge session expired. Enter the group access code again.')
+      }
+      const headers = new Headers(init.headers)
+      if (activeSession?.token) headers.set('Authorization', `Bearer ${activeSession.token}`)
+      const response = await fetch(url, { ...init, headers })
+      if (response.status === 401) {
+        setBridgeSession(null)
+        writeBridgeSession(null)
+        setBridgeAuthState('locked')
+        setBridgeAuthMessage('Bridge access is required. Enter the shared group code in the menu.')
+      }
+      return response
+    },
+    [bridgeSession],
+  )
+  useEffect(() => {
+    const query = form.ticker.trim()
+    if (!tickerTypeaheadOpen || query.length < 2 || !marketDataUrl) {
+      setRemoteTickerSuggestions([])
+      setTickerSearchState('idle')
+      setTickerSearchMessage('')
+      return undefined
+    }
+
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => {
+      setTickerSearchState('searching')
+      setTickerSearchMessage('')
+      const queryString = new URLSearchParams({ q: query, limit: '12' }).toString()
+      const searchUrls = marketDataSearchBaseUrls(marketDataUrl).map((baseUrl) => `${apiUrl(baseUrl, '/api/symbols/search')}?${queryString}`)
+
+      const fetchSearchResults = async () => {
+        const errors: string[] = []
+        for (const searchUrl of searchUrls) {
+          try {
+            const response = await bridgeFetch(searchUrl, { signal: controller.signal })
+            if (response.ok) return (await response.json()) as { results?: unknown[]; errors?: string[] }
+            if (response.status === 401) {
+              errors.push('Bridge access required. Open the menu and enter the shared group code.')
+              break
+            }
+            errors.push(`${searchUrl}: HTTP ${response.status}`)
+          } catch (error) {
+            if (error instanceof DOMException && error.name === 'AbortError') throw error
+            errors.push(`${searchUrl}: ${error instanceof Error ? error.message : 'request failed'}`)
+          }
+        }
+        throw new Error(errors.join(' | ') || 'Symbol search is unavailable.')
+      }
+
+      fetchSearchResults()
+        .then((data) => {
+          const suggestions = (data.results ?? [])
+            .map((row, index) => tickerSuggestionFromApi(row, index))
+            .filter((row): row is TickerSuggestion => Boolean(row))
+          setRemoteTickerSuggestions(suggestions)
+          setTickerSearchState('done')
+          setTickerSearchMessage((data.errors ?? []).join(' '))
+        })
+        .catch((error) => {
+          if (error instanceof DOMException && error.name === 'AbortError') return
+          setRemoteTickerSuggestions([])
+          setTickerSearchState('error')
+          setTickerSearchMessage(error instanceof Error ? error.message : 'Symbol search is unavailable.')
+        })
+    }, 260)
+
+    return () => {
+      window.clearTimeout(timer)
+      controller.abort()
+    }
+  }, [bridgeFetch, form.ticker, marketDataUrl, tickerTypeaheadOpen])
+
+  const tickerSuggestions = useMemo(() => {
+    const seen = new Set<string>()
+    const add = (suggestions: TickerSuggestion[]) =>
+      suggestions.filter((suggestion) => {
+        if (seen.has(suggestion.symbol)) return false
+        seen.add(suggestion.symbol)
+        return true
+      })
+    return [...add(remoteTickerSuggestions), ...add(localTickerSuggestions)].slice(0, 8)
+  }, [localTickerSuggestions, remoteTickerSuggestions])
+
+  useEffect(() => {
+    setTickerActiveSuggestionIndex(0)
+  }, [form.ticker, tickerSuggestions.length])
+
   const freeCliCommand = useMemo(() => {
     const holdingsFlag = hasUploadedHoldingsFeed ? '' : ' --no-holdings'
     const cliSymbols = syncTargetSymbols.length ? syncTargetSymbols.join(' ') : '<decision-symbol-or-uploaded-holdings>'
@@ -3977,6 +4294,28 @@ function App() {
     activeQuote?.ohlc?.close && activeQuote.last_price ? ((activeQuote.last_price - activeQuote.ohlc.close) / activeQuote.ohlc.close) * 100 : undefined
   const activePriceTone: SignalTone = activeChangePct === undefined ? 'neutral' : activeChangePct >= 0 ? 'positive' : 'negative'
   const activeAiCoachCopy = aiCoachScopeCopy[llmScope]
+  const groundedAnalysis = llmResponse?.analysis
+  const groundedCoachSummary = groundedAnalysis
+    ? llmScope === 'technical'
+      ? groundedAnalysis.coach.chartSummary || groundedAnalysis.chart.summary
+      : llmScope === 'fundamental'
+        ? groundedAnalysis.coach.companySummary || groundedAnalysis.company.summary
+        : groundedAnalysis.coach.verdictSummary || groundedAnalysis.decision.summary
+    : ''
+  const groundedCoachActions = groundedAnalysis
+    ? llmScope === 'technical'
+      ? narrativeTexts([...groundedAnalysis.chart.trend, ...groundedAnalysis.chart.levels])
+      : llmScope === 'fundamental'
+        ? narrativeTexts([...groundedAnalysis.company.quality, ...groundedAnalysis.company.sectorDrivers])
+        : narrativeTexts(groundedAnalysis.decision.nextActions)
+    : []
+  const groundedCoachEvidence = groundedAnalysis
+    ? llmScope === 'technical'
+      ? narrativeTexts([...groundedAnalysis.chart.momentum, ...groundedAnalysis.chart.volume, ...groundedAnalysis.chart.volatility])
+      : llmScope === 'fundamental'
+        ? narrativeTexts([...groundedAnalysis.company.profitability, ...groundedAnalysis.company.cashFlow, ...groundedAnalysis.company.valuation])
+        : narrativeTexts(groundedAnalysis.decision.priceDrivers)
+    : []
 
   useEffect(() => {
     setLlmState('idle')
@@ -5130,38 +5469,130 @@ function App() {
     }
   }
 
-  async function generateAiCoachReview(scope: AiCoachScope = llmScope) {
+  function buildAnalysisFacts() {
+    const coachContext = buildAiCoachContext('verdict')
+    const metadata = symbolMetadata(activeSnapshotForAnalysis, analysis.quoteKey)
+    const rawInstrumentType = metadata?.instrument_type?.toLowerCase() ?? ''
+    const instrumentType = rawInstrumentType.includes('index')
+      ? 'index'
+      : rawInstrumentType.includes('etf')
+        ? 'etf'
+        : rawInstrumentType.includes('fund')
+          ? 'fund'
+          : activeFundamentals
+            ? 'equity'
+            : 'unknown'
+    return {
+      schemaVersion: 'analysis-facts.v1' as const,
+      generatedAt: new Date().toISOString(),
+      instrument: {
+        ...coachContext.selectedInstrument,
+        type: instrumentType,
+        marketDataGeneratedAt: activeSnapshotForAnalysis.generated_at,
+      },
+      userContext: {
+        ...coachContext.userContext,
+        action: form.alreadyHold ? 'Sell' : 'Buy',
+      },
+      deterministicAnalysis: coachContext.appVerdict,
+      technicalEvidence: coachContext.technicalEvidence,
+      fundamentalEvidence: coachContext.fundamentalEvidence,
+      portfolioEvidence: coachContext.positionAndRisk,
+      signals: coachContext.importantSignals,
+      reasoningTrace: coachContext.reasoningTrace,
+      dataQuality: {
+        cacheState,
+        generatedAt: activeSnapshotForAnalysis.generated_at,
+        missing: analysis.missing,
+        providerErrors: activeSnapshotForAnalysis.errors,
+        fundamentalsApplicable: fundamentalsApplicable(activeSnapshotForAnalysis, analysis.quoteKey),
+        fundamentalsLoaded: Boolean(activeFundamentals),
+        candlesLoaded: activeCandles.length,
+      },
+      uiOptions: {
+        patternsEnabled: chartIndicators.patterns,
+        activeChartTimeframe: chartTimeframe,
+        requestedAreas: ['decision', 'chart', 'company', 'portfolio', 'reasoning', 'coach'],
+      },
+    }
+  }
+
+  async function generateGroundedAnalysis(scope: AiCoachScope = llmScope) {
     setLlmScope(scope)
     setLlmState('refreshing')
     setLlmResponse(null)
-    setLlmMessage(aiCoachScopeCopy[scope].message)
+    setLlmMessage('Reading current facts and retrieving the most relevant Varsity guidance...')
     try {
-      const bridgeUrl = requireMarketDataBridge('AI Coach')
-      const response = await fetch(apiUrl(bridgeUrl, '/api/llm/verdict'), {
+      const bridgeUrl = requireMarketDataBridge('Grounded analysis')
+      const response = await bridgeFetch(apiUrl(bridgeUrl, '/api/llm/analysis'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ context: buildAiCoachContext(scope) }),
+        body: JSON.stringify({ context: buildAnalysisFacts() }),
       })
-      const data = (await readResponseJson(response)) as LlmVerdictResponse
+      const data = (await readResponseJson(response)) as LlmAnalysisResponse
       if (!response.ok) {
-        throw new Error(data.error || 'AI Coach request failed.')
+        throw new Error(data.error || 'Grounded analysis request failed.')
       }
-      setLlmResponse({ ...data, scope })
-      setLlmState(data.configured === false ? 'error' : 'done')
+      setLlmResponse(data)
+      const analysisReady = Boolean(data.analysis)
+      setLlmState(analysisReady ? 'done' : 'error')
       setLlmMessage(
         data.configured === false
-          ? data.message || 'AI Coach is not configured on the data bridge yet.'
-          : `${aiCoachScopeCopy[scope].label} explanation is ready for the current stock context.`,
+          ? data.message || 'The grounded analyst is not configured on the data bridge yet.'
+          : analysisReady
+            ? `Grounded analysis is ready for ${analysis.quoteKey}.`
+            : data.message || data.error || 'The grounded analyst is temporarily unavailable; deterministic analysis remains active.',
       )
     } catch (error) {
       setLlmState('error')
       setLlmResponse(null)
-      setLlmMessage(bridgeFailureMessage(error, 'Could not generate the AI Coach review.'))
+      setLlmMessage(bridgeFailureMessage(error, 'Could not generate the grounded analysis.'))
     }
   }
 
+  async function generateAiCoachReview(scope: AiCoachScope = llmScope) {
+    await generateGroundedAnalysis(scope)
+  }
+
+  useEffect(() => {
+    if (!pendingGroundedAnalysisRef.current || freeRefreshState !== 'done') return
+    pendingGroundedAnalysisRef.current = false
+    void generateGroundedAnalysis('verdict')
+    // The refresh completion is the trigger; buildAnalysisFacts reads the newly rendered snapshot.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [freeRefreshState, activeSnapshotForAnalysis.generated_at])
+
   function updateForm<K extends keyof AnalysisForm>(key: K, value: AnalysisForm[K]) {
     setForm((current) => ({ ...current, [key]: value }))
+  }
+
+  function selectTickerSuggestion(suggestion: TickerSuggestion) {
+    setForm((current) =>
+      withSeededBuyCapital({
+        ...current,
+        ticker: suggestion.tradingsymbol,
+        exchange: suggestion.exchange,
+      }),
+    )
+    setTickerTypeaheadOpen(false)
+    setTickerActiveSuggestionIndex(0)
+  }
+
+  function commitTickerInput() {
+    setForm((current) => {
+      const rawTicker = current.ticker.trim().toUpperCase()
+      if (!rawTicker) return { ...current, ticker: '' }
+      const explicitExchange = rawTicker.includes(':') ? exchangeFromValue(rawTicker.split(':')[0]) : undefined
+      const explicitTicker = rawTicker.includes(':') ? rawTicker.split(':').slice(1).join(':') : rawTicker
+      const exactSuggestion = tickerSuggestionPool.find(
+        (suggestion) => suggestion.symbol === rawTicker || suggestion.tradingsymbol === rawTicker,
+      )
+      return withSeededBuyCapital({
+        ...current,
+        ticker: exactSuggestion?.tradingsymbol ?? explicitTicker,
+        exchange: exactSuggestion?.exchange ?? explicitExchange ?? current.exchange,
+      })
+    })
   }
 
   function updateConstraint(key: ConstraintKey, value: boolean) {
@@ -5183,6 +5614,49 @@ function App() {
     } catch {
       return {}
     }
+  }
+
+  async function connectBridgeAccess() {
+    const bridgeUrl = requireMarketDataBridge('Bridge access')
+    setBridgeAuthState('connecting')
+    setBridgeAuthMessage('Checking bridge access...')
+    try {
+      const response = await fetch(apiUrl(bridgeUrl, '/api/session'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accessCode: bridgeAccessCode }),
+      })
+      const data = await readResponseJson(response)
+      if (!response.ok) {
+        throw new Error(typeof data.error === 'string' ? data.error : 'Bridge access was rejected.')
+      }
+      if (data.authRequired === false) {
+        setBridgeSession(null)
+        writeBridgeSession(null)
+        setBridgeAuthState('connected')
+        setBridgeAuthMessage('This local bridge does not require a group code.')
+      } else if (typeof data.token === 'string' && typeof data.expiresAt === 'number') {
+        const session = { token: data.token, expiresAt: data.expiresAt }
+        setBridgeSession(session)
+        writeBridgeSession(session)
+        setBridgeAuthState('connected')
+        setBridgeAuthMessage('Private bridge session active.')
+      } else {
+        throw new Error('The bridge returned an invalid session response.')
+      }
+      setBridgeAccessCode('')
+    } catch (error) {
+      setBridgeAuthState('error')
+      setBridgeAuthMessage(error instanceof Error ? error.message : 'Could not connect to the bridge.')
+    }
+  }
+
+  function disconnectBridgeAccess() {
+    setBridgeSession(null)
+    writeBridgeSession(null)
+    setBridgeAccessCode('')
+    setBridgeAuthState('idle')
+    setBridgeAuthMessage('Bridge session cleared from this browser tab.')
   }
 
   function requireMarketDataBridge(action: string) {
@@ -5209,7 +5683,7 @@ function App() {
       setSyncProgress(0)
       setSyncCoverage(null)
       setFreeRefreshMessage('Enter a ticker in Decision Setup or upload a holdings XLSX before syncing market data.')
-      return
+      return false
     }
     setFreeRefreshState('refreshing')
     setFreeRefreshMessage(
@@ -5221,7 +5695,7 @@ function App() {
     setSyncCoverage(null)
     try {
       const bridgeUrl = requireMarketDataBridge('Market-data sync')
-      const response = await fetch(apiUrl(bridgeUrl, '/api/free-data/refresh'), {
+      const response = await bridgeFetch(apiUrl(bridgeUrl, '/api/free-data/refresh'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -5259,11 +5733,13 @@ function App() {
       setFreeRefreshMessage(
         `Updated ${Object.keys(mergedRefresh.snapshot.quotes).length} priced symbols. ${holdingsMessage} ${fundamentalsMessage}${followUpMessage}`,
       )
+      return true
     } catch (error) {
       setFreeRefreshState('error')
       setSyncProgress(0)
       setSyncCoverage(null)
       setFreeRefreshMessage(bridgeFailureMessage(error, 'Market-data sync failed.'))
+      return false
     }
   }
 
@@ -5275,7 +5751,12 @@ function App() {
       setFreeRefreshMessage('Enter a ticker before loading analysis data.')
       return
     }
-    await refreshFreeData({ symbolsOverride: [decisionSymbol], includeHoldingsOverride: false, source: 'decision' })
+    setLlmResponse(null)
+    setLlmState('idle')
+    setLlmMessage('Market data is loading before the grounded analysis starts.')
+    pendingGroundedAnalysisRef.current = true
+    const refreshed = await refreshFreeData({ symbolsOverride: [decisionSymbol], includeHoldingsOverride: false, source: 'decision' })
+    if (!refreshed) pendingGroundedAnalysisRef.current = false
     setView('verdict')
   }
 
@@ -5295,7 +5776,7 @@ function App() {
     try {
       const bridgeUrl = requireMarketDataBridge('Symbol mapping')
       const draft = mappingDrafts[symbol] ?? mappingDraftForSymbol(activeSnapshotForAnalysis, symbol)
-      const response = await fetch(apiUrl(bridgeUrl, '/api/symbol-map/upsert'), {
+      const response = await bridgeFetch(apiUrl(bridgeUrl, '/api/symbol-map/upsert'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -5327,7 +5808,7 @@ function App() {
     setSyncProgress(12)
     try {
       const bridgeUrl = requireMarketDataBridge('Missing-data retry')
-      const response = await fetch(apiUrl(bridgeUrl, '/api/free-data/refresh'), {
+      const response = await bridgeFetch(apiUrl(bridgeUrl, '/api/free-data/refresh'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -5387,7 +5868,7 @@ function App() {
     setSyncCoverage(null)
     try {
       const bridgeUrl = requireMarketDataBridge('Holdings upload')
-      const response = await fetch(apiUrl(bridgeUrl, `/api/portfolio/upload?days=${days}`), {
+      const response = await bridgeFetch(apiUrl(bridgeUrl, `/api/portfolio/upload?days=${days}`), {
         method: 'POST',
         headers: {
           'Content-Type': file.type || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -5462,7 +5943,7 @@ function App() {
     try {
       const bridgeUrl = marketDataBaseUrl()
       if (!bridgeUrl) return
-      const response = await fetch(apiUrl(bridgeUrl, '/api/portfolio/clear'), { method: 'POST' })
+      const response = await bridgeFetch(apiUrl(bridgeUrl, '/api/portfolio/clear'), { method: 'POST' })
       if (!response.ok) {
         const data = await response.json().catch(() => ({}))
         throw new Error(typeof data.error === 'string' ? data.error : 'Bridge clear failed.')
@@ -5544,8 +6025,14 @@ function App() {
                 onClick={() => setMobileContextExpanded((current) => !current)}
               >
                 <span>{activeTickerDisplay}</span>
-                <strong>{formatInr(analysis.ltp)}</strong>
-                <small>{activeChangePct === undefined ? 'Change pending' : formatPercent(activeChangePct)}</small>
+                {analysis.ltp === undefined ? (
+                  <small>Price pending</small>
+                ) : (
+                  <>
+                    <strong>{formatInr(analysis.ltp)}</strong>
+                    <small>{activeChangePct === undefined ? 'Change pending' : formatPercent(activeChangePct)}</small>
+                  </>
+                )}
               </button>
               <div className="instrument-copy">
                 <span>Analysing now</span>
@@ -5555,8 +6042,10 @@ function App() {
               </div>
               <div className="instrument-ltp-inline">
                 <span>LTP</span>
-                <strong>{formatInr(analysis.ltp)}</strong>
-                <small>{activeChangePct === undefined ? 'Change pending' : formatPercent(activeChangePct)}</small>
+                <strong>{analysis.ltp === undefined ? 'Pending' : formatInr(analysis.ltp)}</strong>
+                {analysis.ltp !== undefined && (
+                  <small>{activeChangePct === undefined ? 'Change pending' : formatPercent(activeChangePct)}</small>
+                )}
               </div>
               <div className="instrument-quick-actions">
                 <button
@@ -5645,6 +6134,43 @@ function App() {
               <small>Theme</small>
             </span>
           </button>
+          <form
+            className="bridge-access-control"
+            onSubmit={(event) => {
+              event.preventDefault()
+              void connectBridgeAccess()
+            }}
+          >
+            <div className="bridge-access-heading">
+              <strong>Private bridge</strong>
+              <span className={`bridge-access-dot state-${bridgeAuthState}`} aria-hidden="true" />
+            </div>
+            {bridgeAuthState === 'connected' ? (
+              <button className="bridge-session-button" type="button" onClick={disconnectBridgeAccess}>
+                Clear session
+              </button>
+            ) : (
+              <div className="bridge-access-entry">
+                <label className="sr-only" htmlFor="bridge-access-code">
+                  Shared group access code
+                </label>
+                <input
+                  autoComplete="current-password"
+                  id="bridge-access-code"
+                  placeholder="Group access code"
+                  type="password"
+                  value={bridgeAccessCode}
+                  onChange={(event) => setBridgeAccessCode(event.target.value)}
+                />
+                <button disabled={bridgeAuthState === 'connecting'} type="submit">
+                  {bridgeAuthState === 'connecting' ? 'Checking...' : 'Connect'}
+                </button>
+              </div>
+            )}
+            <small aria-live="polite">
+              {bridgeAuthMessage || 'Local access works directly. Remote groups use the shared code.'}
+            </small>
+          </form>
         </div>
       </aside>
 
@@ -5683,23 +6209,111 @@ function App() {
               title="Instrument"
             >
               <div className="form-grid setup-primary-grid">
-                <label className="field">
+                <div
+                  className="field ticker-typeahead-field"
+                  onBlur={(event) => {
+                    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                      setTickerTypeaheadOpen(false)
+                      commitTickerInput()
+                    }
+                  }}
+                >
                   <FieldLabel help={requiredHelp.ticker}>Ticker</FieldLabel>
-                  <input
-                    aria-label="Ticker"
-                    required
-                    value={form.ticker}
-                    onChange={(event) => {
-                      const ticker = event.target.value.toUpperCase()
-                      setForm((current) => ({
-                        ...current,
-                        ticker,
-                        // Seed a practical default so a fresh idea can be sized immediately; user edits still win.
-                        capital: ticker.trim() && !current.ticker.trim() && !current.capital.trim() ? '10000' : current.capital,
-                      }))
-                    }}
-                  />
-                </label>
+                  <div className="ticker-typeahead-control">
+                    <input
+                      aria-activedescendant={
+                        tickerTypeaheadOpen && tickerSuggestions[tickerActiveSuggestionIndex]
+                          ? `ticker-option-${tickerActiveSuggestionIndex}`
+                          : undefined
+                      }
+                      aria-autocomplete="list"
+                      aria-controls="ticker-typeahead-listbox"
+                      aria-expanded={tickerTypeaheadOpen}
+                      aria-label="Ticker"
+                      autoComplete="off"
+                      placeholder="Search ticker or company/fund"
+                      required
+                      role="combobox"
+                      value={form.ticker}
+                      onChange={(event) => {
+                        setTickerTypeaheadOpen(true)
+                        setForm((current) => ({ ...current, ticker: event.target.value.toUpperCase() }))
+                      }}
+                      onFocus={() => setTickerTypeaheadOpen(true)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Escape') {
+                          setTickerTypeaheadOpen(false)
+                          return
+                        }
+                        if (!tickerTypeaheadOpen && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+                          setTickerTypeaheadOpen(true)
+                          return
+                        }
+                        if (event.key === 'ArrowDown' && tickerSuggestions.length) {
+                          event.preventDefault()
+                          setTickerActiveSuggestionIndex((current) => Math.min(current + 1, tickerSuggestions.length - 1))
+                          return
+                        }
+                        if (event.key === 'ArrowUp' && tickerSuggestions.length) {
+                          event.preventDefault()
+                          setTickerActiveSuggestionIndex((current) => Math.max(current - 1, 0))
+                          return
+                        }
+                        if (event.key === 'Enter') {
+                          if (tickerTypeaheadOpen && tickerSuggestions[tickerActiveSuggestionIndex]) {
+                            event.preventDefault()
+                            selectTickerSuggestion(tickerSuggestions[tickerActiveSuggestionIndex])
+                          } else {
+                            commitTickerInput()
+                          }
+                        }
+                      }}
+                    />
+                    {tickerTypeaheadOpen && (
+                      <div className="ticker-typeahead-list" id="ticker-typeahead-listbox" role="listbox">
+                        {tickerSuggestions.length ? (
+                          tickerSuggestions.map((suggestion, suggestionIndex) => (
+                            <button
+                              aria-selected={suggestionIndex === tickerActiveSuggestionIndex}
+                              className={suggestionIndex === tickerActiveSuggestionIndex ? 'active' : ''}
+                              id={`ticker-option-${suggestionIndex}`}
+                              key={suggestion.id}
+                              role="option"
+                              tabIndex={-1}
+                              type="button"
+                              onMouseDown={(event) => {
+                                event.preventDefault()
+                                selectTickerSuggestion(suggestion)
+                              }}
+                            >
+                              <span>
+                                <strong>{suggestion.tradingsymbol}</strong>
+                                {(suggestion.name || suggestion.meta) && (
+                                  <small>{[suggestion.name, suggestion.meta].filter(Boolean).join(' | ')}</small>
+                                )}
+                              </span>
+                              <em>{suggestion.exchange}</em>
+                            </button>
+                          ))
+                        ) : (
+                          <p className="ticker-typeahead-empty">
+                            {tickerSearchState === 'searching'
+                              ? 'Searching the market...'
+                              : tickerSearchState === 'error'
+                                ? `Market search unavailable. ${tickerSearchMessage || 'Press Tab to use this ticker manually.'}`
+                                : 'No market match yet. Press Tab to use this ticker manually.'}
+                          </p>
+                        )}
+                        {tickerSuggestions.length > 0 && tickerSearchState === 'searching' && (
+                          <p className="ticker-typeahead-empty">Searching the full market...</p>
+                        )}
+                        {tickerSuggestions.length > 0 && tickerSearchState === 'error' && (
+                          <p className="ticker-typeahead-empty">{tickerSearchMessage || 'Showing local matches while market search is unavailable.'}</p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
                 <label className="field">
                   <FieldLabel help={requiredHelp.exchange}>Exchange</FieldLabel>
                   <select aria-label="Exchange" value={form.exchange} onChange={(event) => updateForm('exchange', event.target.value as Exchange)}>
@@ -5984,6 +6598,12 @@ function App() {
                 </>
               )}
             </p>
+            <GroundedAnalysisStrip
+              items={groundedAnalysis?.decision.priceDrivers}
+              state={llmState}
+              summary={groundedAnalysis?.decision.summary}
+              title="Decision read"
+            />
             {specialInstrumentWarning ? (
               <p className="verdict-summary verdict-inline-warning">
                 <strong>Special instrument check:</strong> {specialInstrumentWarning}
@@ -6153,7 +6773,7 @@ function App() {
                 title={isHoldingReview ? 'Next Actions' : 'Buy, Quantity, and Exit Plan'}
               >
                 <ul>
-                  {analysis.doItems.map((item) => (
+                  {(groundedAnalysis ? narrativeTexts(groundedAnalysis.decision.nextActions) : analysis.doItems).map((item) => (
                     <li key={item}>{item}</li>
                   ))}
                   {isHoldingReview && analysis.suggestedShares !== undefined && (
@@ -6165,14 +6785,14 @@ function App() {
               </CollapsibleSection>
               <CollapsibleSection className="guidance-card dont-card nested-collapse" defaultOpen headingClassName="subsection-heading" headingLevel={3} id="dont-do-heading" title="Avoid These Moves">
                 <ul>
-                  {analysis.dontItems.map((item) => (
+                  {(groundedAnalysis ? narrativeTexts(groundedAnalysis.decision.avoid) : analysis.dontItems).map((item) => (
                     <li key={item}>{item}</li>
                   ))}
                 </ul>
               </CollapsibleSection>
               <CollapsibleSection className="guidance-card why-card nested-collapse" defaultOpen headingClassName="subsection-heading" headingLevel={3} id="why-verdict-heading" title="Why This Answer">
                 <ul>
-                  {analysis.whyItems.map((item) => (
+                  {(groundedAnalysis ? narrativeTexts(groundedAnalysis.decision.priceDrivers) : analysis.whyItems).map((item) => (
                     <li key={item}>{item}</li>
                   ))}
                 </ul>
@@ -6246,7 +6866,7 @@ function App() {
                   onClick={() => void generateAiCoachReview(llmScope)}
                   disabled={llmState === 'refreshing' || !decisionSymbol}
                 >
-                  {llmState === 'refreshing' ? 'Generating...' : llmResponse?.review ? 'Regenerate Review' : 'Generate AI Review'}
+                  {llmState === 'refreshing' ? 'Generating...' : groundedAnalysis ? 'Regenerate Review' : 'Generate AI Review'}
                 </button>
               </div>
             }
@@ -6294,30 +6914,29 @@ function App() {
               </div>
             )}
 
-            {llmResponse?.review && (
+            {groundedAnalysis && (
               <div className="ai-review-grid">
                 <article className="ai-review-main">
-                  <span>AI Coach review</span>
-                  <h3>{llmResponse.review.headline || `${analysis.quoteKey}: ${analysis.verdict}`}</h3>
-                  <p>{llmResponse.review.plainEnglishVerdict || `The AI Coach did not return a plain-English ${activeAiCoachCopy.label.toLowerCase()} explanation.`}</p>
-                  {llmResponse.review.confidenceNote && <p className="ai-confidence-note">{llmResponse.review.confidenceNote}</p>}
+                  <span>Grounded AI review</span>
+                  <h3>{analysis.quoteKey}: {analysis.verdict}</h3>
+                  <p>{groundedCoachSummary || `The grounded analyst did not return a ${activeAiCoachCopy.label.toLowerCase()} explanation.`}</p>
                   {llmResponse.generated_at && <small>Generated {new Date(llmResponse.generated_at).toLocaleString()}</small>}
                 </article>
-                <AiReviewListCard title="What to do next" tone="positive" items={llmResponse.review.whatToDoNext} emptyLabel="No next steps were returned." />
-                <AiReviewListCard title="What not to do" tone="negative" items={llmResponse.review.whatNotToDo} emptyLabel="No avoid-list was returned." />
-                <AiReviewListCard title="Key evidence" tone="neutral" items={llmResponse.review.keyEvidence} emptyLabel="No evidence summary was returned." />
+                <AiReviewListCard title="What to do next" tone="positive" items={groundedCoachActions} emptyLabel="No next steps were returned." />
+                <AiReviewListCard title="What not to do" tone="negative" items={narrativeTexts(groundedAnalysis.decision.avoid)} emptyLabel="No avoid-list was returned." />
+                <AiReviewListCard title="Key evidence" tone="neutral" items={groundedCoachEvidence} emptyLabel="No evidence summary was returned." />
                 <AiReviewListCard
                   title="Practical price checks"
                   tone="positive"
-                  items={llmResponse.review.practicalPrinciples}
+                  items={narrativeTexts(groundedAnalysis.decision.priceDrivers)}
                   emptyLabel="No practical price checks were returned."
                 />
-                <AiReviewListCard title="Risk plan" tone="neutral" items={llmResponse.review.riskPlan} emptyLabel="No risk plan was returned." />
-                <AiReviewListCard title="Data gaps" tone="negative" items={llmResponse.review.dataGaps} emptyLabel="No data gaps were returned." />
+                <AiReviewListCard title="Risk plan" tone="neutral" items={narrativeTexts(groundedAnalysis.decision.risks)} emptyLabel="No risk plan was returned." />
+                <AiReviewListCard title="Data gaps" tone="negative" items={narrativeTexts(groundedAnalysis.decision.dataGaps)} emptyLabel="No data gaps were returned." />
                 <AiReviewListCard
                   title="Questions before action"
                   tone="neutral"
-                  items={llmResponse.review.questionsBeforeAction}
+                  items={narrativeTexts(groundedAnalysis.coach.questionsBeforeAction)}
                   emptyLabel="No follow-up questions were returned."
                 />
               </div>
@@ -6337,6 +6956,12 @@ function App() {
             staticOpen
             title="Technical Analysis"
           >
+            <GroundedAnalysisStrip
+              items={groundedAnalysis ? [...groundedAnalysis.chart.trend, ...groundedAnalysis.chart.momentum, ...groundedAnalysis.chart.levels] : undefined}
+              state={llmState}
+              summary={groundedAnalysis?.chart.summary}
+              title="Chart read"
+            />
             <div className="visual-grid">
               <article className="visual-card chart-card">
                 <div className="visual-card-heading chart-heading">
@@ -6593,58 +7218,58 @@ function App() {
                   </div>
                 )}
 
-                {/* Always visible: the Patterns chip only controls the on-chart markers,
-                    not this reference section. */}
-                <CollapsibleSection
-                  className="pattern-findings-panel nested-collapse"
-                  eyebrow="Pattern findings"
-                  headingClassName="subsection-heading"
-                  headingLevel={4}
-                  id="pattern-findings-heading"
-                  titleAddon={<HelpTip text="Candlestick patterns are visual clues, not trade calls. Use them only with trend location, support/resistance, volume, and next-candle confirmation." />}
-                  title="Detected Patterns and How to Use Them"
-                >
-                    {patternFindings.length ? (
-                      <FlashcardDeck
-                        ariaLabel="Detected candlestick patterns"
-                        cards={patternFindings.map((signal) => ({
-                          id: `${signal.name}-${signal.index}-finding`,
-                          category: signal.bias === 'bullish' ? 'Bullish' : signal.bias === 'bearish' ? 'Bearish' : 'Neutral',
-                          content: (
-                            <article className={`pattern-finding ${signal.bias}`}>
-                              <div className="pattern-finding-top">
-                                <span>{signal.kind}</span>
-                                <strong>{signal.name}</strong>
-                                <small>{signal.date} close {formatInr(signal.price)}</small>
-                              </div>
-                              <div className="pattern-finding-body">
-                                <p>
-                                  <b>How to spot:</b> {signal.spot}
-                                </p>
-                                <p>
-                                  <b>How it looks:</b> {signal.looks}
-                                </p>
-                                <p>
-                                  <b>What it means:</b> {signal.explanation}
-                                </p>
-                                <p>
-                                  <b>How to use it:</b> {signal.use}
-                                </p>
-                                <p>
-                                  <b>Be cautious:</b> {signal.caution}
-                                </p>
-                                <p>
-                                  <b>Invalidation:</b> {signal.stopHint}
-                                </p>
-                              </div>
-                            </article>
-                          ),
-                        }))}
-                      />
-                    ) : (
-                      <p className="pattern-empty">No recent single or multi-candle pattern was detected in this timeframe and zoom window.</p>
-                    )}
-                </CollapsibleSection>
+                {chartIndicators.patterns && (
+                  <CollapsibleSection
+                    className="pattern-findings-panel nested-collapse"
+                    eyebrow="Pattern findings"
+                    headingClassName="subsection-heading"
+                    headingLevel={4}
+                    id="pattern-findings-heading"
+                    titleAddon={<HelpTip text="Candlestick patterns are visual clues, not trade calls. Use them only with trend location, support/resistance, volume, and next-candle confirmation." />}
+                    title="Detected Patterns and How to Use Them"
+                  >
+                      {patternFindings.length ? (
+                        <FlashcardDeck
+                          ariaLabel="Detected candlestick patterns"
+                          cards={patternFindings.map((signal) => ({
+                            id: `${signal.name}-${signal.index}-finding`,
+                            category: signal.bias === 'bullish' ? 'Bullish' : signal.bias === 'bearish' ? 'Bearish' : 'Neutral',
+                            content: (
+                              <article className={`pattern-finding ${signal.bias}`}>
+                                <div className="pattern-finding-top">
+                                  <span>{signal.kind}</span>
+                                  <strong>{signal.name}</strong>
+                                  <small>{signal.date} close {formatInr(signal.price)}</small>
+                                </div>
+                                <div className="pattern-finding-body">
+                                  <p>
+                                    <b>How to spot:</b> {signal.spot}
+                                  </p>
+                                  <p>
+                                    <b>How it looks:</b> {signal.looks}
+                                  </p>
+                                  <p>
+                                    <b>What it means:</b> {signal.explanation}
+                                  </p>
+                                  <p>
+                                    <b>How to use it:</b> {signal.use}
+                                  </p>
+                                  <p>
+                                    <b>Be cautious:</b> {signal.caution}
+                                  </p>
+                                  <p>
+                                    <b>Invalidation:</b> {signal.stopHint}
+                                  </p>
+                                </div>
+                              </article>
+                            ),
+                          }))}
+                        />
+                      ) : (
+                        <p className="pattern-empty">No recent single or multi-candle pattern was detected in this timeframe and zoom window.</p>
+                      )}
+                  </CollapsibleSection>
+                )}
 
                 <CollapsibleSection
                   className="chart-guide nested-collapse"
@@ -6911,6 +7536,12 @@ function App() {
             staticOpen
             title="Company"
           >
+            <GroundedAnalysisStrip
+              items={groundedAnalysis ? [...groundedAnalysis.company.quality, ...groundedAnalysis.company.sectorDrivers, ...groundedAnalysis.company.risks] : undefined}
+              state={llmState}
+              summary={groundedAnalysis?.company.summary}
+              title="Business read"
+            />
             <div className="visual-grid fundamental-grid">
               {!activeFundamentals && (
                 <article className="visual-card fundamental-empty-card tone-negative">
@@ -7135,6 +7766,37 @@ function App() {
           <section className="reasoning-grid lower-grid">
             <CollapsibleSection className="panel parent-section reasoning-parent" eyebrow="Reasoning" id="steps-heading" staticOpen title="Decision Path">
 
+              <GroundedAnalysisStrip
+                items={groundedAnalysis?.reasoning.steps}
+                state={llmState}
+                summary={groundedAnalysis?.coach.verdictSummary}
+                title="Evidence chain"
+              />
+              {groundedAnalysis?.sources.length ? (
+                <CollapsibleSection
+                  className="grounded-sources nested-collapse"
+                  headingClassName="subsection-heading"
+                  headingLevel={3}
+                  id="grounded-varsity-sources"
+                  title={`Varsity references (${groundedAnalysis.sources.length})`}
+                >
+                  <ul>
+                    {groundedAnalysis.sources.map((source) => (
+                      <li key={source.id}>
+                        {source.sourceUrl ? (
+                          <a href={source.sourceUrl} target="_blank" rel="noreferrer">
+                            {source.module}: {source.chapter || source.id}
+                          </a>
+                        ) : (
+                          <span>{source.module}: {source.chapter || source.id}</span>
+                        )}
+                        {source.pages && <small> Page {source.pages}</small>}
+                      </li>
+                    ))}
+                  </ul>
+                </CollapsibleSection>
+              ) : null}
+
               <div className="steps-list detailed-steps">
                 {analysis.steps.map((step, index) => (
                   <CollapsibleSection
@@ -7209,6 +7871,12 @@ function App() {
             staticOpen
             title="Portfolio"
           >
+            <GroundedAnalysisStrip
+              items={groundedAnalysis ? [...groundedAnalysis.portfolio.positionFit, ...groundedAnalysis.portfolio.concentration, ...groundedAnalysis.portfolio.sizing] : undefined}
+              state={llmState}
+              summary={groundedAnalysis?.portfolio.summary}
+              title="Portfolio read"
+            />
             {freeRefreshState === 'refreshing' && (
               <div className="sync-progress-panel" role="status" aria-live="polite">
                 <div className="sync-progress-top">
