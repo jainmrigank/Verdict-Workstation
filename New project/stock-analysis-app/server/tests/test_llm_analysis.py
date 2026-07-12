@@ -35,7 +35,7 @@ def facts() -> dict:
     return {
         "schemaVersion": "analysis-facts.v1",
         "generatedAt": "2026-07-10T00:00:00+00:00",
-        "instrument": {"symbol": "NSE:TEST", "type": "equity", "sector": "Banking"},
+        "instrument": {"symbol": "NSE:TEST", "type": "equity", "sector": "Financials", "industry": "Bank - Private"},
         "userContext": {"action": "Buy", "horizon": "1-3y", "riskProfile": "balanced"},
         "deterministicAnalysis": {"verdict": "Wait and Watch", "confidence": "Medium"},
         "technicalEvidence": {"trend": "mixed", "rsi14": 52, "volume": "normal"},
@@ -83,6 +83,23 @@ class LlmAnalysisTests(unittest.TestCase):
         self.assertGreater(len(rules), 0)
         self.assertLessEqual(len(rules), 10)
         self.assertTrue(all(rule.get("id") for rule in rules))
+
+    def test_sector_rules_require_matching_sector_or_industry(self) -> None:
+        industrial = facts()
+        industrial["instrument"].update({"sector": "Industrials", "industry": "Civil Construction"})
+        industrial_ids = {rule["id"] for rule in lexical_retrieve(industrial, limit=50)}
+        self.assertNotIn("web-sector-analysis-information-technology", industrial_ids)
+        self.assertNotIn("web-sector-analysis-automobiles-part-1", industrial_ids)
+
+        technology = facts()
+        technology["instrument"].update({"sector": "Information Technology", "industry": "Software & Consulting"})
+        technology_ids = {rule["id"] for rule in lexical_retrieve(technology, limit=50)}
+        self.assertIn("web-sector-analysis-information-technology", technology_ids)
+
+        automobile = facts()
+        automobile["instrument"].update({"sector": "Consumer Discretionary", "industry": "Automobiles - Passenger Cars"})
+        automobile_ids = {rule["id"] for rule in lexical_retrieve(automobile, limit=50)}
+        self.assertIn("web-sector-analysis-automobiles-part-1", automobile_ids)
 
     def test_retrieved_rule_set_has_versioned_filters_and_bounded_rules(self) -> None:
         rule_set = retrieve_rule_set(facts(), limit=10)

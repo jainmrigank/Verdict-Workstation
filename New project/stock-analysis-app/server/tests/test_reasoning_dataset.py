@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from tools.llm_dataset import (
     GeminiQuotaError,
+    ProviderUnavailableError,
     cerebras_json,
     configure_gemini_pacing,
     estimated_provider_cost,
@@ -27,8 +28,11 @@ from tools.reasoning_dataset import (
     audit_gold,
     build_facts,
     create_evaluation_seal,
+    enrich_fundamentals,
     generate_gold,
     normalise_output_contract,
+    normalise_output_editorial,
+    screener_snapshot_fundamentals,
     validate_manifest,
     verify_evaluation_seal,
 )
@@ -58,6 +62,22 @@ def gold_row(index: int, split: str) -> dict:
 
 
 class ReasoningDatasetTests(unittest.TestCase):
+    def test_editorial_normalizer_replaces_internal_metric_names_only_in_prose(self) -> None:
+        output = {
+            "company": {
+                "summary": "profitMargin is 12 and debtEquity is missing.",
+                "quality": [{"text": "fundamentalEvidence.quality is strong.", "factRefs": ["fundamentalEvidence.quality"], "ruleRefs": ["rule-ltp"]}],
+            },
+            "warnings": ["pnlPct is unavailable."],
+        }
+        normalised, replacements = normalise_output_editorial(output)
+        self.assertEqual(normalised["company"]["summary"], "profit margin is 12 and debt-to-equity is missing.")
+        self.assertEqual(normalised["company"]["quality"][0]["text"], "business quality is strong.")
+        self.assertEqual(normalised["company"]["quality"][0]["factRefs"], ["fundamentalEvidence.quality"])
+        self.assertEqual(normalised["company"]["quality"][0]["ruleRefs"], ["rule-ltp"])
+        self.assertEqual(normalised["warnings"], ["position P&L is unavailable."])
+        self.assertEqual(replacements, 3)
+
     def test_openai_strict_request_is_isolated_and_records_usage(self) -> None:
         response = MagicMock()
         response.read.return_value = json.dumps(
@@ -157,6 +177,41 @@ class ReasoningDatasetTests(unittest.TestCase):
         )
         self.assertEqual(hard.scope, "hard")
         self.assertIsNone(hard.retry_after_seconds)
+
+    def test_openai_generation_reports_batch_usage_and_cost(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("tools.reasoning_dataset.SNAPSHOT_PATH", Path(tmp) / "snapshots.json"),
+            patch("tools.reasoning_dataset.GOLD_PATH", Path(tmp) / "gold.jsonl"),
+            patch("tools.reasoning_dataset.PROGRESS_PATH", Path(tmp) / "progress.json"),
+            patch("tools.reasoning_dataset.QUARANTINE_ROOT", Path(tmp) / "quarantine"),
+            patch("tools.reasoning_dataset.manifest", return_value={"instruments": []}),
+            patch("tools.reasoning_dataset.reset_provider_usage"),
+            patch(
+                "tools.reasoning_dataset.provider_usage_snapshot",
+                return_value={
+                    "requests": 2,
+                    "inputTokens": 1000,
+                    "cachedInputTokens": 0,
+                    "outputTokens": 500,
+                    "reasoningTokens": 300,
+                    "totalTokens": 1500,
+                },
+            ),
+        ):
+            Path(tmp, "snapshots.json").write_text("{}", encoding="utf-8")
+            result = generate_gold(provider="openai")
+        self.assertEqual(result["usage"]["requests"], 2)
+        self.assertEqual(result["estimatedCostUsd"], 0.003)
+
+    def test_missing_openai_key_is_provider_unavailable(self) -> None:
+        with patch.dict(
+            "tools.llm_dataset.os.environ",
+            {"OPENAI_DATASET_API_KEY": "", "OPENAI_API_KEY": ""},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(ProviderUnavailableError, "OPENAI_API_KEY"):
+                openai_json({"case": "one"}, "system")
 
     def test_strict_schema_closes_every_nested_object(self) -> None:
         schema = {
@@ -327,13 +382,75 @@ class ReasoningDatasetTests(unittest.TestCase):
             "source": "yahoo",
             "sourceUrls": ["https://query1.finance.yahoo.com/example"],
             "candles": candles,
-            "fundamentals": {"name": "Example Ltd", "sector": "Industrials", "returnOnEquity": 0.2, "debtToEquity": 30},
+            "fundamentals": {
+                "name": "Example Ltd",
+                "sector": "Industrials",
+                "returnOnCapital": 18.5,
+                "returnOnEquity": 0.2,
+                "debtToEquity": 30,
+            },
             "warnings": [],
         }
         facts = build_facts(instrument, snapshot, "Sell")
         self.assertEqual(facts["instrument"]["publicSourceUrls"], snapshot["sourceUrls"])
         self.assertEqual(facts["userContext"]["action"], "Sell")
+        self.assertEqual(facts["fundamentalEvidence"]["roce"], 18.5)
         self.assertNotIn("clientId", json.dumps(facts))
+
+    def test_screener_fundamentals_are_mapped_and_enriched_resumably(self) -> None:
+        mapped = screener_snapshot_fundamentals(
+            {
+                "name": "Example Ltd",
+                "market_cap": 1000,
+                "trailing_pe": 20,
+                "roce": 18.5,
+                "return_on_equity": 0.2,
+                "operating_cashflow": 250,
+            }
+        )
+        self.assertEqual(mapped["returnOnCapital"], 18.5)
+        self.assertEqual(mapped["operatingCashflow"], 250)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "snapshots.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "one": {
+                            "capturedAt": "2026-07-11T00:00:00+00:00",
+                            "sourceUrls": ["https://query1.finance.yahoo.com/example"],
+                            "fundamentals": {},
+                            "warnings": ["HTTP Error 401: Unauthorized"],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            instrument = {
+                "id": "one",
+                "symbol": "NSE:EXAMPLE",
+                "name": "Example Ltd",
+                "sourceSymbol": "EXAMPLE.NS",
+                "instrumentType": "equity",
+            }
+            raw = {
+                "name": "Example Ltd",
+                "roce": 18.5,
+                "operating_cashflow": 250,
+                "source_url": "https://www.screener.in/company/EXAMPLE/",
+            }
+            with (
+                patch("tools.reasoning_dataset.SNAPSHOT_PATH", path),
+                patch("tools.reasoning_dataset.manifest", return_value={"instruments": [instrument]}),
+                patch("tools.reasoning_dataset.free_data_refresh.fetch_screener_fundamentals", return_value=raw),
+            ):
+                first = enrich_fundamentals(delay_seconds=0)
+                second = enrich_fundamentals(delay_seconds=0)
+            snapshot = json.loads(path.read_text(encoding="utf-8"))["one"]
+        self.assertEqual(first["enriched"], 1)
+        self.assertEqual(second["skipped"], 1)
+        self.assertEqual(snapshot["fundamentals"]["returnOnCapital"], 18.5)
+        self.assertNotIn("HTTP Error 401: Unauthorized", snapshot["warnings"])
+        self.assertIn(raw["source_url"], snapshot["sourceUrls"])
 
     def test_generation_retries_same_case_after_short_quota(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -388,6 +505,34 @@ class ReasoningDatasetTests(unittest.TestCase):
         self.assertEqual(result["generated"], 0)
         self.assertEqual(progress["lastQuotaResponse"]["scope"], "daily")
         sleep.assert_not_called()
+
+    def test_generation_stops_on_provider_outage_without_quarantine(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot_path = root / "snapshots.json"
+            snapshot_path.write_text(
+                json.dumps({"one": {"source": "yahoo", "sourceUrls": ["https://example.test"], "capturedAt": "2026-07-11T00:00:00+00:00"}}),
+                encoding="utf-8",
+            )
+            with (
+                patch("tools.reasoning_dataset.SNAPSHOT_PATH", snapshot_path),
+                patch("tools.reasoning_dataset.GOLD_PATH", root / "gold.jsonl"),
+                patch("tools.reasoning_dataset.PROGRESS_PATH", root / "progress.json"),
+                patch("tools.reasoning_dataset.QUARANTINE_ROOT", root / "quarantine"),
+                patch("tools.reasoning_dataset.manifest", return_value={"instruments": [{"id": "one", "actions": ["Buy"], "split": "train"}]}),
+                patch("tools.reasoning_dataset.build_facts", return_value={"uiOptions": {"patternsEnabled": True}}),
+                patch("tools.reasoning_dataset.retrieve_rule_set", return_value={"rules": []}),
+                patch("tools.reasoning_dataset.generate_output", side_effect=ProviderUnavailableError("DNS unavailable")),
+                patch("tools.reasoning_dataset.repair_output") as repair,
+            ):
+                result = generate_gold(max_new=1)
+                progress = json.loads((root / "progress.json").read_text(encoding="utf-8"))
+        self.assertEqual(result["generated"], 0)
+        self.assertTrue(result["providerUnavailable"])
+        self.assertEqual(result["providerError"], "DNS unavailable")
+        self.assertEqual(result["quarantined"], [])
+        self.assertEqual(progress["lastProviderError"], "DNS unavailable")
+        repair.assert_not_called()
 
     def test_second_audit_failure_is_quarantined_without_losing_progress(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -453,6 +598,64 @@ class ReasoningDatasetTests(unittest.TestCase):
         self.assertEqual(second["generated"], 1)
         self.assertEqual(progress["completedCases"], 2)
         self.assertEqual(len(progress["completedCaseIds"]), 2)
+
+    def test_generation_refreshes_existing_row_when_facts_change(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot_path = root / "snapshots.json"
+            snapshot_path.write_text(
+                json.dumps({"one": {"capturedAt": "2026-07-11T00:00:00+00:00"}}),
+                encoding="utf-8",
+            )
+            gold_path = root / "gold.jsonl"
+            gold_path.write_text(json.dumps({"id": "gold-one-buy", "facts": {"version": "old"}}) + "\n", encoding="utf-8")
+            instrument = {"id": "one", "actions": ["Buy"], "split": "train"}
+            replacement = {"id": "gold-one-buy", "facts": {"version": "new"}, "output": {}}
+            with (
+                patch("tools.reasoning_dataset.SNAPSHOT_PATH", snapshot_path),
+                patch("tools.reasoning_dataset.GOLD_PATH", gold_path),
+                patch("tools.reasoning_dataset.PROGRESS_PATH", root / "progress.json"),
+                patch("tools.reasoning_dataset.QUARANTINE_ROOT", root / "quarantine"),
+                patch("tools.reasoning_dataset.manifest", return_value={"instruments": [instrument]}),
+                patch("tools.reasoning_dataset.build_facts", return_value={"version": "new", "uiOptions": {"patternsEnabled": True}}),
+                patch("tools.reasoning_dataset.retrieve_rule_set", return_value={"rules": []}),
+                patch("tools.reasoning_dataset.generate_output", return_value={}),
+                patch("tools.reasoning_dataset.case_row", return_value=replacement),
+                patch("tools.reasoning_dataset.row_audit_errors", return_value=[]),
+            ):
+                result = generate_gold(max_new=1, refresh_existing=True)
+            rows = [json.loads(line) for line in gold_path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(result["generated"], 1)
+        self.assertEqual(result["refreshed"], 1)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["facts"]["version"], "new")
+
+    def test_generation_can_force_refresh_selected_case(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot_path = root / "snapshots.json"
+            snapshot_path.write_text(json.dumps({"one": {"capturedAt": "2026-07-11T00:00:00+00:00"}}), encoding="utf-8")
+            gold_path = root / "gold.jsonl"
+            gold_path.write_text(json.dumps({"id": "gold-one-buy", "facts": {"version": "same"}}) + "\n", encoding="utf-8")
+            instrument = {"id": "one", "actions": ["Buy"], "split": "train"}
+            replacement = {"id": "gold-one-buy", "facts": {"version": "same"}, "output": {"decision": {"summary": "refreshed"}}}
+            with (
+                patch("tools.reasoning_dataset.SNAPSHOT_PATH", snapshot_path),
+                patch("tools.reasoning_dataset.GOLD_PATH", gold_path),
+                patch("tools.reasoning_dataset.PROGRESS_PATH", root / "progress.json"),
+                patch("tools.reasoning_dataset.QUARANTINE_ROOT", root / "quarantine"),
+                patch("tools.reasoning_dataset.manifest", return_value={"instruments": [instrument]}),
+                patch("tools.reasoning_dataset.build_facts", return_value={"version": "same", "uiOptions": {"patternsEnabled": True}}),
+                patch("tools.reasoning_dataset.retrieve_rule_set", return_value={"rules": []}),
+                patch("tools.reasoning_dataset.generate_output", return_value={}),
+                patch("tools.reasoning_dataset.case_row", return_value=replacement),
+                patch("tools.reasoning_dataset.row_audit_errors", return_value=[]),
+            ):
+                result = generate_gold(refresh_existing=True, case_ids={"gold-one-buy"})
+            rows = [json.loads(line) for line in gold_path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(result["generated"], 1)
+        self.assertEqual(result["refreshed"], 1)
+        self.assertEqual(rows[0]["output"]["decision"]["summary"], "refreshed")
 
     def test_evaluation_seal_detects_tampering(self) -> None:
         rows = []

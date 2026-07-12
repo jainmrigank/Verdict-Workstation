@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import math
+import re
 import sys
 import time
 from datetime import UTC, datetime, timedelta
@@ -19,19 +20,27 @@ from urllib.request import Request, urlopen
 APP_ROOT = Path(__file__).resolve().parents[1]
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
+SCRIPTS_ROOT = APP_ROOT.parent / "scripts"
+if str(SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_ROOT))
 
+import free_data_refresh
 from server.llm_analysis import canonical_json, retrieve_rule_set
 from tools.approve_candidates import audit_candidate, unsupported_numeric_claims
 from tools.evaluate_llm import fact_paths
 from tools.llm_dataset import (
     OUTPUT_SCHEMA,
     GeminiQuotaError,
+    ProviderUnavailableError,
     configure_gemini_pacing,
     dataset_json,
     dataset_provider_metadata,
     dataset_provider_name,
+    estimated_provider_cost,
     load_local_env,
+    provider_usage_snapshot,
     read_jsonl,
+    reset_provider_usage,
     write_jsonl,
 )
 
@@ -48,6 +57,54 @@ HORIZONS = ("3-6m", "6-12m", "1-3y", "3y+")
 RISK_PROFILES = ("conservative", "balanced", "balanced aggressive", "aggressive")
 PUBLIC_SOURCES = {"yahoo", "mfapi"}
 FORBIDDEN_MARKERS = ("holdings-upj", ".xlsx", "portfolio_holdings.json", "zerodha client id")
+EDITORIAL_LABELS = (
+    ("uiOptions.patternsEnabled", "pattern detection"),
+    ("chart.patterns", "chart pattern commentary"),
+    ("patternsEnabled", "pattern detection"),
+    ("dataQuality.missing", "missing-data list"),
+    ("dataQuality.state", "data-quality state"),
+    ("fundamentalEvidence.updates", "company updates"),
+    ("fundamentalEvidence.quality", "business quality"),
+    ("fundamentalEvidence.", ""),
+    ("technicalEvidence.", ""),
+    ("portfolioEvidence.", ""),
+    ("deterministicAnalysis.", ""),
+    ("userContext.", ""),
+    ("previousClose", "previous close"),
+    ("averagePrice", "average price"),
+    ("changePct", "daily change"),
+    ("businessSummary", "business summary"),
+    ("atrPct", "ATR percentage"),
+    ("marketCap", "market capitalization"),
+    ("riskProfile", "risk profile"),
+    ("sourceWarnings", "source warnings"),
+    ("fundamentalEvidence", "fundamental evidence"),
+    ("technicalEvidence", "technical evidence"),
+    ("dataQuality", "data quality"),
+    ("reasoningTrace", "reasoning trace"),
+    ("earningsGrowth", "earnings growth"),
+    ("revenueGrowth", "revenue growth"),
+    ("priceToBook", "price-to-book"),
+    ("debtEquity", "debt-to-equity"),
+    ("forwardPe", "forward P/E"),
+    ("profitMargin", "profit margin"),
+    ("cashFlowQuality", "cash-flow quality"),
+    ("pnlPct", "position P&L"),
+    ("averageVolume20", "20-day average volume"),
+    ("riskBudget", "risk budget"),
+    ("ltp", "last traded price"),
+    ("rsi14", "RSI14"),
+    ("sma20", "SMA20"),
+    ("sma50", "SMA50"),
+    ("atr14", "ATR14"),
+    ("roce", "ROCE"),
+    ("pe", "P/E"),
+    ("null", "unavailable"),
+)
+NARRATIVE_KEYS = {
+    "text", "title", "summary", "evidence", "implication", "action",
+    "verdictSummary", "chartSummary", "companySummary",
+}
 
 
 def atomic_json(path: Path, payload: Any) -> None:
@@ -271,14 +328,24 @@ def build_facts(instrument: dict[str, Any], snapshot: dict[str, Any], action: st
     debt_equity = finite_number(fundamentals.get("debtToEquity"))
     if debt_equity is not None and abs(debt_equity) > 10:
         debt_equity /= 100
+    roce = finite_number(fundamentals.get("returnOnCapital"))
+    if roce is not None and abs(roce) <= 2:
+        roce *= 100
     roe = finite_number(fundamentals.get("returnOnEquity"))
     if roe is not None and abs(roe) <= 2:
         roe *= 100
     company_applicable = instrument["instrumentType"] == "equity"
+    usable_fundamental_keys = (
+        "businessSummary", "marketCap", "trailingPe", "returnOnCapital",
+        "returnOnEquity", "profitMargin", "operatingCashflow",
+    )
+    has_company_fundamentals = any(
+        fundamentals.get(key) not in (None, "", [], {}) for key in usable_fundamental_keys
+    )
     missing = []
     if int(technical.get("candles") or 0) < 50:
         missing.append("price history")
-    if company_applicable and not fundamentals:
+    if company_applicable and not has_company_fundamentals:
         missing.append("fundamentals")
     data_state = "complete" if not missing else "incomplete"
     trend = str(technical.get("trend") or "unknown")
@@ -317,8 +384,8 @@ def build_facts(instrument: dict[str, Any], snapshot: dict[str, Any], action: st
         "technicalEvidence": technical,
         "fundamentalEvidence": {
             "applicable": company_applicable,
-            "quality": "strong" if roe is not None and roe >= 18 and (debt_equity is None or debt_equity <= 0.7) else "mixed",
-            "roce": rounded(roe),
+            "quality": "strong" if (roce is not None and roce >= 15 or roe is not None and roe >= 18) and (debt_equity is None or debt_equity <= 0.7) else "mixed",
+            "roce": rounded(roce),
             "debtEquity": rounded(debt_equity),
             "cashFlowQuality": "available" if fundamentals.get("operatingCashflow") is not None else "unavailable",
             "pe": rounded(finite_number(fundamentals.get("trailingPe"))),
@@ -491,6 +558,70 @@ def normalise_output_contract(
     return normalised
 
 
+def editorial_text(text: str) -> str:
+    result = text
+    for raw, label in EDITORIAL_LABELS:
+        result = re.sub(rf"\b{re.escape(raw)}\b", label, result, flags=re.IGNORECASE)
+    phrase_replacements = {
+        "No named pattern": "No chart pattern was supplied",
+        "No explicit updates or catalyst notes were supplied in the facts.": "The supplied facts include no fresh company update or catalyst note.",
+        "fundamentalEvidence updates is empty": "No fresh company catalyst was supplied",
+        "no detailed cash-flow figures": "the source does not include a cash-flow statement breakdown",
+        "cannot be assessed from the supplied facts": "is not verifiable with the available evidence",
+        "applicable:false": "not applicable",
+        "applicable is false": "company analysis is not applicable",
+    }
+    for raw, label in phrase_replacements.items():
+        result = result.replace(raw, label)
+    return re.sub(r"\s{2,}", " ", result).strip()
+
+
+def editorial_action(text: str) -> str:
+    clean = text.strip().rstrip(".").casefold()
+    if clean == "hold and watch":
+        return "Hold the existing position, monitor support and the stated risks, and reassess before changing size."
+    if clean == "wait and watch":
+        return "Wait for the stated evidence trigger, then reassess before committing capital."
+    if clean == "reduce":
+        return "Reduce exposure in measured steps and reassess against support and the stated risks."
+    return editorial_text(text)
+
+
+def normalise_output_editorial(output: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    normalised = json.loads(json.dumps(output))
+    replacements = 0
+
+    def visit(value: Any, key: str = "") -> None:
+        nonlocal replacements
+        if isinstance(value, dict):
+            for child_key, child in value.items():
+                if child_key in NARRATIVE_KEYS and isinstance(child, str):
+                    revised = editorial_action(child) if child_key == "action" else editorial_text(child)
+                    if child_key == "title":
+                        clean_title = child.strip().rstrip(".").casefold()
+                        if clean_title == "reduce":
+                            revised = "Measured reduction"
+                        elif clean_title == "hold and watch":
+                            revised = "Position under review"
+                        elif clean_title == "wait and watch":
+                            revised = "Evidence pending"
+                    replacements += int(revised != child)
+                    value[child_key] = revised
+                else:
+                    visit(child, child_key)
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                if key == "warnings" and isinstance(child, str):
+                    revised = editorial_text(child)
+                    replacements += int(revised != child)
+                    value[index] = revised
+                else:
+                    visit(child, key)
+
+    visit(normalised)
+    return normalised, replacements
+
+
 def case_row(
     case_id: str,
     instrument: dict[str, Any],
@@ -502,6 +633,7 @@ def case_row(
     provider: str | None = None,
 ) -> dict[str, Any]:
     output = normalise_output_contract(output, facts, rule_set)
+    output, _ = normalise_output_editorial(output)
     if not facts["uiOptions"]["patternsEnabled"] and isinstance(output.get("chart"), dict):
         output["chart"]["patterns"] = []
     return {
@@ -534,6 +666,25 @@ def row_audit_errors(row: dict[str, Any]) -> list[str]:
     return errors
 
 
+def normalise_gold_editorial() -> dict[str, Any]:
+    rows = read_jsonl(GOLD_PATH)
+    changed_rows = 0
+    replacements = 0
+    for row in rows:
+        output = row.get("output") if isinstance(row.get("output"), dict) else {}
+        normalised, count = normalise_output_editorial(output)
+        if count:
+            row["output"] = normalised
+            changed_rows += 1
+            replacements += count
+    errors = [error for row in rows for error in row_audit_errors(row)]
+    if errors:
+        raise RuntimeError(f"Editorial normalization produced {len(errors)} audit failures: {errors[:5]}")
+    if changed_rows:
+        write_jsonl(GOLD_PATH, rows)
+    return {"examples": len(rows), "changedRows": changed_rows, "replacements": replacements, "path": str(GOLD_PATH)}
+
+
 def quarantine_path(case_id: str) -> Path:
     return QUARANTINE_ROOT / f"{case_id}.json"
 
@@ -555,6 +706,7 @@ def write_progress(
     failures: dict[str, str],
     quota: GeminiQuotaError | None = None,
     next_retry_at: str = "",
+    provider_error: str = "",
 ) -> None:
     atomic_json(
         PROGRESS_PATH,
@@ -569,6 +721,7 @@ def write_progress(
             "quarantinedCases": quarantined_cases(),
             "lastQuotaResponse": quota.as_dict() if quota else None,
             "nextRetryAt": next_retry_at or None,
+            "lastProviderError": provider_error or None,
         },
     )
 
@@ -640,6 +793,89 @@ def collect_snapshots(limit: int = 0) -> dict[str, Any]:
     return {"available": len(snapshots), "collected": collected, "failed": failures, "path": str(SNAPSHOT_PATH)}
 
 
+def screener_snapshot_fundamentals(payload: dict[str, Any]) -> dict[str, Any]:
+    mapping = {
+        "name": "name",
+        "sector": "sector",
+        "industry": "industry",
+        "market_cap": "marketCap",
+        "trailing_pe": "trailingPe",
+        "roce": "returnOnCapital",
+        "return_on_equity": "returnOnEquity",
+        "profit_margins": "profitMargin",
+        "revenue_growth": "revenueGrowth",
+        "earnings_growth": "earningsGrowth",
+        "business_summary": "businessSummary",
+        "operating_cashflow": "operatingCashflow",
+        "total_debt": "totalDebt",
+        "free_cashflow": "freeCashflow",
+    }
+    return {
+        target: payload[source]
+        for source, target in mapping.items()
+        if payload.get(source) not in (None, "", [], {})
+    }
+
+
+def enrich_fundamentals(limit: int = 0, *, delay_seconds: float = 1.0, refresh: bool = False) -> dict[str, Any]:
+    snapshots = json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8")) if SNAPSHOT_PATH.exists() else {}
+    equities = [item for item in manifest()["instruments"] if item["instrumentType"] == "equity"]
+    if limit > 0:
+        equities = equities[:limit]
+    enriched = 0
+    skipped = 0
+    failures: dict[str, str] = {}
+    for instrument in equities:
+        instrument_id = str(instrument["id"])
+        snapshot = snapshots.get(instrument_id)
+        if not isinstance(snapshot, dict):
+            failures[instrument_id] = "Public price snapshot is missing."
+            continue
+        if snapshot.get("fundamentals") and not refresh:
+            skipped += 1
+            continue
+        symbol = str(instrument["symbol"])
+        exchange, _, tradingsymbol = symbol.partition(":")
+        item = {
+            "exchange": exchange,
+            "tradingsymbol": tradingsymbol,
+            "name": str(instrument["name"]),
+            "screener": tradingsymbol,
+            "yahoo": str(instrument.get("sourceSymbol") or ""),
+            "instrument_type": "EQUITY",
+        }
+        try:
+            raw = free_data_refresh.fetch_screener_fundamentals(item)
+            fundamentals = screener_snapshot_fundamentals(raw)
+            if not fundamentals:
+                raise RuntimeError("Screener returned no usable fundamental fields.")
+            snapshot["fundamentals"] = fundamentals
+            source_url = str(raw.get("source_url") or "")
+            if source_url and source_url not in snapshot.get("sourceUrls", []):
+                snapshot.setdefault("sourceUrls", []).append(source_url)
+            snapshot["fundamentalsCapturedAt"] = datetime.now(UTC).isoformat()
+            snapshot["warnings"] = [
+                warning
+                for warning in snapshot.get("warnings") or []
+                if "401" not in str(warning) and "unauthorized" not in str(warning).casefold()
+            ]
+            snapshot["warnings"].append("Yahoo fundamentals unavailable; Screener fallback used.")
+            snapshots[instrument_id] = snapshot
+            atomic_json(SNAPSHOT_PATH, snapshots)
+            enriched += 1
+        except Exception as exc:
+            failures[instrument_id] = str(exc)
+        if delay_seconds > 0:
+            time.sleep(delay_seconds)
+    return {
+        "equities": len(equities),
+        "enriched": enriched,
+        "skipped": skipped,
+        "failed": failures,
+        "path": str(SNAPSHOT_PATH),
+    }
+
+
 def generate_gold(
     limit: int = 0,
     *,
@@ -648,23 +884,40 @@ def generate_gold(
     wait_on_short_quota: bool = True,
     max_wait_seconds: float = 600,
     provider: str | None = None,
+    refresh_existing: bool = False,
+    case_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     if not SNAPSHOT_PATH.exists():
         raise RuntimeError("Collect public snapshots before generating gold examples.")
     selected_provider = dataset_provider_name(provider)
     configure_gemini_pacing(rpm)
+    reset_provider_usage()
     snapshots = json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
     rows = read_jsonl(GOLD_PATH)
     existing_ids = {str(row.get("id") or "") for row in rows}
+    existing_indexes = {str(row.get("id") or ""): index for index, row in enumerate(rows)}
     cases: list[tuple[dict[str, Any], str]] = []
     for instrument in manifest()["instruments"]:
         for action in instrument["actions"]:
             cases.append((instrument, action))
+    selected_case_ids = {value.strip() for value in case_ids or set() if value.strip()}
+    if selected_case_ids:
+        available_case_ids = {f"gold-{instrument['id']}-{action.lower()}" for instrument, action in cases}
+        unknown_case_ids = sorted(selected_case_ids - available_case_ids)
+        if unknown_case_ids:
+            raise RuntimeError(f"Unknown reasoning case IDs: {unknown_case_ids}")
+        cases = [
+            (instrument, action)
+            for instrument, action in cases
+            if f"gold-{instrument['id']}-{action.lower()}" in selected_case_ids
+        ]
     if limit > 0:
         cases = cases[:limit]
     generated = 0
+    refreshed = 0
     quota_exhausted = False
     quota: GeminiQuotaError | None = None
+    provider_error = ""
     waited_seconds = 0.0
     failures: dict[str, str] = {}
 
@@ -697,9 +950,15 @@ def generate_gold(
         if max_new > 0 and generated >= max_new:
             break
         case_id = f"gold-{instrument['id']}-{action.lower()}"
-        if case_id in existing_ids or instrument["id"] not in snapshots:
+        if instrument["id"] not in snapshots:
             continue
         facts = build_facts(instrument, snapshots[instrument["id"]], action)
+        existing_index = existing_indexes.get(case_id)
+        if existing_index is not None:
+            if not refresh_existing:
+                continue
+            if not selected_case_ids and canonical_json(rows[existing_index].get("facts") or {}) == canonical_json(facts):
+                continue
         rule_set = retrieve_rule_set(facts)
         output: dict[str, Any] | None = None
         first_errors: list[str] = []
@@ -711,10 +970,13 @@ def generate_gold(
                 if not wait_for_quota(exc):
                     quota_exhausted = True
                     break
+            except ProviderUnavailableError as exc:
+                provider_error = str(exc)
+                break
             except RuntimeError as exc:
                 first_errors = [f"Initial generation failed: {exc}"]
                 break
-        if quota_exhausted:
+        if quota_exhausted or provider_error:
             break
 
         row = case_row(
@@ -753,10 +1015,13 @@ def generate_gold(
                     if not wait_for_quota(exc):
                         quota_exhausted = True
                         break
+                except ProviderUnavailableError as exc:
+                    provider_error = str(exc)
+                    break
                 except RuntimeError as exc:
                     second_errors = [f"Repair failed: {exc}"]
                     break
-            if quota_exhausted:
+            if quota_exhausted or provider_error:
                 break
             if second_errors:
                 failures[case_id] = "; ".join(second_errors[:12])
@@ -774,8 +1039,13 @@ def generate_gold(
                 )
                 write_progress(rows, generated=generated, failures=failures)
                 continue
-        rows.append(row)
-        existing_ids.add(case_id)
+        if existing_index is None:
+            rows.append(row)
+            existing_ids.add(case_id)
+            existing_indexes[case_id] = len(rows) - 1
+        else:
+            rows[existing_index] = row
+            refreshed += 1
         generated += 1
         write_jsonl(GOLD_PATH, rows)
         failed_path = quarantine_path(case_id)
@@ -783,17 +1053,23 @@ def generate_gold(
             failed_path.unlink()
         failures.pop(case_id, None)
         write_progress(rows, generated=generated, failures=failures)
-    write_progress(rows, generated=generated, failures=failures, quota=quota)
+    write_progress(rows, generated=generated, failures=failures, quota=quota, provider_error=provider_error)
+    usage = provider_usage_snapshot()
     return {
         "examples": len(rows),
         "generated": generated,
+        "refreshed": refreshed,
         "quotaExhausted": quota_exhausted,
         "quota": quota.as_dict() if quota else None,
+        "providerUnavailable": bool(provider_error),
+        "providerError": provider_error or None,
         "waitedSeconds": round(waited_seconds, 3),
         "quarantined": quarantined_cases(),
         "path": str(GOLD_PATH),
         "progressPath": str(PROGRESS_PATH),
         "teacher": dataset_provider_metadata(selected_provider),
+        "usage": usage,
+        "estimatedCostUsd": estimated_provider_cost(selected_provider, usage),
     }
 
 
@@ -924,6 +1200,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("validate-manifest")
+    subparsers.add_parser("normalize-editorial")
     collect = subparsers.add_parser("collect")
     collect.add_argument("--limit", type=int, default=0)
     generate = subparsers.add_parser("generate")
@@ -933,6 +1210,12 @@ def main() -> int:
     generate.add_argument("--wait-on-short-quota", action=argparse.BooleanOptionalAction, default=True)
     generate.add_argument("--max-wait-seconds", type=float, default=600)
     generate.add_argument("--provider", choices=("gemini", "cerebras", "openai"), default=None)
+    generate.add_argument("--refresh-existing", action="store_true")
+    generate.add_argument("--case-id", action="append", default=[])
+    enrich = subparsers.add_parser("enrich-fundamentals")
+    enrich.add_argument("--limit", type=int, default=0)
+    enrich.add_argument("--delay-seconds", type=float, default=1.0)
+    enrich.add_argument("--refresh", action="store_true")
     audit = subparsers.add_parser("audit")
     audit.add_argument("--allow-partial", action="store_true")
     approve = subparsers.add_parser("approve")
@@ -942,6 +1225,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.command == "validate-manifest":
         result = validate_manifest()
+    elif args.command == "normalize-editorial":
+        result = normalise_gold_editorial()
     elif args.command == "collect":
         result = collect_snapshots(args.limit)
     elif args.command == "generate":
@@ -952,7 +1237,11 @@ def main() -> int:
             wait_on_short_quota=args.wait_on_short_quota,
             max_wait_seconds=args.max_wait_seconds,
             provider=args.provider,
+            refresh_existing=args.refresh_existing,
+            case_ids=set(args.case_id),
         )
+    elif args.command == "enrich-fundamentals":
+        result = enrich_fundamentals(args.limit, delay_seconds=max(0.0, args.delay_seconds), refresh=args.refresh)
     elif args.command == "audit":
         result = audit_gold(require_complete=not args.allow_partial)
     elif args.command == "approve":

@@ -81,6 +81,10 @@ class GeminiQuotaError(RuntimeError):
 ProviderQuotaError = GeminiQuotaError
 
 
+class ProviderUnavailableError(RuntimeError):
+    """Transient provider/network failure that should stop resumable dataset work."""
+
+
 GEMINI_PACING_RPM = 0.0
 GEMINI_LAST_REQUEST_AT = 0.0
 GEMINI_PACING_LOCK = threading.Lock()
@@ -597,7 +601,7 @@ def extract_chat_content(payload: dict[str, Any]) -> str:
 def gemini_json(prompt: dict[str, Any], system_prompt: str, temperature: float = 0.2) -> dict[str, Any]:
     api_key = os.environ.get("GEMINI_DATASET_API_KEY") or os.environ.get("GEMINI_API_KEY") or os.environ.get("LLM_API_KEY")
     if not api_key:
-        raise RuntimeError("GEMINI_API_KEY or LLM_API_KEY is required for Gemini dataset work.")
+        raise ProviderUnavailableError("GEMINI_API_KEY or LLM_API_KEY is required for Gemini dataset work.")
     model = os.environ.get("GEMINI_DATASET_MODEL") or os.environ.get("LLM_MODEL") or "gemini-3.5-flash"
     base_url = (
         os.environ.get("GEMINI_BASE_URL")
@@ -639,14 +643,19 @@ def gemini_json(prompt: dict[str, Any], system_prompt: str, temperature: float =
             detail = exc.read().decode("utf-8", errors="replace")
             if exc.code == 429:
                 raise parse_gemini_quota_error(detail) from exc
-            if exc.code not in retryable or attempt == attempts - 1:
+            if exc.code in retryable and attempt == attempts - 1:
+                raise ProviderUnavailableError(f"Gemini returned HTTP {exc.code}: {detail[:1000]}") from exc
+            if exc.code not in retryable:
                 raise RuntimeError(f"Gemini returned HTTP {exc.code}: {detail[:1000]}") from exc
         except URLError as exc:
             if attempt == attempts - 1:
-                raise RuntimeError(f"Could not reach Gemini: {exc.reason}") from exc
-        except (TimeoutError, json.JSONDecodeError) as exc:
+                raise ProviderUnavailableError(f"Could not reach Gemini: {exc.reason}") from exc
+        except TimeoutError as exc:
             if attempt == attempts - 1:
-                raise RuntimeError(f"Gemini returned an invalid or timed-out response: {exc}") from exc
+                raise ProviderUnavailableError(f"Gemini request timed out: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            if attempt == attempts - 1:
+                raise RuntimeError(f"Gemini returned invalid JSON: {exc}") from exc
         time.sleep(5 * (attempt + 1))
     raise RuntimeError("Gemini request failed after retries.")
 
@@ -660,7 +669,7 @@ def cerebras_json(
 ) -> dict[str, Any]:
     api_key = os.environ.get("CEREBRAS_API_KEY")
     if not api_key:
-        raise RuntimeError("CEREBRAS_API_KEY is required for Cerebras dataset work.")
+        raise ProviderUnavailableError("CEREBRAS_API_KEY is required for Cerebras dataset work.")
     model = os.environ.get("CEREBRAS_DATASET_MODEL") or "gpt-oss-120b"
     base_url = (os.environ.get("CEREBRAS_BASE_URL") or "https://api.cerebras.ai/v1").rstrip("/")
     response_format: dict[str, Any]
@@ -712,11 +721,15 @@ def cerebras_json(
         detail = exc.read().decode("utf-8", errors="replace")
         if exc.code == 429:
             raise parse_cerebras_quota_error(detail, exc.headers) from exc
+        if exc.code >= 500:
+            raise ProviderUnavailableError(f"Cerebras returned HTTP {exc.code}: {detail[:1000]}") from exc
         raise RuntimeError(f"Cerebras returned HTTP {exc.code}: {detail[:1000]}") from exc
     except URLError as exc:
-        raise RuntimeError(f"Could not reach Cerebras: {exc.reason}") from exc
-    except (TimeoutError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Cerebras returned an invalid or timed-out response: {exc}") from exc
+        raise ProviderUnavailableError(f"Could not reach Cerebras: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise ProviderUnavailableError(f"Cerebras request timed out: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Cerebras returned invalid JSON: {exc}") from exc
 
 
 def openai_json(
@@ -728,7 +741,7 @@ def openai_json(
 ) -> dict[str, Any]:
     api_key = os.environ.get("OPENAI_DATASET_API_KEY") or os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is required for OpenAI dataset work.")
+        raise ProviderUnavailableError("OPENAI_API_KEY is required for OpenAI dataset work.")
     model = os.environ.get("OPENAI_DATASET_MODEL") or "gpt-5.4-mini"
     base_url = (os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
     response_format: dict[str, Any]
@@ -780,11 +793,15 @@ def openai_json(
         detail = exc.read().decode("utf-8", errors="replace")
         if exc.code == 429:
             raise parse_openai_quota_error(detail, exc.headers) from exc
+        if exc.code >= 500:
+            raise ProviderUnavailableError(f"OpenAI returned HTTP {exc.code}: {detail[:1000]}") from exc
         raise RuntimeError(f"OpenAI returned HTTP {exc.code}: {detail[:1000]}") from exc
     except URLError as exc:
-        raise RuntimeError(f"Could not reach OpenAI: {exc.reason}") from exc
-    except (TimeoutError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"OpenAI returned an invalid or timed-out response: {exc}") from exc
+        raise ProviderUnavailableError(f"Could not reach OpenAI: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise ProviderUnavailableError(f"OpenAI request timed out: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"OpenAI returned invalid JSON: {exc}") from exc
 
 
 def dataset_json(

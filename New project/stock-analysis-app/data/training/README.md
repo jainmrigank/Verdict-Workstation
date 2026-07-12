@@ -15,7 +15,9 @@ Public snapshot caches, expanded rows, provider exports, model weights, adapters
 ```bash
 python3 tools/reasoning_dataset.py validate-manifest
 python3 tools/reasoning_dataset.py collect
-python3 tools/reasoning_dataset.py generate --rpm 15 --wait-on-short-quota --max-wait-seconds 600
+python3 tools/reasoning_dataset.py enrich-fundamentals
+python3 tools/reasoning_dataset.py generate --provider openai --rpm 5 --wait-on-short-quota --max-wait-seconds 600
+python3 tools/reasoning_dataset.py normalize-editorial
 python3 tools/reasoning_dataset.py audit
 python3 tools/review_candidates.py --dataset reasoning
 python3 tools/reasoning_dataset.py approve --requested-by-user
@@ -23,7 +25,9 @@ python3 tools/reasoning_dataset.py seal
 python3 tools/reasoning_dataset.py verify-seal
 ```
 
-`collect` checkpoints 63 timestamped Yahoo/MFapi snapshots in `data/generated`. `generate` paces Gemini at 15 RPM by default, checkpoints every completed response, honors bounded short-window retry delays, and stops cleanly on daily or hard quota limits. Use `--max-new` for a bounded run. A malformed or audit-failing response receives one constrained repair; a second failure is quarantined without discarding successful rows.
+`collect` checkpoints 63 timestamped Yahoo/MFapi snapshots in `data/generated`, and `enrich-fundamentals` fills missing equity evidence from the existing Screener integration. `generate` supports Gemini, Cerebras, and OpenAI dataset providers, checkpoints every completed response, reports token usage and estimated provider cost, and stops cleanly on quota or provider/network outages. Use `--max-new` for a bounded run. Use repeatable `--case-id` with `--refresh-existing` to regenerate only reviewed problem cases. A malformed or audit-failing response receives one constrained repair; a second failure is quarantined without discarding successful rows.
+
+`normalize-editorial` rewrites internal schema labels only in user-facing prose while preserving facts, `factRefs`, `ruleRefs`, verdicts, and the structured output contract. Run it before final human review and approval.
 
 Approval requires 75 train, 15 validation, and 30 sealed-evaluation gold rows. All scenarios for one instrument remain in one partition. The review workspace can edit expected JSON and records every grounding, applicability, coverage, and writing-quality check.
 

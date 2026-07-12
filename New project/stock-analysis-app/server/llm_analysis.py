@@ -43,6 +43,18 @@ STOPWORDS = {
     "into", "not", "only", "that", "the", "their", "this", "using", "was", "were", "with",
 }
 
+SECTOR_RULE_TERMS = (
+    (("information technology", "it service"), ("information technology", "software", "it services")),
+    (("automobile", "automotive"), ("automobile", "automotive", "vehicle")),
+    (("banking", "bank asset", "lender"), ("banking", "bank", "lender")),
+    (("insurance",), ("insurance",)),
+    (("cement",), ("cement",)),
+    (("steel",), ("steel",)),
+    (("hotel",), ("hotel", "hospitality")),
+    (("retail",), ("retail",)),
+    (("real estate", "real-estate"), ("real estate", "realty")),
+)
+
 SECTION_ARRAYS = {
     "decision": ("nextActions", "avoid", "priceDrivers", "risks", "dataGaps"),
     "chart": ("trend", "momentum", "volume", "volatility", "levels", "patterns"),
@@ -216,6 +228,7 @@ def retrieval_filters(context: dict[str, Any]) -> dict[str, Any]:
         "action": str(user_context.get("action") or "Buy").lower(),
         "horizon": _normalise_horizon(str(user_context.get("horizon") or "")),
         "sector": str(instrument.get("sector") or "").lower(),
+        "industry": str(instrument.get("industry") or "").lower(),
         "requestedAreas": requested_areas,
     }
 
@@ -227,6 +240,27 @@ def _allows(values: list[str], selected: str, normaliser=lambda value: value.str
     return bool({"all", "any", "unknown"} & allowed) or normaliser(selected) in allowed
 
 
+def _inferred_sector_terms(rule: dict[str, Any]) -> list[str]:
+    if rule.get("sectors"):
+        return [str(value).strip().lower() for value in rule["sectors"]]
+    identity = " ".join(str(rule.get(key) or "") for key in ("id", "module", "title", "chapter")).lower()
+    if "sector" not in identity:
+        return []
+    inferred: list[str] = []
+    for needles, terms in SECTOR_RULE_TERMS:
+        if any(needle in identity for needle in needles):
+            inferred.extend(terms)
+    return list(dict.fromkeys(inferred))
+
+
+def _sector_allows(rule: dict[str, Any], sector: str, industry: str) -> bool:
+    allowed = _inferred_sector_terms(rule)
+    if not allowed or not (sector or industry):
+        return True
+    selected = [value.strip().lower() for value in (sector, industry) if value.strip()]
+    return any(term == value or term in value or value in term for term in allowed for value in selected)
+
+
 def rule_is_applicable(rule: dict[str, Any], filters: dict[str, Any]) -> bool:
     if not _allows(rule.get("instrumentTypes") or [], filters["instrumentType"]):
         return False
@@ -234,7 +268,7 @@ def rule_is_applicable(rule: dict[str, Any], filters: dict[str, Any]) -> bool:
         return False
     if not _allows(rule.get("horizons") or [], filters["horizon"], _normalise_horizon):
         return False
-    if not _allows(rule.get("sectors") or [], filters["sector"]):
+    if not _sector_allows(rule, filters["sector"], filters["industry"]):
         return False
     standard_areas = {"decision", "chart", "company", "portfolio", "reasoning", "coach"}
     rule_areas = {str(value).lower() for value in rule.get("appliesTo") or []}
