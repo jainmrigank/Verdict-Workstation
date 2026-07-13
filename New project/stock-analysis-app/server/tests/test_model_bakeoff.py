@@ -16,6 +16,7 @@ from tools.gemma_bakeoff import (
     detect_response_markers,
     directory_tree_hash,
     dry_run,
+    gemma4_projection_dtype_state,
     latest_checkpoint,
     prepare_lora_model,
     resolve_resume_checkpoint,
@@ -89,6 +90,17 @@ class ModelBakeoffTests(unittest.TestCase):
         model = Model()
         self.assertEqual(align_gemma4_projection_dtype(model), ["model.language_model"])
         self.assertEqual(Module.per_layer_model_projection.weight.dtype, "float32")
+        self.assertEqual(
+            gemma4_projection_dtype_state(model),
+            [
+                {
+                    "module": "model.language_model",
+                    "embedding": "float32",
+                    "projection": "float32",
+                    "projectionType": "Projection",
+                }
+            ],
+        )
 
     def test_gemma4_projection_alignment_runs_after_lora_preparation(self) -> None:
         class Weight:

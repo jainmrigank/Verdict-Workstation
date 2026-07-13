@@ -192,6 +192,24 @@ def align_gemma4_projection_dtype(model: Any) -> list[str]:
     return adjusted
 
 
+def gemma4_projection_dtype_state(model: Any) -> list[dict[str, str]]:
+    state: list[dict[str, str]] = []
+    for name, module in model.named_modules():
+        embedding = getattr(module, "embed_tokens", None)
+        projection = getattr(module, "per_layer_model_projection", None)
+        if embedding is None and projection is None:
+            continue
+        state.append(
+            {
+                "module": name or "<root>",
+                "embedding": str(getattr(getattr(embedding, "weight", None), "dtype", "unavailable")),
+                "projection": str(getattr(getattr(projection, "weight", None), "dtype", "unavailable")),
+                "projectionType": type(projection).__name__ if projection is not None else "unavailable",
+            }
+        )
+    return state
+
+
 def rounded_sequence_length(maximum_tokens: int, headroom: int = SEQUENCE_HEADROOM, multiple: int = SEQUENCE_MULTIPLE) -> int:
     if maximum_tokens <= 0:
         raise ValueError("maximum_tokens must be positive")
@@ -594,6 +612,7 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
         revision=base_revision,
     )
     model, dtype_adjustments = prepare_lora_model(FastModel, model, args)
+    dtype_state = gemma4_projection_dtype_state(model)
     tokenizer = get_chat_template(tokenizer, chat_template=config["chatTemplate"])
     texts = [message_text(tokenizer, row["messages"]) for row in [*train_rows, *validation_rows]]
     loaded_lengths = [len(tokenize_text(tokenizer, text, add_special_tokens=True)["input_ids"]) for text in texts]
@@ -643,6 +662,7 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
         "createdAt": datetime.now(UTC).isoformat(),
     }
     if args.preflight:
+        print(json.dumps({"gemmaDtypeState": dtype_state, "dtypeAdjustments": dtype_adjustments}), file=sys.stderr)
         longest_text = texts[max(range(len(loaded_lengths)), key=loaded_lengths.__getitem__)]
         preflight["trainingStep"] = run_training_memory_probe(
             model,
