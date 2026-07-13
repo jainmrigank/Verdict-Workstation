@@ -177,6 +177,21 @@ def tokenize_text(tokenizer: Any, text: str, **kwargs: Any) -> Any:
     return tokenizer(text=text, **kwargs)
 
 
+def align_gemma4_projection_dtype(model: Any) -> list[str]:
+    adjusted: list[str] = []
+    for name, module in model.named_modules():
+        embedding = getattr(module, "embed_tokens", None)
+        projection = getattr(module, "per_layer_model_projection", None)
+        embedding_weight = getattr(embedding, "weight", None)
+        projection_weight = getattr(projection, "weight", None)
+        if embedding_weight is None or projection_weight is None:
+            continue
+        if projection_weight.dtype != embedding_weight.dtype:
+            projection.to(dtype=embedding_weight.dtype)
+            adjusted.append(name or "<root>")
+    return adjusted
+
+
 def rounded_sequence_length(maximum_tokens: int, headroom: int = SEQUENCE_HEADROOM, multiple: int = SEQUENCE_MULTIPLE) -> int:
     if maximum_tokens <= 0:
         raise ValueError("maximum_tokens must be positive")
@@ -573,6 +588,7 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
         full_finetuning=False,
         revision=base_revision,
     )
+    dtype_adjustments = align_gemma4_projection_dtype(model)
     tokenizer = get_chat_template(tokenizer, chat_template=config["chatTemplate"])
     texts = [message_text(tokenizer, row["messages"]) for row in [*train_rows, *validation_rows]]
     loaded_lengths = [len(tokenize_text(tokenizer, text, add_special_tokens=True)["input_ids"]) for text in texts]
@@ -597,6 +613,7 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
         "cudaDevice": torch.cuda.get_device_name(0),
         "cudaTotalMemoryBytes": int(torch.cuda.get_device_properties(0).total_memory),
         "baseModelRevision": base_revision,
+        "dtypeAdjustments": dtype_adjustments,
     }
     preflight = {
         "schemaVersion": "gemma-bakeoff-preflight.v1",
