@@ -9,6 +9,7 @@ import importlib.metadata
 import inspect
 import json
 import math
+import os
 import platform
 import re
 import subprocess
@@ -27,6 +28,7 @@ PILOT_DATASET_HASH = "6a374ec58b9fd134de5cf1ccdeda33384ba24c02935c4af2b3e3d8a6bb
 SEQUENCE_HEADROOM = 128
 SEQUENCE_MULTIPLE = 256
 PACKAGE_NAMES = ("accelerate", "bitsandbytes", "datasets", "peft", "torch", "transformers", "trl", "unsloth")
+DEFAULT_PYTORCH_ALLOC_CONF = "expandable_segments:True"
 MODEL_CONFIGS = {
     "gemma4-e2b": {
         "model": "unsloth/gemma-4-E2B-it-unsloth-bnb-4bit",
@@ -301,6 +303,10 @@ def installed_versions() -> dict[str, str]:
     return versions
 
 
+def configure_pytorch_allocator() -> str:
+    return os.environ.setdefault("PYTORCH_ALLOC_CONF", DEFAULT_PYTORCH_ALLOC_CONF)
+
+
 def artifact_checksums(run_root: Path, roots: list[Path]) -> dict[str, str]:
     files: list[Path] = []
     for root in roots:
@@ -557,6 +563,7 @@ def prepare_lora_model(
 
 
 def run_training(args: argparse.Namespace) -> dict[str, Any]:
+    allocator_config = configure_pytorch_allocator()
     expected_hash = args.expected_dataset_hash
     validation = dry_run(args.data_root, args.final, expected_hash, args.evaluation_seal)
     if validation["errors"]:
@@ -647,6 +654,7 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
         "cudaTotalMemoryBytes": int(torch.cuda.get_device_properties(0).total_memory),
         "baseModelRevision": base_revision,
         "dtypeAdjustments": dtype_adjustments,
+        "pytorchAllocator": allocator_config,
     }
     preflight = {
         "schemaVersion": "gemma-bakeoff-preflight.v1",

@@ -13,6 +13,7 @@ from tools.gemma_bakeoff import (
     align_gemma4_projection_dtype,
     artifact_checksums,
     audit_response_masks,
+    configure_pytorch_allocator,
     detect_response_markers,
     directory_tree_hash,
     dry_run,
@@ -66,6 +67,15 @@ def training_row(index: int, split: str) -> dict:
 
 
 class ModelBakeoffTests(unittest.TestCase):
+    def test_pytorch_allocator_defaults_to_expandable_segments(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(configure_pytorch_allocator(), "expandable_segments:True")
+            self.assertEqual(os.environ["PYTORCH_ALLOC_CONF"], "expandable_segments:True")
+
+    def test_pytorch_allocator_preserves_explicit_configuration(self) -> None:
+        with patch.dict(os.environ, {"PYTORCH_ALLOC_CONF": "max_split_size_mb:128"}, clear=True):
+            self.assertEqual(configure_pytorch_allocator(), "max_split_size_mb:128")
+
     def test_gemma4_projection_follows_embedding_dtype(self) -> None:
         class Weight:
             def __init__(self, dtype: str) -> None:
