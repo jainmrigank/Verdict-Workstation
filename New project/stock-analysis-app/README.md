@@ -193,7 +193,7 @@ For an isolated GPT-5.4 mini teacher comparison, keep the production `LLM_MODEL`
 python3 tools/teacher_bakeoff.py --provider openai --limit 3 --rpm 2
 ```
 
-The included `notebooks/gemma_bakeoff_colab.ipynb` trains `Gemma 4 E4B IT` or, when free accelerator memory permits, `Gemma 4 12B IT` with Unsloth QLoRA. Training enforces no truncation, response-only loss, deterministic seeds, and saved run manifests. Model artifacts and generated split files remain untracked.
+The included `notebooks/gemma_bakeoff_colab.ipynb` trains `Gemma 4 E4B IT` or, when a T4 cannot pass its memory preflight, the smaller `Gemma 4 E2B IT` hardware fallback. `Gemma 4 12B IT` remains an optional stronger-accelerator experiment. Training enforces no truncation, response-only loss, deterministic seeds, and saved run manifests. Model artifacts and generated split files remain untracked.
 
 After the 75/15 pilot improves validation quality, `tools/llm_dataset.py expand` creates 1,080 audited descendants and preserves each gold case's split lineage. `tools/model_bakeoff_eval.py` compares base Gemini, untuned Gemma, and tuned Gemma with reports bound to exact source hashes, artifacts, responses, and human reviews. The 30-case evaluation set requires a passing validation comparison and allows each model role to run only once; promotion remains blocked unless every grounding, schema, completeness, human-quality, reliability, and 120-second latency gate passes. See `data/training/README.md` for the complete commands.
 

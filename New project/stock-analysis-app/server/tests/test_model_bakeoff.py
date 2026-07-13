@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tools.gemma_bakeoff import (
+    MODEL_CONFIGS,
     artifact_checksums,
     audit_response_masks,
     detect_response_markers,
@@ -61,6 +62,16 @@ def training_row(index: int, split: str) -> dict:
 
 
 class ModelBakeoffTests(unittest.TestCase):
+    def test_small_gemma_candidates_pin_the_loaded_quantized_repository(self) -> None:
+        self.assertEqual(
+            MODEL_CONFIGS["gemma4-e2b"]["model"],
+            "unsloth/gemma-4-E2B-it-unsloth-bnb-4bit",
+        )
+        self.assertEqual(
+            MODEL_CONFIGS["gemma4-e4b"]["model"],
+            "unsloth/gemma-4-E4B-it-unsloth-bnb-4bit",
+        )
+
     def test_teacher_bakeoff_checkpoints_candidate_without_mutating_baseline(self) -> None:
         baseline = {
             "id": "gold-one",
