@@ -20,6 +20,7 @@ from tools.gemma_bakeoff import (
     resolve_sequence_length,
     rounded_sequence_length,
     sha256_file,
+    tokenize_text,
     validate_completed_run,
     verify_or_write_run_identity,
 )
@@ -62,6 +63,13 @@ def training_row(index: int, split: str) -> dict:
 
 
 class ModelBakeoffTests(unittest.TestCase):
+    def test_tokenize_text_uses_multimodal_processor_text_keyword(self) -> None:
+        class Processor:
+            def __call__(self, *, text: str, **_kwargs: object) -> dict[str, list[int]]:
+                return {"input_ids": [len(text)]}
+
+        self.assertEqual(tokenize_text(Processor(), "analysis"), {"input_ids": [8]})
+
     def test_small_gemma_candidates_pin_the_loaded_quantized_repository(self) -> None:
         self.assertEqual(
             MODEL_CONFIGS["gemma4-e2b"]["model"],

@@ -171,6 +171,12 @@ def message_text(tokenizer: Any, messages: list[dict[str, Any]]) -> str:
     return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False).removeprefix("<bos>")
 
 
+def tokenize_text(tokenizer: Any, text: str, **kwargs: Any) -> Any:
+    # Gemma 4 FastModel returns a multimodal processor whose first positional
+    # argument is images. The explicit keyword also works for text tokenizers.
+    return tokenizer(text=text, **kwargs)
+
+
 def rounded_sequence_length(maximum_tokens: int, headroom: int = SEQUENCE_HEADROOM, multiple: int = SEQUENCE_MULTIPLE) -> int:
     if maximum_tokens <= 0:
         raise ValueError("maximum_tokens must be positive")
@@ -392,7 +398,7 @@ def _last_subsequence_end(values: list[int], needle: list[int]) -> int | None:
 def audit_response_masks(trainer: Any, tokenizer: Any | None = None, response_marker: str = "") -> dict[str, Any]:
     result: dict[str, Any] = {}
     marker_tokens = (
-        list(tokenizer(response_marker, add_special_tokens=False)["input_ids"])
+        list(tokenize_text(tokenizer, response_marker, add_special_tokens=False)["input_ids"])
         if tokenizer is not None and response_marker
         else []
     )
@@ -445,12 +451,12 @@ def run_training_memory_probe(
     bitsandbytes: Any,
     learning_rate: float,
 ) -> dict[str, Any]:
-    encoded = tokenizer(text, return_tensors="pt", add_special_tokens=True)
+    encoded = tokenize_text(tokenizer, text, return_tensors="pt", add_special_tokens=True)
     encoded = {key: value.to("cuda") for key, value in encoded.items()}
     labels = encoded["input_ids"].clone()
     sequence_tokens = int(encoded["input_ids"].shape[-1])
     response_end = text.index(response_marker) + len(response_marker)
-    prefix_tokens = len(tokenizer(text[:response_end], add_special_tokens=True)["input_ids"])
+    prefix_tokens = len(tokenize_text(tokenizer, text[:response_end], add_special_tokens=True)["input_ids"])
     labels[:, :prefix_tokens] = -100
     assistant_tokens = int((labels != -100).sum().item())
     if assistant_tokens <= 0:
@@ -555,7 +561,7 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
     probe_tokenizer = AutoTokenizer.from_pretrained(config["model"], revision=base_revision)
     probe_tokenizer = get_chat_template(probe_tokenizer, chat_template=config["chatTemplate"])
     probe_texts = [message_text(probe_tokenizer, row["messages"]) for row in [*train_rows, *validation_rows]]
-    token_lengths = [len(probe_tokenizer(text, add_special_tokens=True)["input_ids"]) for text in probe_texts]
+    token_lengths = [len(tokenize_text(probe_tokenizer, text, add_special_tokens=True)["input_ids"]) for text in probe_texts]
     maximum_tokens = max(token_lengths)
     sequence_length = resolve_sequence_length(maximum_tokens, args.max_seq_length)
 
@@ -569,7 +575,7 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
     )
     tokenizer = get_chat_template(tokenizer, chat_template=config["chatTemplate"])
     texts = [message_text(tokenizer, row["messages"]) for row in [*train_rows, *validation_rows]]
-    loaded_lengths = [len(tokenizer(text, add_special_tokens=True)["input_ids"]) for text in texts]
+    loaded_lengths = [len(tokenize_text(tokenizer, text, add_special_tokens=True)["input_ids"]) for text in texts]
     if max(loaded_lengths) > sequence_length:
         raise RuntimeError(
             f"No-truncation gate failed after model load: {max(loaded_lengths)} tokens exceed {sequence_length}."
