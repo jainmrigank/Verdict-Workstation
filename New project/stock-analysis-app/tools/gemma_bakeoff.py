@@ -177,7 +177,7 @@ def tokenize_text(tokenizer: Any, text: str, **kwargs: Any) -> Any:
     return tokenizer(text=text, **kwargs)
 
 
-def align_gemma4_projection_dtype(model: Any) -> list[str]:
+def align_gemma4_projection_dtype(model: Any, activation_dtype: Any | None = None) -> list[str]:
     adjusted: list[str] = []
     for name, module in model.named_modules():
         embedding = getattr(module, "embed_tokens", None)
@@ -186,8 +186,9 @@ def align_gemma4_projection_dtype(model: Any) -> list[str]:
         projection_weight = getattr(projection, "weight", None)
         if embedding_weight is None or projection_weight is None:
             continue
-        if projection_weight.dtype != embedding_weight.dtype:
-            projection.to(dtype=embedding_weight.dtype)
+        target_dtype = activation_dtype or embedding_weight.dtype
+        if projection_weight.dtype != target_dtype:
+            projection.to(dtype=target_dtype)
             adjusted.append(name or "<root>")
     return adjusted
 
@@ -544,9 +545,14 @@ def attach_lora(FastModel: Any, model: Any, args: argparse.Namespace) -> Any:
     )
 
 
-def prepare_lora_model(FastModel: Any, model: Any, args: argparse.Namespace) -> tuple[Any, list[str]]:
+def prepare_lora_model(
+    FastModel: Any,
+    model: Any,
+    args: argparse.Namespace,
+    activation_dtype: Any | None = None,
+) -> tuple[Any, list[str]]:
     model = attach_lora(FastModel, model, args)
-    return model, align_gemma4_projection_dtype(model)
+    return model, align_gemma4_projection_dtype(model, activation_dtype)
 
 
 def run_training(args: argparse.Namespace) -> dict[str, Any]:
@@ -611,7 +617,9 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
         full_finetuning=False,
         revision=base_revision,
     )
-    model, dtype_adjustments = prepare_lora_model(FastModel, model, args)
+    # Gemma 4's scaled text embedding intentionally emits float32 activations
+    # before the per-layer projection, even when its stored weight is float16.
+    model, dtype_adjustments = prepare_lora_model(FastModel, model, args, torch.float32)
     dtype_state = gemma4_projection_dtype_state(model)
     tokenizer = get_chat_template(tokenizer, chat_template=config["chatTemplate"])
     texts = [message_text(tokenizer, row["messages"]) for row in [*train_rows, *validation_rows]]

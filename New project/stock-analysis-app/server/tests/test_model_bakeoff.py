@@ -134,6 +134,31 @@ class ModelBakeoffTests(unittest.TestCase):
         self.assertEqual(adjustments, ["model.language_model"])
         self.assertEqual(Module.per_layer_model_projection.weight.dtype, "float32")
 
+    def test_gemma4_projection_can_follow_float32_activation_dtype(self) -> None:
+        class Weight:
+            def __init__(self, dtype: str) -> None:
+                self.dtype = dtype
+
+        class Projection:
+            def __init__(self) -> None:
+                self.weight = Weight("float16")
+
+            def to(self, *, dtype: str) -> "Projection":
+                self.weight.dtype = dtype
+                return self
+
+        class Module:
+            embed_tokens = type("Embedding", (), {"weight": Weight("float16")})()
+            per_layer_model_projection = Projection()
+
+        class Model:
+            def named_modules(self) -> list[tuple[str, object]]:
+                return [("model.language_model", Module())]
+
+        model = Model()
+        self.assertEqual(align_gemma4_projection_dtype(model, "float32"), ["model.language_model"])
+        self.assertEqual(Module.per_layer_model_projection.weight.dtype, "float32")
+
     def test_tokenize_text_uses_multimodal_processor_text_keyword(self) -> None:
         class Processor:
             def __call__(self, *, text: str, **_kwargs: object) -> dict[str, list[int]]:
