@@ -88,7 +88,10 @@ class ModelBakeoffTests(unittest.TestCase):
                 return [("model.language_model", Module())]
 
         model = Model()
-        self.assertEqual(align_gemma4_projection_dtype(model), ["model.language_model"])
+        self.assertEqual(
+            align_gemma4_projection_dtype(model),
+            ["model.language_model.per_layer_model_projection"],
+        )
         self.assertEqual(Module.per_layer_model_projection.weight.dtype, "float32")
         self.assertEqual(
             gemma4_projection_dtype_state(model),
@@ -131,7 +134,7 @@ class ModelBakeoffTests(unittest.TestCase):
 
         model, adjustments = prepare_lora_model(FastModel(), Model(), argparse.Namespace(lora_rank=16, seed=560))
         self.assertIsInstance(model, Model)
-        self.assertEqual(adjustments, ["model.language_model"])
+        self.assertEqual(adjustments, ["model.language_model.per_layer_model_projection"])
         self.assertEqual(Module.per_layer_model_projection.weight.dtype, "float32")
 
     def test_gemma4_projection_can_follow_float32_activation_dtype(self) -> None:
@@ -156,8 +159,42 @@ class ModelBakeoffTests(unittest.TestCase):
                 return [("model.language_model", Module())]
 
         model = Model()
-        self.assertEqual(align_gemma4_projection_dtype(model, "float32"), ["model.language_model"])
+        self.assertEqual(
+            align_gemma4_projection_dtype(model, "float32"),
+            ["model.language_model.per_layer_model_projection"],
+        )
         self.assertEqual(Module.per_layer_model_projection.weight.dtype, "float32")
+
+    def test_gemma4_ple_gate_and_projection_follow_activation_dtype(self) -> None:
+        class Weight:
+            def __init__(self) -> None:
+                self.dtype = "float16"
+
+        class Projection:
+            def __init__(self) -> None:
+                self.weight = Weight()
+
+            def to(self, *, dtype: str) -> "Projection":
+                self.weight.dtype = dtype
+                return self
+
+        class Layer:
+            per_layer_input_gate = Projection()
+            per_layer_projection = Projection()
+
+        class Model:
+            def named_modules(self) -> list[tuple[str, object]]:
+                return [("model.language_model.layers.0", Layer())]
+
+        self.assertEqual(
+            align_gemma4_projection_dtype(Model(), "float32"),
+            [
+                "model.language_model.layers.0.per_layer_input_gate",
+                "model.language_model.layers.0.per_layer_projection",
+            ],
+        )
+        self.assertEqual(Layer.per_layer_input_gate.weight.dtype, "float32")
+        self.assertEqual(Layer.per_layer_projection.weight.dtype, "float32")
 
     def test_tokenize_text_uses_multimodal_processor_text_keyword(self) -> None:
         class Processor:

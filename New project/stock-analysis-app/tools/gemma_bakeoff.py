@@ -181,15 +181,16 @@ def align_gemma4_projection_dtype(model: Any, activation_dtype: Any | None = Non
     adjusted: list[str] = []
     for name, module in model.named_modules():
         embedding = getattr(module, "embed_tokens", None)
-        projection = getattr(module, "per_layer_model_projection", None)
         embedding_weight = getattr(embedding, "weight", None)
-        projection_weight = getattr(projection, "weight", None)
-        if embedding_weight is None or projection_weight is None:
-            continue
-        target_dtype = activation_dtype or embedding_weight.dtype
-        if projection_weight.dtype != target_dtype:
-            projection.to(dtype=target_dtype)
-            adjusted.append(name or "<root>")
+        for attribute in ("per_layer_model_projection", "per_layer_input_gate", "per_layer_projection"):
+            projection = getattr(module, attribute, None)
+            projection_weight = getattr(projection, "weight", None)
+            target_dtype = activation_dtype or getattr(embedding_weight, "dtype", None)
+            if projection_weight is None or target_dtype is None:
+                continue
+            if projection_weight.dtype != target_dtype:
+                projection.to(dtype=target_dtype)
+                adjusted.append(f"{name or '<root>'}.{attribute}")
     return adjusted
 
 
@@ -617,8 +618,8 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
         full_finetuning=False,
         revision=base_revision,
     )
-    # Gemma 4's scaled text embedding intentionally emits float32 activations
-    # before the per-layer projection, even when its stored weight is float16.
+    # Unsloth uses float32 activations for Gemma 4 on GPUs without bfloat16.
+    # The PLE linears are not quantized and must follow that activation dtype.
     model, dtype_adjustments = prepare_lora_model(FastModel, model, args, torch.float32)
     dtype_state = gemma4_projection_dtype_state(model)
     tokenizer = get_chat_template(tokenizer, chat_template=config["chatTemplate"])
