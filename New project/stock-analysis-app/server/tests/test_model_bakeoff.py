@@ -220,7 +220,7 @@ class ModelBakeoffTests(unittest.TestCase):
             )
             identity = {
                 "candidate": args.model,
-                "baseModel": "unsloth/gemma-4-E4B-it",
+                "baseModel": "unsloth/gemma-4-E4B-it-unsloth-bnb-4bit",
                 "baseModelRevision": "a" * 40,
                 "datasetHash": "dataset",
                 "datasetFiles": {},

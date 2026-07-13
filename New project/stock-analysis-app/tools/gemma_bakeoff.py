@@ -29,7 +29,10 @@ SEQUENCE_MULTIPLE = 256
 PACKAGE_NAMES = ("accelerate", "bitsandbytes", "datasets", "peft", "torch", "transformers", "trl", "unsloth")
 MODEL_CONFIGS = {
     "gemma4-e4b": {
-        "model": "unsloth/gemma-4-E4B-it",
+        # Pin the repository that FastModel actually loads. Passing the 16-bit
+        # repository revision while Unsloth redirects to this 4-bit repository
+        # makes the redirected config lookup use an unrelated commit hash.
+        "model": "unsloth/gemma-4-E4B-it-unsloth-bnb-4bit",
         "chatTemplate": "gemma-4",
         "ggufQuantization": "Q8_0",
     },
