@@ -526,6 +526,11 @@ def attach_lora(FastModel: Any, model: Any, args: argparse.Namespace) -> Any:
     )
 
 
+def prepare_lora_model(FastModel: Any, model: Any, args: argparse.Namespace) -> tuple[Any, list[str]]:
+    model = attach_lora(FastModel, model, args)
+    return model, align_gemma4_projection_dtype(model)
+
+
 def run_training(args: argparse.Namespace) -> dict[str, Any]:
     expected_hash = args.expected_dataset_hash
     validation = dry_run(args.data_root, args.final, expected_hash, args.evaluation_seal)
@@ -588,7 +593,7 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
         full_finetuning=False,
         revision=base_revision,
     )
-    dtype_adjustments = align_gemma4_projection_dtype(model)
+    model, dtype_adjustments = prepare_lora_model(FastModel, model, args)
     tokenizer = get_chat_template(tokenizer, chat_template=config["chatTemplate"])
     texts = [message_text(tokenizer, row["messages"]) for row in [*train_rows, *validation_rows]]
     loaded_lengths = [len(tokenize_text(tokenizer, text, add_special_tokens=True)["input_ids"]) for text in texts]
@@ -638,7 +643,6 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
         "createdAt": datetime.now(UTC).isoformat(),
     }
     if args.preflight:
-        model = attach_lora(FastModel, model, args)
         longest_text = texts[max(range(len(loaded_lengths)), key=loaded_lengths.__getitem__)]
         preflight["trainingStep"] = run_training_memory_probe(
             model,
@@ -677,8 +681,6 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
         raise RuntimeError(
             "Training requires a matching training-step preflight for this exact run: " + ", ".join(sorted(set(preflight_errors)))
         )
-
-    model = attach_lora(FastModel, model, args)
 
     def dataset(rows: list[dict[str, Any]]) -> Any:
         return Dataset.from_list([{"text": message_text(tokenizer, row["messages"])} for row in rows])

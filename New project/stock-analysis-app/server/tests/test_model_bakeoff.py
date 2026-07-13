@@ -17,6 +17,7 @@ from tools.gemma_bakeoff import (
     directory_tree_hash,
     dry_run,
     latest_checkpoint,
+    prepare_lora_model,
     resolve_resume_checkpoint,
     resolve_sequence_length,
     rounded_sequence_length,
@@ -87,6 +88,38 @@ class ModelBakeoffTests(unittest.TestCase):
 
         model = Model()
         self.assertEqual(align_gemma4_projection_dtype(model), ["model.language_model"])
+        self.assertEqual(Module.per_layer_model_projection.weight.dtype, "float32")
+
+    def test_gemma4_projection_alignment_runs_after_lora_preparation(self) -> None:
+        class Weight:
+            def __init__(self, dtype: str) -> None:
+                self.dtype = dtype
+
+        class Projection:
+            def __init__(self) -> None:
+                self.weight = Weight("float16")
+
+            def to(self, *, dtype: str) -> "Projection":
+                self.weight.dtype = dtype
+                return self
+
+        class Module:
+            embed_tokens = type("Embedding", (), {"weight": Weight("float16")})()
+            per_layer_model_projection = Projection()
+
+        class Model:
+            def named_modules(self) -> list[tuple[str, object]]:
+                return [("model.language_model", Module())]
+
+        class FastModel:
+            @staticmethod
+            def get_peft_model(model: Model, **_kwargs: object) -> Model:
+                Module.embed_tokens.weight.dtype = "float32"
+                return model
+
+        model, adjustments = prepare_lora_model(FastModel(), Model(), argparse.Namespace(lora_rank=16, seed=560))
+        self.assertIsInstance(model, Model)
+        self.assertEqual(adjustments, ["model.language_model"])
         self.assertEqual(Module.per_layer_model_projection.weight.dtype, "float32")
 
     def test_tokenize_text_uses_multimodal_processor_text_keyword(self) -> None:
