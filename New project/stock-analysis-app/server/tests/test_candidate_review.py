@@ -73,6 +73,12 @@ class CandidateReviewTests(unittest.TestCase):
         row["output"]["decision"]["nextActions"][0]["text"] += " Estimated position value is 25.5%."
         self.assertEqual(unsupported_numeric_claims(row), [25.5])
 
+    def test_candidate_approval_runs_numeric_grounding_gate(self) -> None:
+        rows = generate_candidates(120)
+        rows[0]["output"]["decision"]["summary"] += " Invented level 9999."
+        result = audit_candidates(rows)
+        self.assertTrue(any("unsupported numeric claims" in error for error in result["errors"]))
+
     def test_indian_listing_rejects_invented_dollar_currency(self) -> None:
         row = generate_candidates(1)[0]
         row["facts"]["instrument"]["symbol"] = "NSE:TEST"

@@ -54,10 +54,26 @@ Once all reasoning gold is approved:
 
 ```bash
 python3 tools/llm_dataset.py export --pilot
-python3 tools/gemma_bakeoff.py --dry-run --model gemma4-e4b
+python3 tools/gemma_bakeoff.py --dry-run --model gemma4-e4b \
+  --expected-dataset-hash 6a374ec58b9fd134de5cf1ccdeda33384ba24c02935c4af2b3e3d8a6bbd75c09
 ```
 
-Upload `pilot_train.jsonl` and `pilot_validation.jsonl` to the included Colab notebook. Train `gemma4-e4b`; try `gemma4-12b` only when the free accelerator can load it without truncation.
+First capture the validation baseline with identical RAG input and a recorded generation profile:
+
+```bash
+python3 tools/model_bakeoff_eval.py run \
+  --name base-gemini-runtime-pilot-v9 \
+  --provider gemini \
+  --reuse-responses-from base-gemini-runtime-pilot-v8 \
+  --temperature 0.1 \
+  --max-output-tokens 8192 \
+  --reasoning-effort minimal \
+  --rpm 15
+```
+
+The included Colab notebook requires typed confirmation before mounting private Drive or uploading files. It checks out an explicit reviewed commit, installs the tracked dependency lock including Torch, accepts exactly `pilot_train.jsonl` and `pilot_validation.jsonl`, writes checkpoints and artifacts to private Drive, derives sequence length from all 90 fully rendered examples, and refuses truncation. Preflight runs one full forward, backward, and 8-bit optimizer step on the longest example and records peak GPU memory. Training refuses to start unless that exact run name, dataset, model revision, package environment, GPU, and hyperparameter set has a matching preflight proof. Train `gemma4-e4b` rank 16 for two epochs first. Use the separately preflighted rank 8, one-epoch fallback only after a validation regression; preflight `gemma4-12b` only after the E4B review.
+
+Every completed run records the Git commit, base revision, GPU/CUDA and package environment, dataset and artifact hashes, training metrics, checkpoints, adapter, merged Hugging Face model, and Q8_0 GGUF. Generated files remain ignored and must not be uploaded to a public model repository.
 
 Expand only after the pilot improves on validation:
 
@@ -79,19 +95,49 @@ Generated rows keep `reviewStatus=gemini-generated`. They pass strict automated 
 Run base Gemini and local Gemma against validation first:
 
 ```bash
-python3 tools/model_bakeoff_eval.py run --name base-gemini --provider gemini
-python3 tools/model_bakeoff_eval.py run --name tuned-gemma --provider local
+python3 tools/model_bakeoff_eval.py run --name base-gemini-runtime-pilot-v9 --provider gemini --reasoning-effort minimal --max-output-tokens 8192
+python3 tools/model_bakeoff_eval.py run \
+  --name untuned-gemma-mlx-pilot --provider local --runtime mlx --quantization MLX-8bit \
+  --model-artifact-hash sha256-from-untuned-runtime-manifest
+python3 tools/model_bakeoff_eval.py run \
+  --name tuned-gemma-mlx-pilot --provider local --runtime mlx --quantization MLX-8bit \
+  --model-artifact-hash sha256-from-runtime-manifest
 ```
 
-The final 30-case set requires an intact evaluation seal plus the explicit `--split eval --allow-sealed-eval` gate. Compare reports only after adding the recorded human-score file:
+For the llama.cpp compatibility smoke test, use a separate local server and run only these representative validation cases:
+
+```bash
+python3 tools/model_bakeoff_eval.py run \
+  --name tuned-gemma-llamacpp-smoke --provider local --runtime llama.cpp --quantization Q8_0 \
+  --case-ids gold-nse-icicibank-buy,gold-nse-icicibank-sell,gold-fund-icici-nifty50-buy
+```
+
+Only run all 15 llama.cpp validation cases if the smoke responses match the MLX reference structurally and semantically.
+
+The final 30-case set remains untouched during the pilot. After validation passes, each Gemini, untuned, and tuned role can consume it only once, using `--split eval --allow-sealed-eval --validation-comparison <passing-comparison.json> --evaluation-role <role>`. Compare validation reports only after completing the generated case-level human-review worksheet. Each worksheet is cryptographically bound to the exact raw responses it scores:
 
 ```bash
 python3 tools/model_bakeoff_eval.py compare \
-  --baseline data/generated/model_eval/base-gemini-eval-report.json \
-  --candidate data/generated/model_eval/tuned-gemma-eval-report.json \
-  --human-scores data/generated/model_eval/human_scores.json
+  --gemini data/generated/model_eval/base-gemini-runtime-pilot-v9-validation-report.json \
+  --untuned data/generated/model_eval/untuned-gemma-mlx-pilot-validation-report.json \
+  --tuned data/generated/model_eval/tuned-gemma-mlx-pilot-validation-report.json \
+  --gemini-human data/generated/model_eval/base-gemini-runtime-pilot-v9-validation-human-review.json \
+  --untuned-human data/generated/model_eval/untuned-gemma-mlx-pilot-validation-human-review.json \
+  --tuned-human data/generated/model_eval/tuned-gemma-mlx-pilot-validation-human-review.json \
+  --output data/generated/model_eval/validation-comparison.json
 ```
 
-Promotion requires perfect schema and verdict preservation, zero unsupported facts/rules/numbers, at least 95% completeness, correct pattern behavior, zero runtime errors, p95 latency no greater than 120 seconds, and mean human quality at least 4/5.
+Promotion requires three compatible complete reports, perfect schema, semantic grounding, verdict, pattern, and applicability checks, at least 95% completeness in every case, zero runtime errors, p95 latency no greater than 120 seconds, all four human dimensions at least 4/5, Gemini parity, and measurable improvement over untuned Gemma. Smoke reports and incomplete human worksheets are never promotable.
+
+After a passing comparison, a final sealed-role command has this form:
+
+```bash
+python3 tools/model_bakeoff_eval.py run \
+  --name final-gemini-eval --provider gemini --split eval --allow-sealed-eval \
+  --validation-comparison data/generated/model_eval/validation-comparison.json \
+  --evaluation-role gemini
+```
+
+Use distinct names and the corresponding local artifact hashes for the `untuned` and `tuned` roles. The ignored consumption registry prevents rerunning a completed role.
 
 Do not add real holdings, uploaded workbooks, access tokens, or personal portfolio facts to any training file.

@@ -195,7 +195,7 @@ python3 tools/teacher_bakeoff.py --provider openai --limit 3 --rpm 2
 
 The included `notebooks/gemma_bakeoff_colab.ipynb` trains `Gemma 4 E4B IT` or, when free accelerator memory permits, `Gemma 4 12B IT` with Unsloth QLoRA. Training enforces no truncation, response-only loss, deterministic seeds, and saved run manifests. Model artifacts and generated split files remain untracked.
 
-After the 75/15 pilot improves validation quality, `tools/llm_dataset.py expand` creates 1,080 audited descendants and preserves each gold case's split lineage. `tools/model_bakeoff_eval.py` compares base Gemini, untuned Gemma, and tuned Gemma. The 30-case evaluation set requires an explicit sealed-eval flag and promotion remains blocked unless every grounding, schema, completeness, human-quality, reliability, and 120-second latency gate passes. See `data/training/README.md` for the complete commands.
+After the 75/15 pilot improves validation quality, `tools/llm_dataset.py expand` creates 1,080 audited descendants and preserves each gold case's split lineage. `tools/model_bakeoff_eval.py` compares base Gemini, untuned Gemma, and tuned Gemma with reports bound to exact source hashes, artifacts, responses, and human reviews. The 30-case evaluation set requires a passing validation comparison and allows each model role to run only once; promotion remains blocked unless every grounding, schema, completeness, human-quality, reliability, and 120-second latency gate passes. See `data/training/README.md` for the complete commands.
 
 ### Reasoning
 
@@ -377,6 +377,7 @@ Related bridge scripts:
 - `tools/llm_dataset.py`: leak-proof Gemini expansion and provider-neutral dataset export.
 - `tools/gemma_bakeoff.py`: Unsloth QLoRA training and GGUF export.
 - `tools/model_bakeoff_eval.py`: resumable Gemini/Gemma evaluation and promotion gates.
+- `tools/prepare_mlx_runtime.py`: checksummed MLX conversion and loopback-only local serving.
 - `tools/review_candidates.py`: local human-review and approval workspace.
 - `tools/approve_candidates.py`: strict grounding audit and provenance-aware delegated approval.
 - `tools/evaluate_llm.py`: deterministic schema and grounding checks.
@@ -405,20 +406,36 @@ For a tuned Vertex endpoint, set `LLM_PROVIDER=vertex`, `VERTEX_TUNED_MODEL_URL`
 
 ### Optional Local Gemma Setup
 
-Serve the promoted GGUF through a loopback-only `llama.cpp` OpenAI-compatible server, then configure the protected bridge:
+Use MLX-LM `0.31.2` or newer as the Gemma 4 quality-reference runtime on Apple Silicon. Convert the selected run's merged Hugging Face model into a versioned local directory, then serve it on loopback:
+
+```bash
+python3 tools/prepare_mlx_runtime.py convert \
+  --merged-hf /path/to/gemma-run/merged_hf \
+  --run-manifest /path/to/gemma-run/run_manifest.json \
+  --output data/generated/gemma_bakeoff/runtime/gemma-e4b-mlx8 \
+  --bits 8
+
+python3 tools/prepare_mlx_runtime.py serve \
+  --model data/generated/gemma_bakeoff/runtime/gemma-e4b-mlx8 \
+  --port 8080
+```
+
+Copy `modelArtifactHash` and `quantization` from `runtime_manifest.json` into the protected bridge configuration:
 
 ```bash
 LLM_PROVIDER=local
 LLM_BASE_URL=http://127.0.0.1:8080/v1
 LLM_API_KEY=local-only
 LLM_MODEL=verdict-gemma
-LOCAL_MODEL_ARTIFACT_HASH=sha256-of-gguf
-LOCAL_MODEL_QUANTIZATION=Q8_0
+LOCAL_MODEL_ARTIFACT_HASH=sha256-from-runtime-manifest
+LOCAL_MODEL_QUANTIZATION=MLX-8bit
 LOCAL_LLM_TIMEOUT_SECONDS=120
-LOCAL_LLM_MAX_TOKENS=4096
+LOCAL_LLM_MAX_TOKENS=8192
 ```
 
-The bridge rejects a local-model URL that is not loopback, serializes local generations, coalesces duplicate requests, and versions its cache with the artifact hash and quantization. Set `LOCAL_LLM_FALLBACK=gemini` plus `GEMINI_API_KEY` only when free-tier Gemini fallback is desired. A failed local or fallback response never replaces deterministic analysis.
+The bridge rejects a local-model URL that is not loopback, serializes local generations, coalesces duplicate requests, and versions its cache with the artifact hash and quantization. The MLX server is never tunnel-exposed directly. Set `LOCAL_LLM_FALLBACK=gemini` plus `GEMINI_API_KEY` only when Gemini fallback is desired. A failed local or fallback response never replaces deterministic analysis.
+
+The Q8_0 GGUF is a compatibility artifact, not the default runtime. Test llama.cpp first on the documented three-case validation smoke set and compare it with MLX. Do not promote llama.cpp when it changes grounding, schema compliance, completeness, or reviewed answer quality.
 
 ## Deployment
 

@@ -164,15 +164,42 @@ def numeric_values(value: Any) -> list[float]:
     return values
 
 
-def unsupported_numeric_claims(row: dict[str, Any]) -> list[float]:
-    allowed = numeric_values(row.get("facts") or {})
-    unsupported: list[float] = []
-    for narrative in narrative_items(row.get("output") or {}):
-        for raw in NUMBER_PATTERN.findall(str(narrative.get("text") or "")):
-            claimed = float(raw.replace(",", ""))
-            if claimed in {0.0, 1.0, 14.0, 20.0, 50.0, 100.0}:
+def claim_texts(value: Any):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in {"factRefs", "ruleRefs"}:
                 continue
-            if not any(abs(claimed - value) <= max(0.02, abs(value) * 0.005) for value in allowed):
+            yield from claim_texts(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from claim_texts(item)
+    elif isinstance(value, str):
+        yield value
+
+
+def unsupported_numeric_claims(row: dict[str, Any]) -> list[float]:
+    facts = row.get("facts") or {}
+    allowed = numeric_values(facts)
+    allowed.extend(float(raw) for path in fact_paths(facts) for raw in re.findall(r"\d+(?:\.\d+)?", path))
+    unsupported: list[float] = []
+    for text in claim_texts(row.get("output") or {}):
+        if re.fullmatch(r"(?:Step|Question)\s+\d+", text.strip(), re.IGNORECASE):
+            continue
+        for raw in NUMBER_PATTERN.findall(text):
+            claimed = float(raw.replace(",", ""))
+            exact = any(abs(claimed - value) <= max(0.02, abs(value) * 0.005) for value in allowed)
+            negative_context = re.search(
+                r"\b(?:down|drop|dropped|decline|declined|fall|fell|loss|lost|negative)\b",
+                text,
+                re.IGNORECASE,
+            )
+            magnitude = bool(
+                negative_context
+                and not raw.lstrip().startswith("+")
+                and claimed >= 0
+                and any(value < 0 and abs(claimed - abs(value)) <= max(0.02, abs(value) * 0.005) for value in allowed)
+            )
+            if not exact and not magnitude:
                 unsupported.append(claimed)
     return unsupported
 
@@ -197,6 +224,9 @@ def audit_candidates(rows: list[dict[str, Any]]) -> dict[str, Any]:
         if unknown_rules:
             errors.append(f"{row.get('id')}: retrievedRuleIds are not in the Varsity rulebook: {unknown_rules}")
         errors.extend(audit_candidate(row))
+        unsupported = unsupported_numeric_claims(row)
+        if unsupported:
+            errors.append(f"{row.get('id')}: unsupported numeric claims {unsupported[:8]}")
     return {
         "candidates": len(rows),
         "passed": len(rows) if not errors else len(rows) - len({error.split(":", 1)[0] for error in errors if ":" in error}),

@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from server.llm_analysis import semantic_analysis_errors, validate_raw_analysis
+from tools.approve_candidates import unsupported_numeric_claims
 from tools.llm_dataset import (
     GeminiQuotaError,
     ProviderUnavailableError,
@@ -62,6 +64,16 @@ def gold_row(index: int, split: str) -> dict:
 
 
 class ReasoningDatasetTests(unittest.TestCase):
+    def test_numeric_grounding_ignores_only_structural_step_and_question_numbers(self) -> None:
+        row = {
+            "facts": {"technicalEvidence": {"ltp": 100}},
+            "output": {
+                "reasoning": {"steps": [{"title": "Step 3", "text": "Price is 100."}]},
+                "coach": {"questionsBeforeAction": [{"title": "Question 3", "text": "Could price reach 999?"}]},
+            },
+        }
+        self.assertEqual(unsupported_numeric_claims(row), [999.0])
+
     def test_editorial_normalizer_replaces_internal_metric_names_only_in_prose(self) -> None:
         output = {
             "company": {
@@ -345,7 +357,22 @@ class ReasoningDatasetTests(unittest.TestCase):
         self.assertEqual([message["role"] for message in exported["messages"]], ["system", "user", "assistant"])
         prompt = json.loads(exported["messages"][1]["content"])
         self.assertEqual(prompt["retrievedRuleSet"]["schemaVersion"], "retrieved-rule-set.v1")
+        self.assertEqual(prompt["outputSchema"]["title"], "LlmAnalysisV1")
+        self.assertTrue(prompt["requirements"])
+        self.assertEqual(exported["metadata"]["promptVersion"], "analysis-prompt.v6")
         self.assertEqual(exported["lineageId"], "gold-001")
+
+    def test_every_approved_gold_output_passes_runtime_semantic_contract(self) -> None:
+        gold_path = Path(__file__).resolve().parents[2] / "data" / "training" / "reasoning_gold.jsonl"
+        rows = [json.loads(line) for line in gold_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        failures = {
+            row["id"]: [
+                *validate_raw_analysis(row["output"]),
+                *semantic_analysis_errors(row["output"], row["facts"], row["retrievedRuleSet"]),
+            ]
+            for row in rows
+        }
+        self.assertEqual({row_id: errors for row_id, errors in failures.items() if errors}, {})
 
     def test_quota_stop_preserves_existing_expansion_file(self) -> None:
         rows = [

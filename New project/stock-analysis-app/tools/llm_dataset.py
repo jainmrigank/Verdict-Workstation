@@ -25,7 +25,7 @@ if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
 from tools.approve_candidates import audit_candidate, unsupported_numeric_claims
-from server.llm_analysis import static_retrieved_rule_set
+from server.llm_analysis import ANALYSIS_PROMPT_VERSION, analysis_prompt, static_retrieved_rule_set
 
 
 TRAINING_ROOT = APP_ROOT / "data" / "training"
@@ -616,6 +616,7 @@ def gemini_json(prompt: dict[str, Any], system_prompt: str, temperature: float =
         ],
         "response_format": {"type": "json_object"},
         "temperature": temperature,
+        "reasoning_effort": os.environ.get("GEMINI_REASONING_EFFORT") or os.environ.get("LLM_REASONING_EFFORT") or "minimal",
     }
     max_tokens = os.environ.get("GEMINI_DATASET_MAX_TOKENS")
     if max_tokens:
@@ -1034,28 +1035,15 @@ def expand_to_target(target: int, batch_size: int) -> dict[str, Any]:
     }
 
 
-TRAINING_SYSTEM_PROMPT = (
-    "You are the grounded analyst inside Stock Analysis Agent. Supplied facts and the deterministic verdict are authoritative. "
-    "Use only the supplied RetrievedRuleSetV1 guidance and return complete LlmAnalysisV1 JSON."
-)
-
-
-def training_prompt(row: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "facts": row["facts"],
-        "retrievedRuleSet": row.get("retrievedRuleSet") or static_retrieved_rule_set(row.get("retrievedRuleIds") or [], row["facts"]),
-        "instruction": "Return LlmAnalysisV1 JSON. Preserve deterministic facts and verdict.",
-    }
-
-
 def provider_row(row: dict[str, Any]) -> dict[str, Any]:
+    rule_set = row.get("retrievedRuleSet") or static_retrieved_rule_set(row.get("retrievedRuleIds") or [], row["facts"])
+    prompt = analysis_prompt(row["facts"], rule_set)
     return {
         "id": row["id"],
         "lineageId": row.get("lineageId") or row["id"],
         "split": row["split"],
         "messages": [
-            {"role": "system", "content": TRAINING_SYSTEM_PROMPT},
-            {"role": "user", "content": json.dumps(training_prompt(row), ensure_ascii=False, separators=(",", ":"))},
+            *prompt,
             {"role": "assistant", "content": json.dumps(row["output"], ensure_ascii=False, separators=(",", ":"))},
         ],
         "metadata": {
@@ -1064,6 +1052,7 @@ def provider_row(row: dict[str, Any]) -> dict[str, Any]:
             "retrievalMode": (row.get("retrievedRuleSet") or {}).get("mode"),
             "instrumentType": (row.get("facts") or {}).get("instrument", {}).get("type"),
             "action": (row.get("facts") or {}).get("userContext", {}).get("action"),
+            "promptVersion": ANALYSIS_PROMPT_VERSION,
         },
     }
 
