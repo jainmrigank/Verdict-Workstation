@@ -233,6 +233,11 @@ class ModelBakeoffTests(unittest.TestCase):
 
     def test_small_gemma_candidates_pin_the_loaded_quantized_repository(self) -> None:
         self.assertEqual(
+            MODEL_CONFIGS["gemma3-4b"]["model"],
+            "unsloth/gemma-3-4b-it-unsloth-bnb-4bit",
+        )
+        self.assertEqual(MODEL_CONFIGS["gemma3-4b"]["chatTemplate"], "gemma-3")
+        self.assertEqual(
             MODEL_CONFIGS["gemma4-e2b"]["model"],
             "unsloth/gemma-4-E2B-it-unsloth-bnb-4bit",
         )

@@ -30,6 +30,11 @@ SEQUENCE_MULTIPLE = 256
 PACKAGE_NAMES = ("accelerate", "bitsandbytes", "datasets", "peft", "torch", "transformers", "trl", "unsloth")
 DEFAULT_PYTORCH_ALLOC_CONF = "expandable_segments:True"
 MODEL_CONFIGS = {
+    "gemma3-4b": {
+        "model": "unsloth/gemma-3-4b-it-unsloth-bnb-4bit",
+        "chatTemplate": "gemma-3",
+        "ggufQuantization": "Q8_0",
+    },
     "gemma4-e2b": {
         "model": "unsloth/gemma-4-E2B-it-unsloth-bnb-4bit",
         "chatTemplate": "gemma-4",
