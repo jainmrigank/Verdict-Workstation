@@ -912,6 +912,32 @@ function GroundedAnalysisStrip({
   )
 }
 
+type GroundedNarrativeGroup = {
+  id: string
+  label: string
+  items?: LlmNarrativeItem[]
+}
+
+function GroundedNarrativeDeck({ ariaLabel, groups }: { ariaLabel: string; groups: GroundedNarrativeGroup[] }) {
+  const cards = groups.flatMap((group) =>
+    (group.items ?? []).map((item, index) => ({
+      id: `${group.id}-${index}`,
+      category: group.label,
+      content: (
+        <article className={`trading-lesson-card tone-${item.tone}`}>
+          <div>
+            <span>{group.label}</span>
+            <strong>{item.title?.trim() || group.label}</strong>
+          </div>
+          <p>{item.text}</p>
+        </article>
+      ),
+    })),
+  )
+  if (!cards.length) return null
+  return <FlashcardDeck ariaLabel={ariaLabel} cards={cards} className="visual-card-deck" />
+}
+
 function SymbolCoverageList({ emptyLabel, items, tone }: { emptyLabel: string; items: string[]; tone: SignalTone }) {
   if (!items.length) {
     return <span className="coverage-empty">{emptyLabel}</span>
@@ -4004,6 +4030,7 @@ function App() {
   const [llmMessage, setLlmMessage] = useState('')
   const [llmResponse, setLlmResponse] = useState<LlmAnalysisResponse | null>(null)
   const [llmScope, setLlmScope] = useState<AiCoachScope>('verdict')
+  const llmRequestIdRef = useRef(0)
   const pendingGroundedAnalysisRef = useRef(false)
   const [holdingContextMessage, setHoldingContextMessage] = useState('')
   const [tickerTypeaheadOpen, setTickerTypeaheadOpen] = useState(false)
@@ -4339,6 +4366,7 @@ function App() {
     : []
 
   useEffect(() => {
+    llmRequestIdRef.current += 1
     setLlmState('idle')
     setLlmMessage('')
     setLlmResponse(null)
@@ -4348,12 +4376,9 @@ function App() {
     analysis.quoteKey,
     analysis.score,
     analysis.verdict,
-    form.alreadyHold,
-    form.averagePrice,
-    form.capital,
-    form.horizon,
-    form.quantity,
-    form.riskProfile,
+    chartIndicators.patterns,
+    chartTimeframe,
+    form,
   ])
 
   useEffect(() => {
@@ -5432,16 +5457,18 @@ function App() {
           tone: item.tone,
           companySpecificRead: indicatorNarrative(item),
         })),
-        patternFindings: patternFindings.slice(0, 8).map((pattern) => ({
-          name: pattern.name,
-          kind: pattern.kind,
-          bias: pattern.bias,
-          date: pattern.date,
-          close: pattern.price,
-          meaning: pattern.explanation,
-          usageRule: pattern.use,
-          caution: pattern.caution,
-        })),
+        patternFindings: chartIndicators.patterns
+          ? patternFindings.slice(0, 8).map((pattern) => ({
+              name: pattern.name,
+              kind: pattern.kind,
+              bias: pattern.bias,
+              date: pattern.date,
+              close: pattern.price,
+              meaning: pattern.explanation,
+              usageRule: pattern.use,
+              caution: pattern.caution,
+            }))
+          : [],
       },
       importantSignals,
       fundamentalEvidence: {
@@ -5539,6 +5566,8 @@ function App() {
   }
 
   async function generateGroundedAnalysis(scope: AiCoachScope = llmScope) {
+    const requestId = llmRequestIdRef.current + 1
+    llmRequestIdRef.current = requestId
     setLlmScope(scope)
     setLlmState('refreshing')
     setLlmResponse(null)
@@ -5554,6 +5583,7 @@ function App() {
       if (!response.ok) {
         throw new Error(data.error || 'Grounded analysis request failed.')
       }
+      if (requestId !== llmRequestIdRef.current) return
       setLlmResponse(data)
       const analysisReady = Boolean(data.analysis)
       setLlmState(analysisReady ? 'done' : 'error')
@@ -5565,6 +5595,7 @@ function App() {
             : data.message || data.error || 'The grounded analyst is temporarily unavailable; deterministic analysis remains active.',
       )
     } catch (error) {
+      if (requestId !== llmRequestIdRef.current) return
       setLlmState('error')
       setLlmResponse(null)
       setLlmMessage(bridgeFailureMessage(error, 'Could not generate the grounded analysis.'))
@@ -5577,11 +5608,15 @@ function App() {
 
   useEffect(() => {
     if (!pendingGroundedAnalysisRef.current || freeRefreshState !== 'done') return
-    pendingGroundedAnalysisRef.current = false
-    void generateGroundedAnalysis('verdict')
-    // The refresh completion is the trigger; buildAnalysisFacts reads the newly rendered snapshot.
+    const timer = window.setTimeout(() => {
+      if (!pendingGroundedAnalysisRef.current) return
+      pendingGroundedAnalysisRef.current = false
+      void generateGroundedAnalysis('verdict')
+    }, 250)
+    return () => window.clearTimeout(timer)
+    // Wait for post-sync company overrides to settle before freezing the fact bundle.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [freeRefreshState, activeSnapshotForAnalysis.generated_at])
+  }, [freeRefreshState, activeSnapshotForAnalysis.generated_at, form])
 
   function updateForm<K extends keyof AnalysisForm>(key: K, value: AnalysisForm[K]) {
     setForm((current) => ({ ...current, [key]: value }))
@@ -6626,6 +6661,13 @@ function App() {
               summary={groundedAnalysis?.decision.summary}
               title="Decision read"
             />
+            <GroundedNarrativeDeck
+              ariaLabel="Grounded decision risks and data gaps"
+              groups={[
+                { id: 'decision-risks', label: 'Risks', items: groundedAnalysis?.decision.risks },
+                { id: 'decision-gaps', label: 'Data gaps', items: groundedAnalysis?.decision.dataGaps },
+              ]}
+            />
             {specialInstrumentWarning ? (
               <p className="verdict-summary verdict-inline-warning">
                 <strong>Special instrument check:</strong> {specialInstrumentWarning}
@@ -6979,10 +7021,22 @@ function App() {
             title="Technical Analysis"
           >
             <GroundedAnalysisStrip
-              items={groundedAnalysis ? [...groundedAnalysis.chart.trend, ...groundedAnalysis.chart.momentum, ...groundedAnalysis.chart.levels] : undefined}
               state={llmState}
               summary={groundedAnalysis?.chart.summary}
               title="Chart read"
+            />
+            <GroundedNarrativeDeck
+              ariaLabel="Grounded chart findings"
+              groups={[
+                { id: 'chart-trend', label: 'Trend', items: groundedAnalysis?.chart.trend },
+                { id: 'chart-momentum', label: 'Momentum', items: groundedAnalysis?.chart.momentum },
+                { id: 'chart-volume', label: 'Volume', items: groundedAnalysis?.chart.volume },
+                { id: 'chart-volatility', label: 'Volatility', items: groundedAnalysis?.chart.volatility },
+                { id: 'chart-levels', label: 'Levels', items: groundedAnalysis?.chart.levels },
+                ...(chartIndicators.patterns
+                  ? [{ id: 'chart-patterns', label: 'Patterns', items: groundedAnalysis?.chart.patterns }]
+                  : []),
+              ]}
             />
             <div className="visual-grid">
               <article className="visual-card chart-card">
@@ -7559,10 +7613,24 @@ function App() {
             title="Company"
           >
             <GroundedAnalysisStrip
-              items={groundedAnalysis ? [...groundedAnalysis.company.quality, ...groundedAnalysis.company.sectorDrivers, ...groundedAnalysis.company.risks] : undefined}
               state={llmState}
               summary={groundedAnalysis?.company.summary}
               title="Business read"
+            />
+            <GroundedNarrativeDeck
+              ariaLabel="Grounded company findings"
+              groups={[
+                { id: 'company-model', label: 'Business model', items: groundedAnalysis?.company.businessModel },
+                { id: 'company-quality', label: 'Quality', items: groundedAnalysis?.company.quality },
+                { id: 'company-profitability', label: 'Profitability', items: groundedAnalysis?.company.profitability },
+                { id: 'company-balance-sheet', label: 'Balance sheet', items: groundedAnalysis?.company.balanceSheet },
+                { id: 'company-cash-flow', label: 'Cash flow', items: groundedAnalysis?.company.cashFlow },
+                { id: 'company-valuation', label: 'Valuation', items: groundedAnalysis?.company.valuation },
+                { id: 'company-sector', label: 'Sector drivers', items: groundedAnalysis?.company.sectorDrivers },
+                { id: 'company-catalysts', label: 'Catalysts', items: groundedAnalysis?.company.catalysts },
+                { id: 'company-risks', label: 'Risks', items: groundedAnalysis?.company.risks },
+                { id: 'company-gaps', label: 'Data gaps', items: groundedAnalysis?.company.dataGaps },
+              ]}
             />
             <div className="visual-grid fundamental-grid">
               {!activeFundamentals && (
@@ -7789,11 +7857,25 @@ function App() {
             <CollapsibleSection className="panel parent-section reasoning-parent" eyebrow="Reasoning" id="steps-heading" staticOpen title="Decision Path">
 
               <GroundedAnalysisStrip
-                items={groundedAnalysis?.reasoning.steps}
                 state={llmState}
                 summary={groundedAnalysis?.coach.verdictSummary}
                 title="Evidence chain"
               />
+              {groundedAnalysis?.warnings.length ? (
+                <CollapsibleSection
+                  className="grounded-sources nested-collapse"
+                  headingClassName="subsection-heading"
+                  headingLevel={3}
+                  id="grounded-analysis-warnings"
+                  title={`Analysis warnings (${groundedAnalysis.warnings.length})`}
+                >
+                  <ul>
+                    {groundedAnalysis.warnings.map((warning) => (
+                      <li key={warning}>{warning}</li>
+                    ))}
+                  </ul>
+                </CollapsibleSection>
+              ) : null}
               {groundedAnalysis?.sources.length ? (
                 <CollapsibleSection
                   className="grounded-sources nested-collapse"
@@ -7820,35 +7902,58 @@ function App() {
               ) : null}
 
               <div className="steps-list detailed-steps">
-                {analysis.steps.map((step, index) => (
-                  <CollapsibleSection
-                    className="reasoning-step nested-collapse"
-                    description={step.plainEnglish}
-                    headingClassName="subsection-heading"
-                    headingLevel={3}
-                    id={`reasoning-step-${index}`}
-                    key={step.title}
-                    title={`${index + 1}. ${step.title.replace(/^\d+\.\s*/, '')}`}
-                  >
-                    <div className="formula-box">
-                      <span>How to read this</span>
-                      <p>{step.formula}</p>
-                    </div>
-                    <p>
-                      <strong>Rationale:</strong> {step.rationale}
-                    </p>
-                    <p className="takeaway">
-                      <strong>Takeaway:</strong> {step.takeaway}
-                    </p>
-                  </CollapsibleSection>
-                ))}
+                {groundedAnalysis?.reasoning.steps.length
+                  ? groundedAnalysis.reasoning.steps.map((step, index) => (
+                      <CollapsibleSection
+                        className="reasoning-step nested-collapse"
+                        description={step.text}
+                        headingClassName="subsection-heading"
+                        headingLevel={3}
+                        id={`reasoning-step-${index}`}
+                        key={`${step.title || 'step'}-${index}`}
+                        title={`${index + 1}. ${step.title?.trim() || 'Evidence review'}`}
+                      >
+                        <div className="formula-box">
+                          <span>Evidence</span>
+                          <p>{step.evidence}</p>
+                        </div>
+                        <p>
+                          <strong>Implication:</strong> {step.implication}
+                        </p>
+                        <p className="takeaway">
+                          <strong>Action:</strong> {step.action}
+                        </p>
+                      </CollapsibleSection>
+                    ))
+                  : analysis.steps.map((step, index) => (
+                      <CollapsibleSection
+                        className="reasoning-step nested-collapse"
+                        description={step.plainEnglish}
+                        headingClassName="subsection-heading"
+                        headingLevel={3}
+                        id={`reasoning-step-${index}`}
+                        key={step.title}
+                        title={`${index + 1}. ${step.title.replace(/^\d+\.\s*/, '')}`}
+                      >
+                        <div className="formula-box">
+                          <span>How to read this</span>
+                          <p>{step.formula}</p>
+                        </div>
+                        <p>
+                          <strong>Rationale:</strong> {step.rationale}
+                        </p>
+                        <p className="takeaway">
+                          <strong>Takeaway:</strong> {step.takeaway}
+                        </p>
+                      </CollapsibleSection>
+                    ))}
                 <CollapsibleSection
                   className="reasoning-step nested-collapse trading-reasoning-step"
                   description="These price checks focus on what can actually change the next decision: sector drivers, downside control, clean capital use, and whether this instrument behaves like a normal listed stock."
                   headingClassName="subsection-heading"
                   headingLevel={3}
                   id="reasoning-step-practical-price-checks"
-                  title={`${analysis.steps.length + 1}. Practical Price Checks`}
+                  title={`${(groundedAnalysis?.reasoning.steps.length || analysis.steps.length) + 1}. Practical Price Checks`}
                 >
                   <div className="trading-layer-grid">
                     {analysis.tradingLessons.map((lesson) => (
@@ -7894,10 +7999,19 @@ function App() {
             title="Portfolio"
           >
             <GroundedAnalysisStrip
-              items={groundedAnalysis ? [...groundedAnalysis.portfolio.positionFit, ...groundedAnalysis.portfolio.concentration, ...groundedAnalysis.portfolio.sizing] : undefined}
               state={llmState}
               summary={groundedAnalysis?.portfolio.summary}
               title="Portfolio read"
+            />
+            <GroundedNarrativeDeck
+              ariaLabel="Grounded portfolio findings"
+              groups={[
+                { id: 'portfolio-fit', label: 'Position fit', items: groundedAnalysis?.portfolio.positionFit },
+                { id: 'portfolio-concentration', label: 'Concentration', items: groundedAnalysis?.portfolio.concentration },
+                { id: 'portfolio-sizing', label: 'Sizing', items: groundedAnalysis?.portfolio.sizing },
+                { id: 'portfolio-actions', label: 'Holding actions', items: groundedAnalysis?.portfolio.holdingActions },
+                { id: 'portfolio-risks', label: 'Risks', items: groundedAnalysis?.portfolio.risks },
+              ]}
             />
             {freeRefreshState === 'refreshing' && (
               <div className="sync-progress-panel" role="status" aria-live="polite">
