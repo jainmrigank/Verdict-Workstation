@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from server.llm_analysis import semantic_analysis_errors, validate_raw_analysis
+from server.llm_analysis import lexical_rule_set, prepare_provider_analysis, semantic_analysis_errors, validate_raw_analysis
 from tools.approve_candidates import unsupported_numeric_claims
 from tools.llm_dataset import (
     GeminiQuotaError,
@@ -359,19 +359,20 @@ class ReasoningDatasetTests(unittest.TestCase):
         self.assertEqual(prompt["retrievedRuleSet"]["schemaVersion"], "retrieved-rule-set.v1")
         self.assertEqual(prompt["outputSchema"]["title"], "LlmAnalysisV1")
         self.assertTrue(prompt["requirements"])
-        self.assertEqual(exported["metadata"]["promptVersion"], "analysis-prompt.v6")
+        self.assertEqual(exported["metadata"]["promptVersion"], "analysis-prompt.v8")
         self.assertEqual(exported["lineageId"], "gold-001")
 
     def test_every_approved_gold_output_passes_runtime_semantic_contract(self) -> None:
         gold_path = Path(__file__).resolve().parents[2] / "data" / "training" / "reasoning_gold.jsonl"
         rows = [json.loads(line) for line in gold_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-        failures = {
-            row["id"]: [
-                *validate_raw_analysis(row["output"]),
-                *semantic_analysis_errors(row["output"], row["facts"], row["retrievedRuleSet"]),
+        failures = {}
+        for row in rows:
+            current_rules = lexical_rule_set(row["facts"])
+            output = prepare_provider_analysis(row["output"], row["facts"], current_rules)
+            failures[row["id"]] = [
+                *validate_raw_analysis(output),
+                *semantic_analysis_errors(output, row["facts"], current_rules),
             ]
-            for row in rows
-        }
         self.assertEqual({row_id: errors for row_id, errors in failures.items() if errors}, {})
 
     def test_quota_stop_preserves_existing_expansion_file(self) -> None:

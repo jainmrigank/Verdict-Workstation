@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import tempfile
 import threading
@@ -23,11 +24,14 @@ from server.llm_analysis import (
     context_fingerprint,
     generate_analysis,
     local_endpoint_is_loopback,
+    lexical_rule_set,
     lexical_retrieve,
     normalise_analysis,
     provider_timeout,
     provider_version,
+    prepare_provider_analysis,
     retrieve_rule_set,
+    sanitise_reader_annotations,
     semantic_analysis_errors,
     validate_analysis,
     validate_raw_analysis,
@@ -92,6 +96,9 @@ class LlmAnalysisTests(unittest.TestCase):
         self.assertGreater(len(rules), 0)
         self.assertLessEqual(len(rules), 10)
         self.assertTrue(all(rule.get("id") for rule in rules))
+        covered = {area for rule in rules for area in rule.get("appliesTo") or []}
+        self.assertTrue({"decision", "chart", "company", "portfolio", "reasoning", "coach"}.issubset(covered))
+        self.assertTrue(any(rule["id"].startswith("pdf-m2-") for rule in rules if "chart" in rule.get("appliesTo", [])))
 
     def test_sector_rules_require_matching_sector_or_industry(self) -> None:
         industrial = facts()
@@ -109,6 +116,17 @@ class LlmAnalysisTests(unittest.TestCase):
         automobile["instrument"].update({"sector": "Consumer Discretionary", "industry": "Automobiles - Passenger Cars"})
         automobile_ids = {rule["id"] for rule in lexical_retrieve(automobile, limit=50)}
         self.assertIn("web-sector-analysis-automobiles-part-1", automobile_ids)
+
+    def test_non_company_retrieval_excludes_unrelated_futures_sse_and_equity_rules(self) -> None:
+        supplied = facts()
+        supplied["instrument"].update(
+            {"type": "etf", "symbol": "NSE:PHARMABEES", "name": "Nippon India Nifty Pharma ETF", "sector": "Healthcare"}
+        )
+        rules = lexical_retrieve(supplied, limit=50)
+        identities = " ".join(f"{rule.get('id')} {rule.get('module')} {rule.get('title')}" for rule in rules).casefold()
+        self.assertNotIn("currency and commodity futures", identities)
+        self.assertNotIn("sse instrument type filter", identities)
+        self.assertNotIn("fundamental analysis", identities)
 
     def test_retrieved_rule_set_has_versioned_filters_and_bounded_rules(self) -> None:
         rule_set = retrieve_rule_set(facts(), limit=10)
@@ -148,6 +166,170 @@ class LlmAnalysisTests(unittest.TestCase):
         self.assertTrue(any("unsupported number 9999" in error for error in errors))
         self.assertTrue(any("contradicts the deterministic verdict" in error for error in errors))
 
+    def test_semantic_validation_rejects_backend_fact_paths_in_prose(self) -> None:
+        output = raw_analysis()
+        output["decision"]["summary"] = "Wait and Watch because technicalEvidence.trend is mixed and riskBudget is limited."
+        errors = semantic_analysis_errors(
+            output,
+            facts(),
+            {"rules": [{"id": "pdf-m13-c1-introduction-to-financial-modelling"}]},
+        )
+        self.assertTrue(any("backend fact path" in error for error in errors))
+        self.assertTrue(any("backend field name" in error for error in errors))
+
+    def test_inline_reference_annotations_are_removed_without_changing_structured_refs(self) -> None:
+        value = {
+            "text": "Use ATRPct with riskBudget. [facts:technicalEvidence.atrPct] [rules:chart-rule]",
+            "factRefs": ["technicalEvidence.atrPct"],
+            "ruleRefs": ["chart-rule"],
+        }
+        self.assertEqual(
+            sanitise_reader_annotations(value),
+            {
+                "text": "Use ATR percentage with risk budget.",
+                "factRefs": ["technicalEvidence.atrPct"],
+                "ruleRefs": ["chart-rule"],
+            },
+        )
+
+    def test_provider_analysis_unwraps_complete_sections_nested_inside_decision(self) -> None:
+        nested = raw_analysis()
+        malformed = {"decision": {**nested["decision"], **{key: nested[key] for key in nested if key != "decision"}}}
+        self.assertEqual(prepare_provider_analysis(malformed), nested)
+
+    def test_provider_analysis_keeps_non_company_output_concise(self) -> None:
+        supplied = facts()
+        supplied["instrument"]["type"] = "index"
+        value = raw_analysis()
+        item = {
+            "text": "The investable proxy is unavailable.",
+            "tone": "neutral",
+            "factRefs": ["instrument.type"],
+            "ruleRefs": ["pdf-m13-c1-introduction-to-financial-modelling"],
+        }
+        value["company"]["quality"] = [item]
+        value["company"]["dataGaps"] = [item]
+        prepared = prepare_provider_analysis(value, supplied)
+        self.assertEqual(prepared["company"]["quality"], [])
+        self.assertEqual(len(prepared["company"]["dataGaps"]), 1)
+
+    def test_provider_analysis_removes_inapplicable_non_company_gaps(self) -> None:
+        supplied = facts()
+        supplied["instrument"]["type"] = "etf"
+        value = raw_analysis()
+        value["decision"]["dataGaps"] = [{
+            "text": "Company cash flow and valuation ratios are unavailable.",
+            "tone": "neutral",
+            "factRefs": ["instrument.type"],
+            "ruleRefs": ["pdf-m13-c1-introduction-to-financial-modelling"],
+        }]
+        self.assertEqual(prepare_provider_analysis(value, supplied)["decision"]["dataGaps"], [])
+
+    def test_provider_analysis_clarifies_index_reduce_as_proxy_action(self) -> None:
+        supplied = facts()
+        supplied["instrument"]["type"] = "index"
+        supplied["deterministicAnalysis"]["verdict"] = "Reduce"
+        value = raw_analysis()
+        value["decision"]["nextActions"][0]["text"] = "Review the supplied index exposure."
+        value["portfolio"]["holdingActions"] = [{
+            "text": "Sell is the user action under review.",
+            "tone": "neutral",
+            "factRefs": ["userContext.action"],
+            "ruleRefs": ["pdf-m13-c1-introduction-to-financial-modelling"],
+        }]
+        prepared = prepare_provider_analysis(value, supplied)
+        self.assertIn("Apply Reduce only to the corresponding investable proxy", prepared["decision"]["nextActions"][0]["text"])
+        self.assertIn("deterministicAnalysis.verdict", prepared["portfolio"]["holdingActions"][0]["factRefs"])
+
+    def test_provider_analysis_clarifies_equity_reduce_without_inventing_size(self) -> None:
+        supplied = facts()
+        supplied["userContext"]["action"] = "Sell"
+        supplied["deterministicAnalysis"]["verdict"] = "Reduce"
+        value = raw_analysis()
+        value["portfolio"]["holdingActions"] = [{
+            "text": "Review whether to keep, cut, or wait.",
+            "tone": "neutral",
+            "factRefs": ["userContext.action"],
+            "ruleRefs": ["pdf-m13-c1-introduction-to-financial-modelling"],
+        }]
+        value["portfolio"]["sizing"] = [{
+            "text": "Use multiple small tranches.",
+            "tone": "neutral",
+            "factRefs": ["portfolioEvidence.riskBudget"],
+            "ruleRefs": ["pdf-m13-c1-introduction-to-financial-modelling"],
+        }]
+        prepared = prepare_provider_analysis(value, supplied)
+        self.assertIn("Apply Reduce to the existing position", prepared["portfolio"]["holdingActions"][0]["text"])
+        self.assertNotIn("tranches", prepared["portfolio"]["sizing"][0]["text"])
+
+    def test_provider_analysis_neutralises_unsupported_rsi_and_pe_labels(self) -> None:
+        value = raw_analysis()
+        value["chart"]["summary"] = "RSI is 55.0 and momentum is moderate."
+        value["decision"]["summary"] = "Revenue is mixed with a high absolute P/E reading."
+        value["portfolio"]["summary"] = "The holding sits in a profitable portfolio."
+        prepared = prepare_provider_analysis(value, facts())
+        self.assertEqual(
+            prepared["chart"]["summary"],
+            "The supplied trend is mixed. RSI is 52; no threshold-based label is applied.",
+        )
+        self.assertIn("without a comparison benchmark", prepared["decision"]["summary"])
+        self.assertIn("profitable position", prepared["portfolio"]["summary"])
+
+    def test_provider_analysis_leaves_equity_company_output_unchanged(self) -> None:
+        value = raw_analysis()
+        self.assertEqual(prepare_provider_analysis(value, facts()), value)
+
+    def test_provider_analysis_rebinds_rule_refs_to_retrieved_section_evidence(self) -> None:
+        supplied = facts()
+        supplied["instrument"].update(
+            {"type": "etf", "symbol": "NSE:PHARMABEES", "name": "Nippon India Nifty Pharma ETF", "sector": "Healthcare"}
+        )
+        value = raw_analysis()
+        value["chart"]["volume"] = [{
+            "text": "Average volume is supplied without a liquidity benchmark.",
+            "tone": "neutral",
+            "factRefs": ["technicalEvidence.volume"],
+            "ruleRefs": ["pdf-m8-overview"],
+        }]
+        prepared = prepare_provider_analysis(value, supplied, lexical_rule_set(supplied))
+        self.assertEqual(prepared["chart"]["volume"][0]["ruleRefs"], ["pdf-m2-c10-multiple-candlestick-patterns-part-3"])
+
+    def test_semantic_validation_rejects_unsupported_evidence_labels_and_tranches(self) -> None:
+        supplied = facts()
+        output = raw_analysis()
+        output["chart"]["summary"] = "RSI is 55 and momentum is moderate."
+        output["decision"]["summary"] = "Wait and Watch with a high P/E reading."
+        output["portfolio"]["summary"] = "The holding sits in a profitable portfolio."
+        output["chart"]["volatility"] = [{
+            "text": "Volatility is low.",
+            "tone": "neutral",
+            "factRefs": ["technicalEvidence.rsi14"],
+            "ruleRefs": ["pdf-m13-c1-introduction-to-financial-modelling"],
+        }]
+        output["portfolio"]["concentration"] = [{
+            "text": "The position has meaningful concentration.",
+            "tone": "neutral",
+            "factRefs": ["portfolioEvidence.weight"],
+            "ruleRefs": ["pdf-m13-c1-introduction-to-financial-modelling"],
+        }]
+        output["portfolio"]["sizing"] = [{
+            "text": "Use multiple tranches.",
+            "tone": "neutral",
+            "factRefs": ["portfolioEvidence.riskBudget"],
+            "ruleRefs": ["pdf-m13-c1-introduction-to-financial-modelling"],
+        }]
+        errors = semantic_analysis_errors(
+            output,
+            supplied,
+            {"rules": [{"id": "pdf-m13-c1-introduction-to-financial-modelling"}]},
+        )
+        self.assertTrue(any("unsupported qualitative RSI" in error for error in errors))
+        self.assertTrue(any("unbenchmarked P/E" in error for error in errors))
+        self.assertTrue(any("portfolio profitability" in error for error in errors))
+        self.assertTrue(any("tranche execution" in error for error in errors))
+        self.assertTrue(any("qualitative volatility" in error for error in errors))
+        self.assertTrue(any("concentration label" in error for error in errors))
+
     def test_semantic_validation_binds_numbers_to_refs_and_preserves_sign_and_verdict_action(self) -> None:
         supplied = facts()
         supplied["technicalEvidence"]["changePct"] = -10.04
@@ -164,6 +346,25 @@ class LlmAnalysisTests(unittest.TestCase):
         self.assertTrue(any("unsupported number 10.04 for its factRefs" in error for error in errors))
         self.assertTrue(any("direct trade action" in error for error in errors))
 
+    def test_requested_action_under_review_does_not_override_verdict(self) -> None:
+        supplied = facts()
+        supplied["userContext"]["action"] = "Sell"
+        output = raw_analysis()
+        output["portfolio"]["holdingActions"] = [
+            {
+                "text": "Sell is the user action under review, but Wait and Watch remains the evidence-based posture.",
+                "tone": "neutral",
+                "factRefs": ["userContext.action", "deterministicAnalysis.verdict"],
+                "ruleRefs": ["pdf-m13-c1-introduction-to-financial-modelling"],
+            }
+        ]
+        errors = semantic_analysis_errors(
+            output,
+            supplied,
+            {"rules": [{"id": "pdf-m13-c1-introduction-to-financial-modelling"}]},
+        )
+        self.assertFalse(any("direct trade action" in error for error in errors))
+
     def test_production_prompt_includes_exact_output_schema(self) -> None:
         messages = analysis_prompt(facts(), {"schemaVersion": "retrieved-rule-set.v1", "rules": []})
         user = json.loads(messages[1]["content"])
@@ -176,6 +377,49 @@ class LlmAnalysisTests(unittest.TestCase):
         self.assertTrue(any("exact deterministic verdict" in requirement for requirement in user["requirements"]))
         self.assertTrue(any("never facts.technicalEvidence.ltp" in requirement for requirement in user["requirements"]))
         self.assertTrue(any("portfolio.holdingActions" in requirement for requirement in user["requirements"]))
+        self.assertTrue(any("Retrieved rules are frameworks" in requirement for requirement in user["requirements"]))
+        self.assertTrue(any("Unrealized profit or loss alone" in guardrail for guardrail in user["evidenceGuardrails"]))
+        self.assertTrue(any("fresh Buy analysis" in guardrail for guardrail in user["evidenceGuardrails"]))
+        self.assertTrue(any("known zero current position" in guardrail for guardrail in user["evidenceGuardrails"]))
+        self.assertTrue(any("bank-specific evidence" in guardrail for guardrail in user["evidenceGuardrails"]))
+        self.assertTrue(any("reader-facing prose" in requirement for requirement in user["requirements"]))
+
+    def test_prompt_adds_instrument_and_thin_history_guardrails(self) -> None:
+        supplied = facts()
+        supplied["instrument"]["type"] = "index"
+        supplied["technicalEvidence"]["candles"] = 1
+        messages = analysis_prompt(supplied, {"schemaVersion": "retrieved-rule-set.v1", "rules": []})
+        guardrails = json.loads(messages[1]["content"])["evidenceGuardrails"]
+        self.assertTrue(any("Only 1 candle(s)" in guardrail for guardrail in guardrails))
+        self.assertTrue(any("Do not reuse their values as monitoring" in guardrail for guardrail in guardrails))
+        self.assertTrue(any("reference benchmark" in guardrail for guardrail in guardrails))
+
+    def test_prompt_uses_fund_specific_evidence_gaps(self) -> None:
+        supplied = facts()
+        supplied["instrument"].update(
+            {
+                "type": "fund",
+                "symbol": "FUND:ICICI-NIFTY50-DIRECT-GROWTH",
+                "name": "ICICI Prudential Nifty Next 50 Index Fund",
+            }
+        )
+        messages = analysis_prompt(supplied, {"schemaVersion": "retrieved-rule-set.v1", "rules": []})
+        guardrails = json.loads(messages[1]["content"])["evidenceGuardrails"]
+        self.assertTrue(any("tracking difference or error" in guardrail for guardrail in guardrails))
+        self.assertTrue(any("missing company ratios as non-applicable" in guardrail for guardrail in guardrails))
+        self.assertTrue(any("operating-company narrative arrays empty" in guardrail for guardrail in guardrails))
+        self.assertTrue(any("conflict between Nifty 50 and Nifty Next 50" in guardrail for guardrail in guardrails))
+
+    def test_semantic_validation_requires_identity_warnings(self) -> None:
+        supplied = facts()
+        supplied["dataQuality"]["sourceWarnings"] = ["Instrument identity mismatch between symbol and fund name."]
+        output = raw_analysis()
+        errors = semantic_analysis_errors(
+            output,
+            supplied,
+            {"rules": [{"id": "pdf-m13-c1-introduction-to-financial-modelling"}]},
+        )
+        self.assertTrue(any("identity conflicts" in error for error in errors))
 
     def test_repair_prompt_contains_bounded_previous_response(self) -> None:
         messages = analysis_prompt(
@@ -240,6 +484,52 @@ class LlmAnalysisTests(unittest.TestCase):
         with patch.dict("os.environ", {"LLM_PROVIDER": "local"}, clear=False):
             with self.assertRaisesRegex(RuntimeError, "loopback"):
                 call_provider([], remote)
+
+    def test_remote_provider_defaults_match_the_validated_generation_budget(self) -> None:
+        remote = {
+            "provider": "openai_compatible",
+            "model": "gemini-test",
+            "base_url": "https://example.invalid/v1",
+            "api_key": "test",
+        }
+        with patch.dict(
+            "os.environ",
+            {
+                "LLM_PROVIDER": "gemini",
+                "LLM_TIMEOUT_SECONDS": "",
+                "LLM_MAX_OUTPUT_TOKENS": "",
+                "LLM_PROVIDER_RETRIES": "",
+            },
+            clear=False,
+        ):
+            for key in ("LLM_TIMEOUT_SECONDS", "LLM_MAX_OUTPUT_TOKENS", "LLM_PROVIDER_RETRIES"):
+                os.environ.pop(key, None)
+            self.assertEqual(provider_timeout(remote), 90)
+
+        captured: dict = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({"choices": [{"message": {"content": "{}"}}]}).encode("utf-8")
+
+        def fake_urlopen(request, timeout):
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            captured["timeout"] = timeout
+            return FakeResponse()
+
+        with (
+            patch.dict("os.environ", {"LLM_PROVIDER": "gemini"}, clear=True),
+            patch("server.llm_analysis.urlopen", side_effect=fake_urlopen),
+        ):
+            self.assertEqual(call_provider([], remote), "{}")
+        self.assertEqual(captured["timeout"], 90)
+        self.assertEqual(captured["body"]["max_tokens"], 8192)
 
     def test_local_failure_can_fall_back_to_gemini_without_caching_as_local(self) -> None:
         ANALYSIS_CACHE.clear()

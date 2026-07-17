@@ -31,6 +31,8 @@ from tools.gemma_bakeoff import (
 from tools.model_bakeoff_eval import (
     EVALUATOR_VERSION,
     SECTION_ARRAYS,
+    TransientProviderError,
+    call_chat,
     compare,
     compatibility_errors,
     completeness,
@@ -137,15 +139,31 @@ class ModelBakeoffTests(unittest.TestCase):
                 return [("model.language_model", Module())]
 
         class FastModel:
+            kwargs: dict[str, object] = {}
+
             @staticmethod
-            def get_peft_model(model: Model, **_kwargs: object) -> Model:
+            def get_peft_model(model: Model, **kwargs: object) -> Model:
+                FastModel.kwargs = kwargs
                 Module.embed_tokens.weight.dtype = "float32"
                 return model
 
-        model, adjustments = prepare_lora_model(FastModel(), Model(), argparse.Namespace(lora_rank=16, seed=560))
+        model, adjustments = prepare_lora_model(
+            FastModel(),
+            Model(),
+            argparse.Namespace(lora_rank=16, lora_targets="all", seed=560),
+        )
         self.assertIsInstance(model, Model)
         self.assertEqual(adjustments, ["model.language_model.per_layer_model_projection"])
         self.assertEqual(Module.per_layer_model_projection.weight.dtype, "float32")
+        self.assertTrue(FastModel.kwargs["finetune_mlp_modules"])
+
+        prepare_lora_model(
+            FastModel(),
+            Model(),
+            argparse.Namespace(lora_rank=8, lora_targets="attention", seed=560),
+        )
+        self.assertTrue(FastModel.kwargs["finetune_attention_modules"])
+        self.assertFalse(FastModel.kwargs["finetune_mlp_modules"])
 
     def test_gemma4_projection_can_follow_float32_activation_dtype(self) -> None:
         class Weight:
@@ -372,6 +390,7 @@ class ModelBakeoffTests(unittest.TestCase):
             args = argparse.Namespace(
                 model="gemma4-e4b",
                 lora_rank=16,
+                lora_targets="all",
                 epochs=2,
                 learning_rate=2e-4,
                 gradient_accumulation=8,
@@ -388,6 +407,7 @@ class ModelBakeoffTests(unittest.TestCase):
                 "datasetFiles": {},
                 "maxSequenceLength": 1024,
                 "loraRank": 16,
+                "loraTargets": "all",
                 "epochs": 2,
                 "learningRate": 2e-4,
                 "gradientAccumulation": 8,
@@ -402,7 +422,7 @@ class ModelBakeoffTests(unittest.TestCase):
             manifest = {
                 **{key: identity[key] for key in (
                     "candidate", "baseModel", "baseModelRevision", "datasetHash", "datasetFiles", "maxSequenceLength",
-                    "loraRank", "epochs", "learningRate", "gradientAccumulation", "seed", "responseMarkers",
+                    "loraRank", "loraTargets", "epochs", "learningRate", "gradientAccumulation", "seed", "responseMarkers",
                 )},
                 "status": "complete",
                 "quantization": "Q8_0",
@@ -433,6 +453,67 @@ class ModelBakeoffTests(unittest.TestCase):
         mlx = generation_profile(args, "local")
         self.assertIn("responseFormat", mlx["unsupported"])
         self.assertNotIn("responseFormat", mlx["applied"])
+
+    def test_openai_profile_uses_reasoning_without_temperature(self) -> None:
+        args = argparse.Namespace(temperature=0.1, max_output_tokens=12000, reasoning_effort="medium", seed=None, runtime="")
+        profile = generation_profile(args, "openai")
+        self.assertEqual(profile["applied"]["reasoningEffort"], "medium")
+        self.assertEqual(profile["applied"]["maxOutputTokens"], 12000)
+        self.assertNotIn("temperature", profile["applied"])
+        self.assertIn("temperature", profile["unsupported"])
+
+    def test_openai_provider_settings_and_request_usage(self) -> None:
+        args = argparse.Namespace(provider="openai", base_url="", model="", runtime="")
+        with patch.dict(
+            os.environ,
+            {"OPENAI_API_KEY": "test-key", "OPENAI_DATASET_MODEL": "gpt-5.4-mini"},
+            clear=True,
+        ):
+            settings = provider_settings(args)
+        self.assertEqual(settings["baseUrl"], "https://api.openai.com/v1")
+        self.assertEqual(settings["model"], "gpt-5.4-mini")
+
+        payload = {
+            "choices": [{"message": {"content": '{"ok":true}'}}],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "total_tokens": 150,
+                "completion_tokens_details": {"reasoning_tokens": 20},
+            },
+        }
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *unused):
+                return False
+
+            def read(self):
+                return json.dumps(payload).encode("utf-8")
+
+        captured = {}
+
+        def fake_urlopen(request, timeout):
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            captured["timeout"] = timeout
+            return FakeResponse()
+
+        profile = generation_profile(
+            argparse.Namespace(temperature=0.1, max_output_tokens=12000, reasoning_effort="medium", seed=None, runtime=""),
+            "openai",
+        )
+        with (
+            patch("tools.model_bakeoff_eval.urlopen", side_effect=fake_urlopen),
+            patch("tools.model_bakeoff_eval.record_provider_usage") as usage,
+        ):
+            self.assertEqual(call_chat([{"role": "user", "content": "test"}], settings, 180, profile), '{"ok":true}')
+        self.assertEqual(captured["body"]["max_completion_tokens"], 12000)
+        self.assertEqual(captured["body"]["reasoning_effort"], "medium")
+        self.assertNotIn("max_tokens", captured["body"])
+        self.assertNotIn("temperature", captured["body"])
+        usage.assert_called_once_with(payload)
 
     def test_evaluator_does_not_normalise_an_invalid_shape_into_a_pass(self) -> None:
         row = training_row(1, "validation")
@@ -485,7 +566,7 @@ class ModelBakeoffTests(unittest.TestCase):
         self.assertLess(completeness(analysis, facts), 100)
         analysis["company"]["summary"] = "Not applicable to an index."
         analysis["company"]["dataGaps"] = []
-        self.assertLess(completeness(analysis, facts), 100)
+        self.assertEqual(completeness(analysis, facts), 100)
         facts["instrument"]["type"] = "equity"
         self.assertLess(completeness(analysis, facts), 80)
 
@@ -513,10 +594,7 @@ class ModelBakeoffTests(unittest.TestCase):
         )
         analysis["coach"]["companySummary"] = "Company analysis is not applicable."
         analysis["company"]["dataGaps"] = []
-        self.assertIn(
-            "company.dataGaps must explain unavailable issuer or constituent evidence",
-            non_company_applicability_errors(analysis, facts),
-        )
+        self.assertEqual(non_company_applicability_errors(analysis, facts), [])
 
     def test_generation_binding_ignores_scoring_code_but_rejects_prompt_changes(self) -> None:
         base = {
@@ -553,7 +631,7 @@ class ModelBakeoffTests(unittest.TestCase):
                 {
                     "id": row["id"],
                     "raw": f"raw-{index}",
-                    "error": "",
+                    "error": "historical provider error" if index == 0 else "",
                     "latencySeconds": 1,
                     "repairs": 0,
                     "evaluationFingerprint": "source-fingerprint",
@@ -598,6 +676,62 @@ class ModelBakeoffTests(unittest.TestCase):
             self.assertEqual(list(reused), [rows[0]["id"]])
             self.assertEqual(reused[rows[0]["id"]]["evaluationFingerprint"], "current-fingerprint")
             self.assertEqual(reused[rows[0]["id"]]["reusedFrom"], "source")
+
+    def test_reusable_responses_accepts_a_verified_source_subset(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target_rows = [training_row(1, "validation"), training_row(2, "validation")]
+            source_row = target_rows[0]
+            binding = {
+                "provider": "openai",
+                "model": "gpt-5.4-mini",
+                "baseUrl": "https://api.openai.com/v1",
+                "split": "validation",
+                "datasetFileSha256": "dataset",
+                "generationProfile": {"applied": {"reasoningEffort": "low"}},
+                "runtime": "openai-chat-completions",
+                "modelArtifactHash": "",
+                "quantization": "",
+                "promptVersion": "analysis-prompt.v8",
+                "runtimeSourceHash": "runtime",
+                "groundingSourceHash": "grounding",
+            }
+            source_config = {**binding, "caseIds": [source_row["id"]], "expectedCases": 15, "fingerprint": "source-fingerprint"}
+            (root / "subset-validation-config.json").write_text(json.dumps(source_config), encoding="utf-8")
+            source_response = {
+                "id": source_row["id"],
+                "raw": "valid",
+                "error": "",
+                "latencySeconds": 1,
+                "repairs": 0,
+                "evaluationFingerprint": "source-fingerprint",
+            }
+            (root / "subset-validation-responses.jsonl").write_text(json.dumps(source_response) + "\n", encoding="utf-8")
+            (root / "subset-validation-report.json").write_text(
+                json.dumps(
+                    {
+                        "evaluationFingerprint": "source-fingerprint",
+                        "responseContentHash": response_content_hash([source_response]),
+                        "caseIds": [source_row["id"]],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                patch("tools.model_bakeoff_eval.REPORT_ROOT", root),
+                patch(
+                    "tools.model_bakeoff_eval.evaluate_response",
+                    return_value={"id": source_row["id"], "raw": "valid", "error": "", "schemaValid": True, "semanticValid": True},
+                ),
+            ):
+                reused = reusable_responses(
+                    "subset",
+                    "validation",
+                    target_rows,
+                    {**binding, "caseIds": [row["id"] for row in target_rows], "expectedCases": 15, "fingerprint": "target"},
+                )
+            self.assertEqual(list(reused), [source_row["id"]])
 
     def test_evaluator_run_binds_checkpoints_reports_and_human_review_to_responses(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -658,6 +792,69 @@ class ModelBakeoffTests(unittest.TestCase):
             self.assertEqual(review["responseContentHash"], report["responseContentHash"])
             responses = [json.loads(line) for line in Path(report["responsesPath"]).read_text(encoding="utf-8").splitlines()]
             self.assertTrue(all(row["evaluationFingerprint"] == report["evaluationFingerprint"] for row in responses))
+
+            reused_args = argparse.Namespace(**vars(args))
+            reused_args.name = "integration-reused"
+            reused_args.reuse_responses_from = "integration"
+            with (
+                patch("tools.model_bakeoff_eval.PROVIDER_ROOT", provider_root),
+                patch("tools.model_bakeoff_eval.REPORT_ROOT", report_root),
+                patch("tools.model_bakeoff_eval.call_chat", side_effect=AssertionError("provider should not be called")),
+                patch("tools.model_bakeoff_eval.evaluate_response", side_effect=evaluated),
+                patch("tools.model_bakeoff_eval.current_git_commit", return_value="commit"),
+            ):
+                reused_report = run_bakeoff(reused_args)
+            self.assertEqual(reused_report["reusedCases"], 15)
+            reused_responses_path = Path(reused_report["responsesPath"])
+            self.assertTrue(reused_responses_path.is_file())
+            self.assertEqual(len(reused_responses_path.read_text(encoding="utf-8").splitlines()), 15)
+
+    def test_evaluator_stops_after_exhausted_transient_provider_retries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            provider_root = root / "provider"
+            report_root = root / "reports"
+            provider_root.mkdir()
+            rows = [training_row(index, "validation") for index in range(15)]
+            (provider_root / "pilot_validation.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                name="transient-stop",
+                provider="local",
+                model="",
+                base_url="http://127.0.0.1:8080/v1",
+                split="validation",
+                allow_sealed_eval=False,
+                validation_comparison=None,
+                evaluation_role="",
+                timeout=120,
+                temperature=0.1,
+                max_output_tokens=8192,
+                reasoning_effort="minimal",
+                seed=560,
+                rpm=15,
+                wait_on_short_quota=True,
+                max_wait_seconds=600,
+                provider_retries=1,
+                retry_backoff_seconds=0,
+                retry_errors=True,
+                runtime="mlx",
+                model_artifact_hash="artifact",
+                quantization="MLX-8bit",
+                case_ids="",
+            )
+            with (
+                patch("tools.model_bakeoff_eval.PROVIDER_ROOT", provider_root),
+                patch("tools.model_bakeoff_eval.REPORT_ROOT", report_root),
+                patch("tools.model_bakeoff_eval.call_chat", side_effect=TransientProviderError("Provider HTTP 503")) as provider,
+                patch("tools.model_bakeoff_eval.current_git_commit", return_value="commit"),
+            ):
+                report = run_bakeoff(args)
+            self.assertEqual(provider.call_count, 1)
+            self.assertEqual(report["cases"], 1)
+            self.assertEqual(report["providerStop"]["caseId"], rows[0]["id"])
 
     def test_local_provider_is_loopback_only_and_mlx_uses_default_model(self) -> None:
         args = argparse.Namespace(provider="local", base_url="http://127.0.0.1:8080/v1", model="", runtime="mlx")

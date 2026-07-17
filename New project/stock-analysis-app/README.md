@@ -185,7 +185,7 @@ python3 tools/llm_dataset.py export --pilot
 
 Gemini Flash generates and expands the reasoning examples within free-tier quota. Generation is paced at 15 RPM, every completed row is checkpointed, bounded short-window quota delays are retried, and daily or hard limits stop safely for a later resume. Twice-invalid answers are quarantined and block approval until regenerated. The complete `RetrievedRuleSetV1` payload is embedded in every provider-neutral training row.
 
-The teacher generator is provider-neutral. `tools/teacher_bakeoff.py` can compare OpenAI GPT-5.4 mini or Cerebras GPT-OSS 120B against accepted Gemini cases using identical facts, RAG rules, and strict audit gates. OpenAI and Cerebras candidates use constrained `LlmAnalysisV1` JSON decoding and are written only to ignored comparison artifacts; the gold corpus is unchanged until a reviewed teacher is explicitly selected. OpenAI reports include prompt, cached, completion, and reasoning-token usage plus an estimated USD cost so a small bake-off can be reviewed before corpus-scale generation.
+The teacher generator is provider-neutral. `tools/teacher_bakeoff.py` can compare OpenAI GPT-5.4 mini or Cerebras GPT-OSS 120B against accepted Gemini cases using identical facts, RAG rules, and strict audit gates. OpenAI and Cerebras candidates use constrained `LlmAnalysisV1` JSON decoding and are written only to ignored comparison artifacts; the gold corpus is unchanged until a reviewed teacher is explicitly selected. OpenAI reports include prompt, cached, completion, and reasoning-token usage plus an estimated USD cost so a small bake-off can be reviewed before corpus-scale generation. `tools/model_bakeoff_eval.py` also supports a complete OpenAI validation baseline with response reuse, which lets evaluator and presentation fixes rescore verified raw responses without buying another generation.
 
 For an isolated GPT-5.4 mini teacher comparison, keep the production `LLM_MODEL` on Gemini and set only `OPENAI_API_KEY` plus `OPENAI_DATASET_MODEL=gpt-5.4-mini` in `../.env`, then run:
 
@@ -195,7 +195,7 @@ python3 tools/teacher_bakeoff.py --provider openai --limit 3 --rpm 2
 
 The included `notebooks/gemma_bakeoff_colab.ipynb` trains `Gemma 4 E4B IT` or, when a T4 cannot pass its memory preflight, the smaller `Gemma 4 E2B IT` hardware fallback. `Gemma 4 12B IT` remains an optional stronger-accelerator experiment. Training enforces no truncation, response-only loss, deterministic seeds, and saved run manifests. Model artifacts and generated split files remain untracked.
 
-After the 75/15 pilot improves validation quality, `tools/llm_dataset.py expand` creates 1,080 audited descendants and preserves each gold case's split lineage. `tools/model_bakeoff_eval.py` compares base Gemini, untuned Gemma, and tuned Gemma with reports bound to exact source hashes, artifacts, responses, and human reviews. The 30-case evaluation set requires a passing validation comparison and allows each model role to run only once; promotion remains blocked unless every grounding, schema, completeness, human-quality, reliability, and 120-second latency gate passes. See `data/training/README.md` for the complete commands.
+After the 75/15 pilot improves validation quality, `tools/llm_dataset.py expand` creates 1,080 audited descendants and preserves each gold case's split lineage. `tools/model_bakeoff_eval.py` compares Gemini, OpenAI baselines, untuned Gemma, and tuned Gemma with reports bound to exact source hashes, artifacts, responses, and human reviews. The 30-case evaluation set requires a passing validation comparison and allows each model role to run only once; promotion remains blocked unless every grounding, schema, completeness, human-quality, reliability, and 120-second latency gate passes. See `data/training/README.md` for the complete commands.
 
 ### Reasoning
 
@@ -376,7 +376,7 @@ Related bridge scripts:
 - `tools/reasoning_dataset.py`: public snapshot collection and real reasoning-gold approval pipeline.
 - `tools/llm_dataset.py`: leak-proof Gemini expansion and provider-neutral dataset export.
 - `tools/gemma_bakeoff.py`: Unsloth QLoRA training and GGUF export.
-- `tools/model_bakeoff_eval.py`: resumable Gemini/Gemma evaluation and promotion gates.
+- `tools/model_bakeoff_eval.py`: resumable Gemini, OpenAI, and local Gemma evaluation with cost telemetry and promotion gates.
 - `tools/prepare_mlx_runtime.py`: checksummed MLX conversion and loopback-only local serving.
 - `tools/review_candidates.py`: local human-review and approval workspace.
 - `tools/approve_candidates.py`: strict grounding audit and provenance-aware delegated approval.
@@ -392,7 +392,9 @@ GEMINI_API_KEY=...
 LLM_MODEL=gemini-3.5-flash
 LLM_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
 LLM_TEMPERATURE=0.2
-LLM_TIMEOUT_SECONDS=45
+LLM_TIMEOUT_SECONDS=90
+LLM_MAX_OUTPUT_TOKENS=8192
+LLM_PROVIDER_RETRIES=2
 ```
 
 Fallback names are also supported:

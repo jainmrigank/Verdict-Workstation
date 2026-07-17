@@ -29,7 +29,7 @@ EMBEDDING_MODEL = "gemini-embedding-2"
 EMBEDDING_DIMENSIONS = 768
 MAX_RULES = 10
 RETRIEVED_RULESET_VERSION = "retrieved-rule-set.v1"
-ANALYSIS_PROMPT_VERSION = "analysis-prompt.v6"
+ANALYSIS_PROMPT_VERSION = "analysis-prompt.v8"
 
 ANALYSIS_CACHE: dict[str, dict[str, Any]] = {}
 ANALYSIS_CACHE_LOCK = threading.Lock()
@@ -40,6 +40,48 @@ QUERY_EMBEDDING_CACHE_LOCK = threading.Lock()
 
 TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9+./%-]{1,}", re.IGNORECASE)
 NUMBER_CLAIM_RE = re.compile(r"(?<![A-Za-z0-9])[-+]?\d[\d,]*(?:\.\d+)?")
+BACKEND_FACT_PATH_RE = re.compile(
+    r"\b(?:technicalEvidence|fundamentalEvidence|portfolioEvidence|userContext|deterministicAnalysis|instrument|uiOptions)\.[A-Za-z]",
+)
+VISIBLE_BACKEND_FIELD_RE = re.compile(
+    r"\b(?:riskBudget|cashFlowQuality|changePct|previousClose|sma20|sma50|atr14|atrPct|rsi14|patternsEnabled|userContext|technicalEvidence|fundamentalEvidence|portfolioEvidence)\b",
+    re.IGNORECASE,
+)
+INLINE_REFERENCE_ANNOTATION_RE = re.compile(r"\s*\[(?:facts|rules):[^\]\r\n]*\]", re.IGNORECASE)
+READER_FIELD_LABELS = {
+    "riskbudget": "risk budget",
+    "cashflowquality": "cash-flow quality",
+    "changepct": "percentage change",
+    "previousclose": "previous close",
+    "sma20": "20-day moving average",
+    "sma50": "50-day moving average",
+    "atr14": "ATR",
+    "atrpct": "ATR percentage",
+    "rsi14": "RSI",
+    "patternsenabled": "chart patterns setting",
+}
+UNSUPPORTED_RSI_LABEL_RE = re.compile(
+    r"\bRSI\b(?:\d+\.\d+|[^.!?]){0,120}\b(?:extended|extension|stretched|strong|weak|positive|negative|neutral|mixed-to-neutral|moderate|mid-range|midpoint|overbought|oversold|higher|limited)\b"
+    r"|\bRSI\b(?:\d+\.\d+|[^.!?]){0,120}\b(?:supports?|argues?|favou?rs?|signals?)\b"
+    r"|\b(?:extended|extension|stretched|strong|weak|positive|negative|neutral|mixed-to-neutral|moderate|mid-range|midpoint|overbought|oversold|higher|limited)\b(?:\d+\.\d+|[^.!?]){0,40}\bRSI\b",
+    re.IGNORECASE,
+)
+UNBENCHMARKED_PE_LABEL_RE = re.compile(
+    r"\b(?:high|low|cheap|expensive|rich|attractive)\b[^.!?]{0,28}\bP/?E\b"
+    r"|\bP/?E\b[^.!?]{0,28}\b(?:high|low|cheap|expensive|rich|attractive)\b",
+    re.IGNORECASE,
+)
+AFFIRMATIVE_TRANCHE_RE = re.compile(r"\b(?:use|enter|execute|act|size|reduce)\b[^.!?]{0,48}\btranches?\b", re.IGNORECASE)
+UNSUPPORTED_VOLATILITY_LABEL_RE = re.compile(
+    r"\b(?:high|low|limited|elevated|moderate|extreme|contained)\b[^.!?]{0,24}\bvolatility\b"
+    r"|\bvolatility\b[^.!?]{0,24}\b(?:high|low|limited|elevated|moderate|extreme|contained)\b",
+    re.IGNORECASE,
+)
+UNBENCHMARKED_CONCENTRATION_RE = re.compile(
+    r"\b(?:meaningful|high|low|large|small|safe|unsafe|concentrated)\b[^.!?]{0,24}\b(?:concentration|weight)\b"
+    r"|\b(?:concentration|weight)\b[^.!?]{0,24}\b(?:meaningful|high|low|large|small|safe|unsafe|concentrated)\b",
+    re.IGNORECASE,
+)
 DIRECT_TRADE_ACTION_RE = re.compile(
     r"(?:^|[.;:]\s*|\bbut\s+)(buy|add|sell|reduce|exit)\b|\b(buy|add|sell|reduce|exit)\b.{0,24}\b(now|immediately)\b",
     re.IGNORECASE,
@@ -70,6 +112,7 @@ SECTION_ARRAYS = {
     ),
     "portfolio": ("positionFit", "concentration", "sizing", "holdingActions", "risks"),
 }
+STANDARD_ANALYSIS_AREAS = ("decision", "chart", "company", "portfolio", "reasoning", "coach")
 
 
 def utc_now() -> str:
@@ -231,6 +274,9 @@ def retrieval_filters(context: dict[str, Any]) -> dict[str, Any]:
     ]
     return {
         "instrumentType": str(instrument.get("type") or "unknown").lower(),
+        "instrumentIdentity": " ".join(
+            str(instrument.get(key) or "").lower() for key in ("symbol", "name", "sector", "industry")
+        ),
         "action": str(user_context.get("action") or "Buy").lower(),
         "horizon": _normalise_horizon(str(user_context.get("horizon") or "")),
         "sector": str(instrument.get("sector") or "").lower(),
@@ -268,6 +314,18 @@ def _sector_allows(rule: dict[str, Any], sector: str, industry: str) -> bool:
 
 
 def rule_is_applicable(rule: dict[str, Any], filters: dict[str, Any]) -> bool:
+    identity = " ".join(str(rule.get(key) or "") for key in ("id", "module", "title", "chapter")).casefold()
+    instrument_identity = str(filters.get("instrumentIdentity") or "").casefold()
+    instrument_type = str(filters.get("instrumentType") or "").casefold()
+    commodity_markers = ("commodity", "currency", "gold", "silver", "crude", "natural gas", "usd", "inr")
+    if "currency and commodity futures" in identity and not any(marker in instrument_identity for marker in commodity_markers):
+        return False
+    if "sse instrument type filter" in identity and instrument_type != "unknown" and not any(
+        marker in instrument_identity for marker in ("social stock exchange", "sse", "non-profit", "npo")
+    ):
+        return False
+    if instrument_type in {"fund", "mutual fund", "mutual_fund", "etf", "index"} and "fundamental analysis" in identity:
+        return False
     if not _allows(rule.get("instrumentTypes") or [], filters["instrumentType"]):
         return False
     if not _allows(rule.get("actions") or [], filters["action"]):
@@ -330,11 +388,83 @@ def lexical_scored(context: dict[str, Any]) -> list[tuple[float, dict[str, Any]]
             score += 0.75 if filters["horizon"] in {_normalise_horizon(str(value)) for value in rule.get("horizons") or []} else 0.0
             scored.append((score, rule))
     scored.sort(key=lambda item: (-item[0], item[1]["id"]))
-    return scored or [(0.0, rule) for rule in candidates]
+    scored_ids = {rule["id"] for _, rule in scored}
+    scored.extend((0.0, rule) for rule in sorted(candidates, key=lambda item: item["id"]) if rule["id"] not in scored_ids)
+    return scored
+
+
+def _diverse_ranked_rules(
+    context: dict[str, Any],
+    ranked: list[tuple[float, dict[str, Any]]],
+    limit: int,
+) -> list[tuple[float, dict[str, Any]]]:
+    if limit <= 0:
+        return []
+    requested = {
+        area
+        for area in retrieval_filters(context)["requestedAreas"]
+        if area in STANDARD_ANALYSIS_AREAS
+    }
+    selected_ids: set[str] = set()
+    instrument_type = retrieval_filters(context)["instrumentType"]
+    domain_markers: tuple[str, ...] = ()
+    domain_limit = 0
+    if instrument_type in {"fund", "mutual fund", "mutual_fund"}:
+        domain_markers = ("mutual fund", "index funds", "asset allocation")
+        domain_limit = 7
+    elif instrument_type == "etf":
+        domain_markers = ("mutual fund fact-sheet", "index funds", "expense ratio", "mutual fund returns")
+        domain_limit = 3
+    elif instrument_type == "index":
+        domain_markers = ("index funds",)
+        domain_limit = 1
+    if domain_markers:
+        for _, rule in ranked:
+            identity = " ".join(str(rule.get(key) or "") for key in ("id", "module", "title", "chapter")).casefold()
+            if any(marker in identity for marker in domain_markers):
+                selected_ids.add(rule["id"])
+                if len(selected_ids) >= min(domain_limit, limit):
+                    break
+    uncovered = set(requested)
+    for _, rule in ranked:
+        if rule["id"] in selected_ids:
+            uncovered -= {str(area).lower() for area in rule.get("appliesTo") or []}
+    while uncovered and len(selected_ids) < limit:
+        best: tuple[float, dict[str, Any]] | None = None
+        best_coverage: set[str] = set()
+        best_relevance = -1
+        for candidate in ranked:
+            rule = candidate[1]
+            if rule["id"] in selected_ids:
+                continue
+            coverage = uncovered & {str(area).lower() for area in rule.get("appliesTo") or []}
+            identity = " ".join(str(rule.get(key) or "") for key in ("id", "module", "title", "chapter")).casefold()
+            relevance = 0
+            if "chart" in coverage and ("technical analysis" in identity or "pdf-m2-" in identity):
+                relevance += 100
+            if "company" in coverage and any(term in identity for term in ("fundamental", "sector analysis", "pdf-m3-")):
+                relevance += 50
+            if {"portfolio", "coach"} & coverage and any(term in identity for term in ("innerworth", "personal finance", "risk")):
+                relevance += 50
+            if len(coverage) > len(best_coverage) or (
+                len(coverage) == len(best_coverage) and relevance > best_relevance
+            ):
+                best = candidate
+                best_coverage = coverage
+                best_relevance = relevance
+        if not best or not best_coverage:
+            break
+        selected_ids.add(best[1]["id"])
+        uncovered -= best_coverage
+    for _, rule in ranked:
+        if len(selected_ids) >= limit:
+            break
+        selected_ids.add(rule["id"])
+    return [candidate for candidate in ranked if candidate[1]["id"] in selected_ids][:limit]
 
 
 def lexical_retrieve(context: dict[str, Any], limit: int = MAX_RULES) -> list[dict[str, Any]]:
-    return [rule for _, rule in lexical_scored(context)[:limit]]
+    return [rule for _, rule in _diverse_ranked_rules(context, lexical_scored(context), limit)]
 
 
 def _cosine(left: list[float], right: list[float]) -> float:
@@ -512,7 +642,7 @@ def _rule_set(context: dict[str, Any], ranked: list[tuple[float, dict[str, Any]]
 def retrieve_rule_set(context: dict[str, Any], limit: int = MAX_RULES) -> dict[str, Any]:
     lexical = lexical_scored(context)
     lexical_rank = {rule["id"]: index for index, (_, rule) in enumerate(lexical)}
-    lexical_top = lexical[:limit]
+    lexical_top = _diverse_ranked_rules(context, lexical, limit)
     metadata = _index_metadata(INDEX_PATH)
     expected_corpus = corpus_version()
     semantic_ready = (
@@ -549,7 +679,7 @@ def retrieve_rule_set(context: dict[str, Any], limit: int = MAX_RULES) -> dict[s
             semantic.get(rule["id"], 0.0) * 0.72
             + (1.0 / (1 + lexical_rank.get(rule["id"], max(len(lexical), 50)))) * 0.28
         ),
-    )[:limit]
+    )
     scored = [
         (
             semantic.get(rule["id"], 0.0) * 0.72
@@ -558,7 +688,11 @@ def retrieve_rule_set(context: dict[str, Any], limit: int = MAX_RULES) -> dict[s
         )
         for rule in ranked
     ]
-    return _rule_set(context, scored, "hybrid")
+    return _rule_set(context, _diverse_ranked_rules(context, scored, limit), "hybrid")
+
+
+def lexical_rule_set(context: dict[str, Any], limit: int = MAX_RULES) -> dict[str, Any]:
+    return _rule_set(context, _diverse_ranked_rules(context, lexical_scored(context), limit), "lexical")
 
 
 def static_retrieved_rule_set(rule_ids: list[str], context: dict[str, Any]) -> dict[str, Any]:
@@ -695,6 +829,319 @@ def _item(raw: Any, fallback_tone: str = "neutral") -> dict[str, Any] | None:
     if raw.get("title"):
         result["title"] = str(raw["title"])
     return result
+
+
+def sanitise_reader_annotations(value: Any, parent_key: str = "") -> Any:
+    """Clean reader-facing prose while preserving structured reference paths."""
+    if isinstance(value, dict):
+        return {key: sanitise_reader_annotations(item, key) for key, item in value.items()}
+    if isinstance(value, list):
+        if parent_key in {"factRefs", "ruleRefs"}:
+            return value
+        return [sanitise_reader_annotations(item, parent_key) for item in value]
+    if isinstance(value, str):
+        if parent_key in {"factRefs", "ruleRefs"}:
+            return value
+        text = INLINE_REFERENCE_ANNOTATION_RE.sub("", value)
+        return VISIBLE_BACKEND_FIELD_RE.sub(
+            lambda match: READER_FIELD_LABELS.get(match.group(0).casefold(), match.group(0)),
+            text,
+        ).strip()
+    return value
+
+
+def _neutralise_unsupported_evidence_labels(value: Any, facts: dict[str, Any], parent_key: str = "") -> Any:
+    if isinstance(value, dict):
+        return {key: _neutralise_unsupported_evidence_labels(item, facts, key) for key, item in value.items()}
+    if isinstance(value, list):
+        if parent_key in {"factRefs", "ruleRefs"}:
+            return value
+        return [_neutralise_unsupported_evidence_labels(item, facts, parent_key) for item in value]
+    if not isinstance(value, str) or parent_key in {"factRefs", "ruleRefs"}:
+        return value
+
+    text = re.sub(
+        r"\ba high absolute P/?E reading\b",
+        "the supplied P/E reading without a comparison benchmark",
+        value,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\bprofitable portfolio\b", "profitable position", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\bdoes not lose momentum\b",
+        "the supplied trend remains rising",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"\b(?:a\s+)?[-+]?\d+(?:\.\d+)?%?\s+weight\s+deserves\s+review\b",
+        "The supplied portfolio weight should be reviewed",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if text.casefold() == "active trading":
+        text = "Volume activity"
+    elif parent_key == "title" and "momentum" in text.casefold() and re.search(
+        r"\b(?:extended|extension|stretched|strong|weak|positive|negative|neutral|mixed-to-neutral|moderate|mid-range|midpoint|higher|limited)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        text = "Momentum reading"
+    verdict = str((facts.get("deterministicAnalysis") or {}).get("verdict") or "").strip()
+    action = str((facts.get("userContext") or {}).get("action") or "").strip()
+
+    def preserved_context(original: str) -> str:
+        parts = []
+        if verdict and verdict.casefold() in original.casefold():
+            parts.append(verdict)
+        if action and action.casefold() in original.casefold() and action.casefold() != verdict.casefold():
+            parts.append(f"{action} is the requested action")
+        return ". ".join(parts) + (". " if parts else "")
+
+    if UNBENCHMARKED_PE_LABEL_RE.search(text) and not re.search(r"\b(?:benchmark|comparison)\b", text, re.IGNORECASE):
+        if parent_key == "title":
+            text = "P/E context"
+        else:
+            text = f"{preserved_context(text)}The supplied P/E has no comparison benchmark."
+    if UNSUPPORTED_VOLATILITY_LABEL_RE.search(text) and not re.search(r"\b(?:benchmark|threshold|comparison)\b", text, re.IGNORECASE):
+        if parent_key == "title":
+            text = "Volatility context"
+        else:
+            trend = str((facts.get("technicalEvidence") or {}).get("trend") or "").strip()
+            trend_text = f"The supplied trend is {trend}. " if trend else ""
+            text = f"{preserved_context(text)}{trend_text}Supplied ATR evidence has no volatility threshold."
+    if UNBENCHMARKED_CONCENTRATION_RE.search(text) and not re.search(r"\b(?:benchmark|threshold|comparison)\b", text, re.IGNORECASE):
+        if parent_key == "title":
+            text = "Concentration context"
+        else:
+            text = f"{preserved_context(text)}The supplied portfolio weight has no concentration benchmark."
+    rsi = (facts.get("technicalEvidence") or {}).get("rsi14")
+    if not isinstance(rsi, (int, float)) or isinstance(rsi, bool):
+        return text
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    neutral = f"RSI is {rsi}; no threshold-based label is applied."
+    trend = str((facts.get("technicalEvidence") or {}).get("trend") or "").strip()
+    cleaned: list[str] = []
+    for sentence in sentences:
+        unsupported_momentum = bool(
+            UNSUPPORTED_RSI_LABEL_RE.search(sentence)
+            or re.search(
+                r"\bMomentum\s+is\s+(?:extended|stretched|strong|weak|positive|negative|neutral|mixed-to-neutral|moderate|mid-range|midpoint|limited)\b",
+                sentence,
+                re.IGNORECASE,
+            )
+        )
+        if not unsupported_momentum:
+            cleaned.append(sentence)
+            continue
+        if parent_key == "title":
+            cleaned.append("Momentum reading")
+            continue
+        trend_text = f"The supplied trend is {trend}. " if trend else ""
+        cleaned.append(f"{preserved_context(sentence)}{trend_text}{neutral}")
+    return " ".join(cleaned)
+
+
+def _non_company_gap_is_applicable(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+    text = str(item.get("text") or "").casefold()
+    relevant = (
+        "mandate", "benchmark", "expense", "tracking", "composition", "exit load", "liquidity", "spread",
+        "proxy", "implementation", "execution", "identity", "history", "price data",
+    )
+    inapplicable = (
+        "company", "operating-company", "business summary", "financial ratio", "cash flow", "cash-flow",
+        "profitability", "balance sheet", "p/e", "price-to-book", "valuation ratio", "fundamental confirmation",
+    )
+    return any(term in text for term in relevant) or not any(term in text for term in inapplicable)
+
+
+def _is_affirmative_tranche_instruction(text: str) -> bool:
+    if not AFFIRMATIVE_TRANCHE_RE.search(text):
+        return False
+    return not re.search(r"\b(?:avoid|do not|don't|no exact|not supplied|should not|cannot|can't)\b", text, re.IGNORECASE)
+
+
+def _rule_supports_section(rule: dict[str, Any], section: str) -> bool:
+    areas = {str(value).casefold() for value in rule.get("appliesTo") or []}
+    constrained = areas & set(STANDARD_ANALYSIS_AREAS)
+    if not constrained:
+        return True
+    identity = " ".join(str(rule.get(key) or "") for key in ("id", "module", "title", "chapter")).casefold()
+    if section == "company" and any(marker in identity for marker in ("mutual fund", "index funds")):
+        return True
+    aliases = {
+        "reasoning": {"reasoning", "decision", "chart", "company", "portfolio"},
+        "coach": {"coach", "decision", "portfolio"},
+    }
+    return bool(constrained & aliases.get(section, {section}))
+
+
+def _best_rule_for_item(
+    item: dict[str, Any],
+    section: str,
+    rules: list[dict[str, Any]],
+    instrument_type: str,
+) -> str | None:
+    candidates = [rule for rule in rules if _rule_supports_section(rule, section)]
+    if not candidates:
+        return None
+    item_tokens = set(_tokens(f"{item.get('title') or ''} {item.get('text') or ''}"))
+
+    def score(rule: dict[str, Any]) -> tuple[int, int, str]:
+        rule_tokens = set(_tokens(_rule_text(rule)))
+        identity = " ".join(str(rule.get(key) or "") for key in ("id", "module", "title", "chapter")).casefold()
+        fact_refs = {str(ref) for ref in item.get("factRefs") or []}
+        item_text = f"{item.get('title') or ''} {item.get('text') or ''}".casefold()
+        preference = 0
+        if any(ref.startswith("technicalEvidence.") for ref in fact_refs) and (
+            "technical analysis" in identity or "pdf-m2-" in identity
+        ):
+            preference += 100
+        if any(ref.startswith("portfolioEvidence.") for ref in fact_refs) and "asset allocation" in identity:
+            preference += 100
+        if any(ref.startswith("userContext.") for ref in fact_refs) and "asset allocation" in identity:
+            preference += 60
+        if any(term in item_text for term in ("mandate", "benchmark", "expense ratio", "tracking", "exit load", "fund facts")) and any(
+            marker in identity for marker in ("mutual fund", "index funds")
+        ):
+            preference += 100
+        if section == "chart" and ("technical analysis" in identity or "pdf-m2-" in identity):
+            preference += 50
+        if section == "company" and instrument_type == "equity" and "fundamental analysis" in identity:
+            preference += 30
+        if section == "portfolio" and any(marker in identity for marker in ("personal finance", "innerworth", "asset allocation")):
+            preference += 30
+        if instrument_type in {"fund", "mutual fund", "mutual_fund", "etf"} and section in {
+            "decision", "company", "portfolio", "coach", "reasoning"
+        } and any(
+            marker in identity for marker in ("mutual fund", "index funds", "asset allocation")
+        ):
+            preference += 40
+        if instrument_type == "index" and section != "chart" and "index funds" in identity:
+            preference += 40
+        return (preference, len(item_tokens & rule_tokens), str(rule.get("id") or ""))
+
+    return max(candidates, key=score).get("id")
+
+
+def _normalise_rule_refs(value: dict[str, Any], rule_set: dict[str, Any]) -> dict[str, Any]:
+    rules = [rule for rule in rule_set.get("rules") or [] if isinstance(rule, dict) and rule.get("id")]
+    if not rules:
+        return value
+    instrument_type = str((rule_set.get("filters") or {}).get("instrumentType") or "").casefold()
+
+    def normalise_item(item: Any, section: str) -> None:
+        if not isinstance(item, dict) or "ruleRefs" not in item:
+            return
+        replacement = _best_rule_for_item(item, section, rules, instrument_type)
+        refs = [replacement] if replacement else []
+        item["ruleRefs"] = list(dict.fromkeys(refs))
+
+    for section in ("decision", "chart", "company", "portfolio"):
+        section_value = value.get(section)
+        if not isinstance(section_value, dict):
+            continue
+        for array_name in SECTION_ARRAYS[section]:
+            for item in section_value.get(array_name) or []:
+                normalise_item(item, section)
+    for item in ((value.get("reasoning") or {}).get("steps") or []):
+        normalise_item(item, "reasoning")
+    for item in ((value.get("coach") or {}).get("questionsBeforeAction") or []):
+        normalise_item(item, "coach")
+    return value
+
+
+def prepare_provider_analysis(
+    value: Any,
+    facts: dict[str, Any] | None = None,
+    rule_set: dict[str, Any] | None = None,
+) -> Any:
+    """Apply safe structural cleanup without changing narrative meaning."""
+    if isinstance(value, dict) and set(value) == {"decision"} and isinstance(value.get("decision"), dict):
+        nested = value["decision"]
+        nested_sections = {"chart", "company", "portfolio", "reasoning", "coach", "warnings"}
+        if nested_sections.issubset(nested):
+            decision = {key: item for key, item in nested.items() if key not in nested_sections}
+            value = {"decision": decision, **{key: nested[key] for key in nested_sections}}
+    value = sanitise_reader_annotations(value)
+    if not isinstance(value, dict) or not isinstance(facts, dict):
+        return value
+    value = _neutralise_unsupported_evidence_labels(value, facts)
+
+    instrument_type = str((facts.get("instrument") or {}).get("type") or "").casefold()
+    if instrument_type in {"fund", "mutual fund", "etf", "index"}:
+        company = value.get("company")
+        if isinstance(company, dict):
+            for array_name in SECTION_ARRAYS["company"]:
+                if array_name != "dataGaps":
+                    company[array_name] = []
+            company["dataGaps"] = [
+                item for item in company.get("dataGaps") or [] if _non_company_gap_is_applicable(item)
+            ]
+        decision = value.get("decision")
+        if isinstance(decision, dict):
+            decision["dataGaps"] = [
+                item for item in decision.get("dataGaps") or [] if _non_company_gap_is_applicable(item)
+            ]
+
+    verdict = str((facts.get("deterministicAnalysis") or {}).get("verdict") or "").strip()
+    if verdict.casefold() != "buy in tranches":
+        sizing = ((value.get("portfolio") or {}).get("sizing") or [])
+        if sizing and isinstance(sizing[0], dict) and _is_affirmative_tranche_instruction(str(sizing[0].get("text") or "")):
+            sizing[0]["text"] = (
+                "No transaction sizing is justified by the supplied evidence; preserve the stated risk budget "
+                "until the deterministic posture changes."
+            )
+    if verdict.casefold() == "reduce":
+        decision = value.get("decision")
+        if isinstance(decision, dict):
+            decision["summary"] = (
+                "Deterministic verdict: Reduce. This index requires an identified investable proxy before execution; "
+                "the quote alone cannot determine sizing or timing."
+                if instrument_type == "index"
+                else "Deterministic verdict: Reduce. The supplied evidence is mixed; exact quantity and timing remain "
+                "constrained by the stated risk limits and available position context."
+            )
+        for section_name, array_name in (("decision", "nextActions"), ("portfolio", "holdingActions")):
+            items = ((value.get(section_name) or {}).get(array_name) or [])
+            if not items or not isinstance(items[0], dict):
+                continue
+            item = items[0]
+            if instrument_type == "index":
+                item["text"] = (
+                    "Sell is the requested review action. Apply Reduce only to the corresponding investable proxy "
+                    "after it is identified; until then, defer execution."
+                    if section_name == "portfolio"
+                    else "Apply Reduce only to the corresponding investable proxy after it is identified. "
+                    "Until then, defer execution because an index quote alone cannot support sizing or execution."
+                )
+            else:
+                item["text"] = (
+                    "Sell is the requested review action. Apply Reduce to the existing position; the supplied "
+                    "evidence does not justify an exact quantity or timing."
+                    if section_name == "portfolio"
+                    else "Apply the deterministic Reduce verdict to the existing position. The supplied evidence "
+                    "does not justify an exact quantity or timing, so keep execution within the stated risk limits."
+                )
+            refs = [str(ref) for ref in item.get("factRefs") or []]
+            for ref in ("deterministicAnalysis.verdict", "instrument.type"):
+                if ref not in refs:
+                    refs.append(ref)
+            item["factRefs"] = refs
+        sizing = ((value.get("portfolio") or {}).get("sizing") or [])
+        if sizing and isinstance(sizing[0], dict):
+            sizing[0]["text"] = (
+                "The supplied facts do not justify an exact reduction quantity or timing; "
+                "keep execution within the stated risk budget."
+            )
+            refs = [str(ref) for ref in sizing[0].get("factRefs") or []]
+            for ref in ("deterministicAnalysis.verdict", "portfolioEvidence.riskBudget"):
+                if ref not in refs:
+                    refs.append(ref)
+            sizing[0]["factRefs"] = refs
+    return _normalise_rule_refs(value, rule_set) if isinstance(rule_set, dict) else value
 
 
 def normalise_analysis(raw: Any, fingerprint: str, sources: list[dict[str, Any]]) -> dict[str, Any]:
@@ -955,7 +1402,7 @@ def _direct_trade_actions(text: str) -> set[str]:
         verb = next((value for value in match.groups()[:2] if value), "").casefold()
         tail = text[match.end():match.end() + 32].lstrip().casefold()
         if re.match(r"^(?::|-)", tail) or re.match(
-            r"(?:only|if|after|when|unless|case|scenario|action|decision|request|review|discipline|setup|is not|is deferred|is premature|is the requested|remains)\b",
+            r"(?:only|if|after|when|unless|case|scenario|action|decision|request|review|discipline|setup|is not|is deferred|is premature|is the requested|is the user action|remains)\b",
             tail,
         ):
             continue
@@ -971,6 +1418,21 @@ def semantic_analysis_errors(analysis: dict[str, Any], facts: dict[str, Any], ru
     errors: list[str] = []
     allowed_facts = _fact_reference_paths(facts)
     allowed_rules = {str(rule.get("id")) for rule in rule_set.get("rules") or [] if isinstance(rule, dict)}
+    for path, text in _claim_strings(analysis):
+        if BACKEND_FACT_PATH_RE.search(text):
+            errors.append(f"{path} exposes a backend fact path in reader-facing prose")
+        if VISIBLE_BACKEND_FIELD_RE.search(text):
+            errors.append(f"{path} exposes a backend field name in reader-facing prose")
+        if UNSUPPORTED_RSI_LABEL_RE.search(text):
+            errors.append(f"{path} applies an unsupported qualitative RSI label")
+        if UNBENCHMARKED_PE_LABEL_RE.search(text) and not re.search(r"\b(?:benchmark|comparison)\b", text, re.IGNORECASE):
+            errors.append(f"{path} applies an unbenchmarked P/E label")
+        if UNSUPPORTED_VOLATILITY_LABEL_RE.search(text) and not re.search(r"\b(?:benchmark|threshold|comparison)\b", text, re.IGNORECASE):
+            errors.append(f"{path} applies an unsupported qualitative volatility label")
+        if UNBENCHMARKED_CONCENTRATION_RE.search(text) and not re.search(r"\b(?:benchmark|threshold|comparison)\b", text, re.IGNORECASE):
+            errors.append(f"{path} applies an unbenchmarked concentration label")
+        if re.search(r"\bprofitable portfolio\b", text, re.IGNORECASE):
+            errors.append(f"{path} infers portfolio profitability from position evidence")
     for path, item in _analysis_items(analysis):
         fact_refs = item.get("factRefs") or []
         rule_refs = item.get("ruleRefs") or []
@@ -1066,11 +1528,91 @@ def semantic_analysis_errors(analysis: dict[str, Any], facts: dict[str, Any], ru
         )
         if not any(term in company_summary for term in applicability_terms):
             errors.append("company.summary must explicitly mark company fundamentals non-applicable for this instrument")
+    source_warnings = " ".join(
+        str(value) for value in (facts.get("dataQuality") or {}).get("sourceWarnings") or []
+    ).casefold()
+    if any(term in source_warnings for term in ("identity conflict", "identity mismatch", "name mismatch", "symbol mismatch")):
+        warning_text = " ".join(str(value) for value in analysis.get("warnings") or []).casefold()
+        if not any(term in warning_text for term in ("identity", "name mismatch", "symbol mismatch")):
+            errors.append("instrument identity conflicts must be repeated in warnings")
     action = str((facts.get("userContext") or {}).get("action") or "")
     for index, item in enumerate((analysis.get("portfolio") or {}).get("holdingActions") or []):
         if action and action.casefold() not in str(item.get("text") or "").casefold():
             errors.append(f"portfolio.holdingActions[{index}].text must include the exact action label {action!r}")
+    verdict = str((facts.get("deterministicAnalysis") or {}).get("verdict") or "").casefold()
+    if verdict != "buy in tranches":
+        for path, text in _claim_strings(analysis):
+            if _is_affirmative_tranche_instruction(text):
+                errors.append(f"{path} introduces tranche execution outside a Buy in Tranches verdict")
     return errors
+
+
+def _analysis_guardrails(context: dict[str, Any]) -> list[str]:
+    instrument = context.get("instrument") if isinstance(context.get("instrument"), dict) else {}
+    technical = context.get("technicalEvidence") if isinstance(context.get("technicalEvidence"), dict) else {}
+    portfolio = context.get("portfolioEvidence") if isinstance(context.get("portfolioEvidence"), dict) else {}
+    user_context = context.get("userContext") if isinstance(context.get("userContext"), dict) else {}
+    data_quality = context.get("dataQuality") if isinstance(context.get("dataQuality"), dict) else {}
+    instrument_type = str(instrument.get("type") or "unknown").casefold()
+    guardrails = [
+        "Evidence-only writing: do not turn a sector label, company description, ratio, trend label, or retrieved rule into an unstated company-specific cause, forecast, market-share claim, demand claim, resilience claim, or catalyst.",
+        "Use retrieved rules only as analytical checklists and cautions. A rule is not evidence that the named event, quality, threshold, or business condition exists for this instrument.",
+        "Do not label a supplied ratio cheap, expensive, healthy, weak, high, low, safe, or reasonable unless a cited fact or rule supplies the comparison basis. State the value and the missing benchmark instead.",
+        "Do not infer liquidity from average volume alone, portfolio suitability from risk-profile labels alone, or concentration/sizing safety without consistent position and portfolio facts.",
+        "Do not call RSI overbought, oversold, healthy, supportive, or stretched unless a cited retrieved rule explicitly supplies the threshold. Report the supplied RSI and direction without importing an outside benchmark.",
+        "Do not invent stop-losses, trailing stops, order types, trim percentages, tranche counts, implementation costs, or target prices. Unrealized profit or loss alone is never a reason to Buy, Sell, Reduce, or Hold.",
+        "If supplied facts conflict, look implausible together, or identify different instruments, do not reconcile them. Surface the conflict in warnings and data gaps, and avoid precise action or sizing advice that depends on it.",
+        "A cashFlowQuality value such as available states data availability only. It is not evidence that cash flow is strong, weak, complete, or decision-supportive without the underlying figures.",
+    ]
+    action = str(user_context.get("action") or "").casefold()
+    if action == "buy":
+        guardrails.append(
+            "This is a fresh Buy analysis. Null quantity and averagePrice are expected because no position exists; never call them missing inputs. Treat capital and riskBudget as available planning facts, while avoiding invented units, exact size, or tranche count."
+        )
+    if portfolio.get("weight") == 0 or portfolio.get("weight") == 0.0:
+        guardrails.append(
+            "Portfolio weight 0.0 is a known zero current position, not missing data. It does not prove suitability or diversification; request broader portfolio composition when concentration or fit depends on it."
+        )
+    candles = technical.get("candles")
+    if isinstance(candles, (int, float)) and not isinstance(candles, bool) and 0 < candles < 20:
+        guardrails.append(
+            f"Only {candles:g} candle(s) are supplied. Mark chart evidence as insufficient; do not interpret trend, RSI, moving averages, ATR, volume, support, resistance, breakouts, or timing as reliable signals. Do not reuse their values as monitoring or action levels. The next action is to obtain sufficient multi-period history."
+        )
+    if instrument_type == "index":
+        guardrails.append(
+            "An index is a reference benchmark, not directly purchasable or sellable. Frame Buy/Sell as analysis of an explicitly identified investable proxy; if no proxy is supplied, state that implementation, units, sizing, costs, and execution cannot be assessed."
+        )
+    elif instrument_type in {"fund", "mutual fund"}:
+        guardrails.append(
+            "A mutual fund is bought or redeemed at applicable NAV, not traded like an exchange-listed stock. Prioritize mandate, benchmark, expense ratio, tracking difference or error where relevant, portfolio composition, exit load, performance consistency, risk, horizon, and allocation role. Treat missing company ratios as non-applicable, not as evidence weakening the fund thesis; do not prescribe intraday timing, exchange volume, breakout orders, or stop-losses."
+        )
+        guardrails.append(
+            "Keep non-company analysis concise: explain applicability in company.summary, leave operating-company narrative arrays empty, and use company.dataGaps only for missing fund-specific evidence such as mandate, benchmark, expense ratio, tracking, portfolio composition, or exit load. Missing business summaries, company cash flow, ratios, and company updates are non-applicable, not fund data gaps. Do not turn inapplicable stock-trading techniques into prominent user warnings."
+        )
+    elif instrument_type == "etf":
+        guardrails.append(
+            "An ETF is exchange traded, but company-style fundamentals remain non-applicable. Discuss execution liquidity only when spread or relevant trading evidence is supplied, and distinguish fund exposure from an operating-company thesis."
+        )
+    source_warnings = " ".join(str(value) for value in data_quality.get("sourceWarnings") or []).casefold()
+    if any(term in source_warnings for term in ("identity conflict", "identity mismatch", "name mismatch", "symbol mismatch")):
+        guardrails.append(
+            "The supplied sources contain an instrument identity conflict. Repeat it in warnings, treat affected facts as unusable, and do not give an entry, exit, level, or sizing instruction until identity is resolved."
+        )
+    sector_and_industry = f"{instrument.get('sector') or ''} {instrument.get('industry') or ''}".casefold()
+    if any(term in sector_and_industry for term in ("bank", "banking", "lender")):
+        guardrails.append(
+            "For a bank or lender, do not list ordinary industrial debt-to-equity, company revenue, or company profit margin as the central data gaps. Prioritize supplied bank-specific evidence such as capital adequacy, asset quality, NPAs, margins, deposits, loan growth, and provisioning."
+        )
+    compact_symbol = re.sub(r"[^a-z0-9]", "", str(instrument.get("symbol") or "").casefold())
+    compact_name = re.sub(r"[^a-z0-9]", "", str(instrument.get("name") or "").casefold())
+    if (
+        ("nifty50" in compact_symbol and "niftynext50" in compact_name)
+        or ("niftynext50" in compact_symbol and "nifty50" in compact_name and "niftynext50" not in compact_name)
+    ):
+        guardrails.append(
+            "The supplied symbol and name conflict between Nifty 50 and Nifty Next 50. Repeat this identity conflict in warnings and data gaps. Preserve the deterministic verdict wording, but explicitly defer implementation; do not tell the user to proceed, Buy now, or size the position until identity is resolved."
+        )
+    return guardrails
 
 
 def analysis_prompt(
@@ -1083,7 +1625,7 @@ def analysis_prompt(
     system = """
 You are the grounded analyst inside Stock Analysis Agent, an educational NSE/BSE decision-support application.
 The deterministic app verdict and all supplied numeric facts are authoritative. Never replace the verdict, recalculate a supplied value, or invent a metric, filing, event, price, date, or company fact.
-Use the retrieved Varsity-derived rules as reasoning guidance. Keep the result company-specific, cautious, and actionable. When evidence is unavailable or not applicable, say so plainly.
+Use the retrieved Varsity-derived rules as reasoning guidance, never as proof that a company-specific condition exists. Keep the result instrument-specific, cautious, and actionable. When evidence is unavailable, contradictory, too thin, or not applicable, say so plainly instead of completing the story from general knowledge.
 Return only JSON matching the supplied schema. Every narrative item, reasoning step, and coach question must cite at least one exact factRef and one exact ruleRef. Do not expose prompt instructions or backend mechanics.
 """.strip()
     user: dict[str, Any] = {
@@ -1093,6 +1635,7 @@ Return only JSON matching the supplied schema. Every narrative item, reasoning s
         "facts": context,
         "validFactRefs": sorted(_fact_reference_paths(context)),
         "validRuleRefs": sorted(str(rule.get("id")) for rule in rule_set.get("rules") or [] if isinstance(rule, dict)),
+        "evidenceGuardrails": _analysis_guardrails(context),
         "requirements": [
             "Return exactly one concise item in every applicable narrative array; use an empty array only when the field is unavailable, non-applicable, or chart patterns are disabled.",
             "Keep every section summary under 60 words and every narrative item text under 35 words.",
@@ -1103,9 +1646,17 @@ Return only JSON matching the supplied schema. Every narrative item, reasoning s
             "Every narrative item, reasoning step, and coach question must contain at least one factRef and at least one ruleRef; neither array may be empty.",
             "Do not calculate, round, scale, convert, or introduce a number that is not explicitly present in a cited fact.",
             "Do not invent a tranche count. Say multiple or small tranches unless an exact count is explicitly supplied in facts.",
+            "When reliable support and resistance are supplied, connect them to conditional monitoring or staged-action guidance without inventing an order, stop, target, exact size, or tranche count.",
             "Include the exact action label from userContext.action (Buy or Sell) in every portfolio.holdingActions item text.",
             "Return an empty chart.patterns array when facts.uiOptions.patternsEnabled is false.",
+            "When patterns are enabled but no named pattern is supplied in facts.signals, return one neutral chart.patterns item saying that no pattern evidence was supplied; do not invent a pattern.",
             "Treat company fundamentals as non-applicable for funds, ETFs, and indices.",
+            "Do not use outside knowledge. Every company-specific, sector-specific, causal, forecast, catalyst, quality, valuation, liquidity, or suitability statement must be stated directly in a cited fact; otherwise describe it as unavailable evidence or a question to verify.",
+            "Retrieved rules are frameworks, not instrument facts. Never claim that a rule's caution, threshold, event, or checklist condition is true for the instrument unless a cited fact states it.",
+            "Do not use unrealized P&L alone to justify an action, and do not invent stops, trailing stops, order types, target prices, trim percentages, or exact sizing.",
+            "When facts conflict or history is too thin, warnings and data gaps are the action: do not manufacture a normal analysis from unreliable inputs.",
+            "Write reasoning.evidence, reasoning.implication, and reasoning.action as concise reader-facing prose, never as raw fact-path identifiers or backend field lists.",
+            "Use plain reader-facing labels in all prose. Never display raw camelCase backend names such as riskBudget, cashFlowQuality, previousClose, changePct, or patternsEnabled.",
         ],
     }
     if repair:
@@ -1162,7 +1713,7 @@ def local_endpoint_is_loopback(config: dict[str, str]) -> bool:
 def provider_timeout(config: dict[str, str]) -> float:
     if runtime_provider(config) == "local_openai":
         return min(120.0, max(1.0, float(os.environ.get("LOCAL_LLM_TIMEOUT_SECONDS", "120"))))
-    return min(120.0, max(1.0, float(os.environ.get("LLM_TIMEOUT_SECONDS", "45"))))
+    return min(120.0, max(1.0, float(os.environ.get("LLM_TIMEOUT_SECONDS", "90"))))
 
 
 def provider_version(config: dict[str, str]) -> str:
@@ -1224,6 +1775,7 @@ def call_provider(messages: list[dict[str, str]], config: dict[str, str]) -> str
         if provider == "local_openai":
             body["max_tokens"] = int(os.environ.get("LOCAL_LLM_MAX_TOKENS", "8192"))
         else:
+            body["max_tokens"] = int(os.environ.get("LLM_MAX_OUTPUT_TOKENS", "8192"))
             body["reasoning_effort"] = os.environ.get("LLM_REASONING_EFFORT", "minimal")
         request = Request(
             f"{config['base_url']}/chat/completions",
@@ -1232,7 +1784,11 @@ def call_provider(messages: list[dict[str, str]], config: dict[str, str]) -> str
             method="POST",
         )
         extractor = _extract_openai_text
-    attempts = 1 if provider == "local_openai" else 3
+    attempts = (
+        1
+        if provider == "local_openai"
+        else min(3, max(1, int(os.environ.get("LLM_PROVIDER_RETRIES", "2"))))
+    )
     acquired = False
     if provider == "local_openai":
         acquired = LOCAL_GENERATION_LOCK.acquire(timeout=timeout)
@@ -1323,7 +1879,7 @@ def _generate_analysis(context: dict[str, Any], config: dict[str, str] | None) -
                 last_error = str(exc)
                 break
             try:
-                parsed = json.loads(content)
+                parsed = prepare_provider_analysis(json.loads(content), context, rule_set)
                 raw_errors = validate_raw_analysis(parsed)
                 if raw_errors:
                     raise ValueError("; ".join(raw_errors))

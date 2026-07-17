@@ -24,7 +24,9 @@ if str(APP_ROOT) not in os.sys.path:
 from server.llm_analysis import (
     ANALYSIS_PROMPT_VERSION,
     analysis_prompt,
+    lexical_rule_set,
     normalise_analysis,
+    prepare_provider_analysis,
     semantic_analysis_errors,
     validate_analysis,
     validate_raw_analysis,
@@ -36,11 +38,15 @@ from tools.llm_dataset import (
     GeminiQuotaError,
     approved_gold,
     configure_gemini_pacing,
+    estimated_provider_cost,
     load_local_env,
     pace_gemini_request,
     parse_gemini_quota_error,
     provider_row,
+    provider_usage_snapshot,
     read_jsonl,
+    record_provider_usage,
+    reset_provider_usage,
     write_jsonl,
 )
 from tools.reasoning_dataset import verify_evaluation_seal
@@ -86,6 +92,16 @@ def provider_settings(args: argparse.Namespace) -> dict[str, str]:
             "model": args.model or os.environ.get("LLM_MODEL") or os.environ.get("GEMINI_DATASET_MODEL") or "gemini-3.5-flash",
             "provider": "gemini",
         }
+    if args.provider == "openai":
+        key = os.environ.get("OPENAI_DATASET_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        if not key:
+            raise RuntimeError("OPENAI_API_KEY is required.")
+        return {
+            "baseUrl": (args.base_url or os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/"),
+            "apiKey": key,
+            "model": args.model or os.environ.get("OPENAI_DATASET_MODEL") or "gpt-5.4-mini",
+            "provider": "openai",
+        }
     base_url = (args.base_url or os.environ.get("LOCAL_LLM_BASE_URL") or "http://127.0.0.1:8080/v1").rstrip("/")
     if (urlsplit(base_url).hostname or "").casefold() not in {"127.0.0.1", "localhost", "::1"}:
         raise RuntimeError("Local bake-off endpoints must be bound to loopback.")
@@ -111,14 +127,21 @@ def generation_profile(args: argparse.Namespace, provider: str) -> dict[str, Any
         "seed": args.seed,
         "responseFormat": "json_object",
     }
-    applied: dict[str, Any] = {
-        "temperature": args.temperature,
-        "maxOutputTokens": args.max_output_tokens,
-    }
+    applied: dict[str, Any] = {"maxOutputTokens": args.max_output_tokens}
     unsupported: list[str] = []
     if provider == "gemini":
+        applied["temperature"] = args.temperature
         applied["reasoningEffort"] = reasoning_effort
+    elif provider == "openai":
+        if reasoning_effort == "minimal":
+            raise RuntimeError("OpenAI evaluations require --reasoning-effort none, low, medium, high, or xhigh.")
+        applied["reasoningEffort"] = reasoning_effort
+        if reasoning_effort == "none":
+            applied["temperature"] = args.temperature
+        else:
+            unsupported.append("temperature")
     else:
+        applied["temperature"] = args.temperature
         unsupported.append("reasoningEffort")
     if provider == "local" and args.runtime.casefold() == "mlx":
         unsupported.append("responseFormat")
@@ -161,10 +184,12 @@ def call_chat(
         pace_gemini_request()
     body = {
         "model": settings["model"],
-        "temperature": profile["applied"]["temperature"],
         "messages": messages,
-        "max_tokens": profile["applied"]["maxOutputTokens"],
     }
+    if "temperature" in profile["applied"]:
+        body["temperature"] = profile["applied"]["temperature"]
+    token_field = "max_completion_tokens" if settings["provider"] == "openai" else "max_tokens"
+    body[token_field] = profile["applied"]["maxOutputTokens"]
     if profile["applied"].get("responseFormat") == "json_object":
         body["response_format"] = {"type": "json_object"}
     if "seed" in profile["applied"]:
@@ -180,6 +205,8 @@ def call_chat(
     try:
         with urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
+        if settings["provider"] == "openai":
+            record_provider_usage(payload)
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
         if exc.code == 429 and settings["provider"] == "gemini":
@@ -189,14 +216,20 @@ def call_chat(
         raise RuntimeError(f"Provider HTTP {exc.code}: {detail[:500]}") from exc
     except (URLError, TimeoutError) as exc:
         raise TransientProviderError(f"Provider unavailable: {exc}") from exc
-    return str((((payload.get("choices") or [{}])[0].get("message") or {}).get("content") or ""))
+    choice = (payload.get("choices") or [{}])[0]
+    content = str(((choice.get("message") or {}).get("content") or ""))
+    if not content.strip():
+        finish_reason = str(choice.get("finish_reason") or "unknown")
+        raise RuntimeError(f"Provider returned empty content (finish_reason={finish_reason}).")
+    return content
 
 
 def parse_training_facts(row: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     messages = row.get("messages") or []
     user = next((message.get("content") for message in messages if message.get("role") == "user"), "{}")
     payload = json.loads(user)
-    return payload.get("facts") or {}, payload.get("retrievedRuleSet") or {}
+    facts = payload.get("facts") or {}
+    return facts, lexical_rule_set(facts)
 
 
 NON_COMPANY_INSTRUMENT_TYPES = {"etf", "fund", "index", "mutual fund", "mutual_fund"}
@@ -228,8 +261,6 @@ def non_company_applicability_errors(analysis: dict[str, Any], facts: dict[str, 
     ):
         if not any(term in text.casefold() for term in NON_COMPANY_APPLICABILITY_TERMS):
             errors.append(f"{path} must explain that operating-company fundamentals are non-applicable")
-    if not company.get("dataGaps"):
-        errors.append("company.dataGaps must explain unavailable issuer or constituent evidence")
     return errors
 
 
@@ -246,7 +277,7 @@ def completeness(analysis: dict[str, Any], facts: dict[str, Any]) -> float:
         for array in arrays:
             if section == "chart" and array == "patterns" and not patterns_enabled:
                 continue
-            if section == "company" and non_company and array != "dataGaps":
+            if section == "company" and non_company:
                 continue
             total += 1
             populated += int(bool(section_value.get(array)))
@@ -278,7 +309,7 @@ def evaluate_response(row: dict[str, Any], raw: str, latency: float, repairs: in
     parsed: dict[str, Any] = {}
     if not error:
         try:
-            parsed = json.loads(raw)
+            parsed = prepare_provider_analysis(json.loads(raw), facts, rule_set)
             schema_errors = validate_raw_analysis(parsed)
             if not schema_errors:
                 analysis = normalise_analysis(parsed, "bakeoff", sources)
@@ -364,6 +395,11 @@ GENERATION_BINDING_FIELDS = (
     "expectedCases",
     "sealedAuthorization",
 )
+REUSE_BINDING_FIELDS = tuple(
+    field
+    for field in GENERATION_BINDING_FIELDS
+    if field not in {"caseIds", "expectedCases", "sealedAuthorization", "runtimeSourceHash", "groundingSourceHash"}
+)
 
 
 def generation_binding(config: dict[str, Any]) -> dict[str, Any]:
@@ -395,14 +431,16 @@ def reusable_responses(
         raise RuntimeError(f"Reusable response run {source_name!r} is incomplete.")
     source_config = json.loads(source_config_path.read_text(encoding="utf-8"))
     source_report = json.loads(source_report_path.read_text(encoding="utf-8"))
-    if generation_binding(source_config) != generation_binding(run_config):
+    source_binding = {field: source_config.get(field) for field in REUSE_BINDING_FIELDS}
+    target_binding = {field: run_config.get(field) for field in REUSE_BINDING_FIELDS}
+    if source_binding != target_binding:
         raise RuntimeError(f"Reusable response run {source_name!r} has incompatible generation inputs.")
     source_fingerprint = source_config.get("fingerprint")
     source_response_list = read_jsonl(source_responses_path)
     source_rows = {str(item.get("id")): item for item in source_response_list}
     expected_ids = {str(row.get("id")) for row in rows}
-    if set(source_rows) != expected_ids:
-        raise RuntimeError(f"Reusable response run {source_name!r} has different case IDs.")
+    if not source_rows or not set(source_rows).issubset(expected_ids):
+        raise RuntimeError(f"Reusable response run {source_name!r} contains case IDs outside the target run.")
     if source_report.get("evaluationFingerprint") != source_fingerprint:
         raise RuntimeError(f"Reusable response run {source_name!r} has a report/config fingerprint mismatch.")
     legacy_hash = source_config.get("evaluatorVersion") == "model-bakeoff-evaluator.v2"
@@ -417,20 +455,27 @@ def reusable_responses(
     reused: dict[str, dict[str, Any]] = {}
     for row in rows:
         row_id = str(row["id"])
+        if row_id not in source_rows:
+            continue
         source = source_rows[row_id]
         if source.get("evaluationFingerprint") != source_fingerprint:
             raise RuntimeError(f"Reusable response {row_id!r} is not bound to its source configuration.")
+        raw = str(source.get("raw") or "")
         evaluated = evaluate_response(
             row,
-            str(source.get("raw") or ""),
+            raw,
             float(source.get("latencySeconds") or 0),
             int(source.get("repairs") or 0),
-            str(source.get("error") or ""),
+            "" if raw.strip() else str(source.get("error") or ""),
         )
         if response_needs_retry(evaluated):
             continue
         evaluated["evaluationFingerprint"] = run_config["fingerprint"]
         evaluated["reusedFrom"] = source_name
+        if isinstance(source.get("providerUsage"), dict):
+            evaluated["providerUsage"] = source["providerUsage"]
+        if source.get("estimatedCostUsd") is not None:
+            evaluated["estimatedCostUsd"] = source["estimatedCostUsd"]
         reused[row_id] = evaluated
     return reused
 
@@ -463,6 +508,7 @@ def sealed_eval_authorization(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
+    reset_provider_usage()
     sealed_authorization = sealed_eval_authorization(args) if args.split == "eval" else None
     input_name = "eval.jsonl" if args.split == "eval" else "pilot_validation.jsonl"
     input_path = PROVIDER_ROOT / input_name
@@ -499,7 +545,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "caseIds": [str(row["id"]) for row in rows],
         "datasetFileSha256": sha256_file(input_path),
         "generationProfile": profile,
-        "runtime": args.runtime or ("gemini-openai-compatible" if args.provider == "gemini" else "local-openai-compatible"),
+        "runtime": args.runtime or (
+            "gemini-openai-compatible"
+            if args.provider == "gemini"
+            else "openai-chat-completions"
+            if args.provider == "openai"
+            else "local-openai-compatible"
+        ),
         "modelArtifactHash": args.model_artifact_hash,
         "quantization": args.quantization,
         "gitCommit": current_git_commit(),
@@ -540,6 +592,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         existing = {row_id: row for row_id, row in existing.items() if not response_needs_retry(row)}
     quota_waited = 0.0
     quota_stop: dict[str, Any] | None = None
+    provider_stop: dict[str, Any] | None = None
     transient_retries = 0
 
     def quota_call(messages: list[dict[str, str]]) -> str:
@@ -574,6 +627,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             continue
         facts, rule_set = parse_training_facts(row)
         messages = analysis_prompt(facts, rule_set)
+        usage_before = provider_usage_snapshot()
         started = time.perf_counter()
         raw = ""
         error = ""
@@ -592,17 +646,37 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     raw,
                 )
                 raw = quota_call(repair_messages)
-        except (GeminiQuotaError, RuntimeError) as exc:
+        except GeminiQuotaError as exc:
+            error = str(exc)
+        except TransientProviderError as exc:
+            error = str(exc)
+            provider_stop = {"caseId": row_id, "message": error}
+        except RuntimeError as exc:
             error = str(exc)
         evaluated = evaluate_response(row, raw, time.perf_counter() - started, repairs, error)
+        usage_after = provider_usage_snapshot()
+        case_usage = {key: usage_after[key] - usage_before.get(key, 0) for key in usage_after}
+        evaluated["providerUsage"] = case_usage
+        evaluated["estimatedCostUsd"] = (
+            estimated_provider_cost(settings["provider"], case_usage)
+            if settings["provider"] == "openai"
+            else None
+        )
         evaluated["evaluationFingerprint"] = run_config["fingerprint"]
         existing[row_id] = evaluated
         write_jsonl(responses_path, [existing[str(item["id"])] for item in rows if str(item["id"]) in existing])
-        if quota_stop:
+        if quota_stop or provider_stop:
             break
+    if existing:
+        write_jsonl(responses_path, [existing[str(item["id"])] for item in rows if str(item["id"]) in existing])
     results = [existing[str(row["id"])] for row in rows if str(row["id"]) in existing]
     count = len(results)
     responses_hash = response_content_hash(results)
+    provider_usage = {
+        key: sum(int((item.get("providerUsage") or {}).get(key) or 0) for item in results)
+        for key in provider_usage_snapshot()
+    }
+    response_costs = [float(item["estimatedCostUsd"]) for item in results if item.get("estimatedCostUsd") is not None]
     report = {
         "schemaVersion": "model-bakeoff-report.v2",
         "name": args.name,
@@ -627,8 +701,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "p95LatencySeconds": round(percentile95([item["latencySeconds"] for item in results]), 3),
         "errorRatePct": round(sum(bool(item["error"]) for item in results) / count * 100, 2) if count else 100,
         "quotaStop": quota_stop,
+        "providerStop": provider_stop,
         "quotaWaitedSeconds": round(quota_waited, 3),
         "transientRetries": transient_retries,
+        "providerUsage": provider_usage,
+        "estimatedCostUsd": (
+            round(sum(response_costs), 6)
+            if response_costs
+            else estimated_provider_cost(settings["provider"], provider_usage)
+            if settings["provider"] == "openai"
+            else None
+        ),
         "generationProfile": profile,
         "evaluationFingerprint": run_config["fingerprint"],
         "generationFingerprint": run_config["generationFingerprint"],
@@ -820,7 +903,7 @@ def main() -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument("--name", required=True)
-    run_parser.add_argument("--provider", choices=("gemini", "local"), required=True)
+    run_parser.add_argument("--provider", choices=("gemini", "openai", "local"), required=True)
     run_parser.add_argument("--model", default="")
     run_parser.add_argument("--base-url", default="")
     run_parser.add_argument("--split", choices=("validation", "eval"), default="validation")
@@ -830,7 +913,11 @@ def main() -> int:
     run_parser.add_argument("--timeout", type=float, default=120)
     run_parser.add_argument("--temperature", type=float, default=0.1)
     run_parser.add_argument("--max-output-tokens", type=int, default=8192)
-    run_parser.add_argument("--reasoning-effort", choices=("minimal", "low", "medium", "high"), default="minimal")
+    run_parser.add_argument(
+        "--reasoning-effort",
+        choices=("none", "minimal", "low", "medium", "high", "xhigh"),
+        default="minimal",
+    )
     run_parser.add_argument("--seed", type=int)
     run_parser.add_argument("--rpm", type=float, default=15)
     run_parser.add_argument("--wait-on-short-quota", action=argparse.BooleanOptionalAction, default=True)

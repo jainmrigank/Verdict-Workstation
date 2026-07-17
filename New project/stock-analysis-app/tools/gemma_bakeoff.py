@@ -274,7 +274,8 @@ def resolve_resume_checkpoint(checkpoint_root: Path, resume: str) -> str | None:
 
 
 def default_run_name(args: argparse.Namespace) -> str:
-    return f"{args.model}-r{args.lora_rank}-e{args.epochs}-seed{args.seed}"
+    target_suffix = "" if args.lora_targets == "all" else f"-{args.lora_targets}"
+    return f"{args.model}-r{args.lora_rank}-e{args.epochs}-seed{args.seed}{target_suffix}"
 
 
 def clean_run_name(value: str) -> str:
@@ -351,6 +352,7 @@ def validate_completed_run(
         "candidate": args.model,
         "datasetHash": validation["datasetHash"],
         "loraRank": args.lora_rank,
+        "loraTargets": args.lora_targets,
         "epochs": args.epochs,
         "learningRate": args.learning_rate,
         "gradientAccumulation": args.gradient_accumulation,
@@ -368,6 +370,7 @@ def validate_completed_run(
             "candidate": args.model,
             "datasetHash": validation["datasetHash"],
             "loraRank": args.lora_rank,
+            "loraTargets": args.lora_targets,
             "epochs": args.epochs,
             "learningRate": args.learning_rate,
             "gradientAccumulation": args.gradient_accumulation,
@@ -537,12 +540,13 @@ def finite_metric(value: Any) -> float | None:
 
 
 def attach_lora(FastModel: Any, model: Any, args: argparse.Namespace) -> Any:
+    attention_only = args.lora_targets == "attention"
     return FastModel.get_peft_model(
         model,
         finetune_vision_layers=False,
         finetune_language_layers=True,
         finetune_attention_modules=True,
-        finetune_mlp_modules=True,
+        finetune_mlp_modules=not attention_only,
         r=args.lora_rank,
         lora_alpha=args.lora_rank,
         lora_dropout=0,
@@ -668,6 +672,7 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
         "responseMarkers": {"instruction": instruction_marker, "response": response_marker},
         "trainingConfiguration": {
             "loraRank": args.lora_rank,
+            "loraTargets": args.lora_targets,
             "epochs": args.epochs,
             "learningRate": args.learning_rate,
             "gradientAccumulation": args.gradient_accumulation,
@@ -732,6 +737,7 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
         "datasetFiles": validation["files"],
         "maxSequenceLength": sequence_length,
         "loraRank": args.lora_rank,
+        "loraTargets": args.lora_targets,
         "epochs": args.epochs,
         "learningRate": args.learning_rate,
         "gradientAccumulation": args.gradient_accumulation,
@@ -830,6 +836,7 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
         "maximumSequenceTokens": maximum_tokens,
         "maxSequenceLength": sequence_length,
         "loraRank": args.lora_rank,
+        "loraTargets": args.lora_targets,
         "epochs": args.epochs,
         "learningRate": args.learning_rate,
         "gradientAccumulation": args.gradient_accumulation,
@@ -868,6 +875,12 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--run-name", default="")
     result.add_argument("--max-seq-length", type=int, default=0, help="Zero derives a no-truncation length from the rendered dataset.")
     result.add_argument("--lora-rank", type=int, choices=(8, 16), default=16)
+    result.add_argument(
+        "--lora-targets",
+        choices=("all", "attention"),
+        default="all",
+        help="Tune all language adapters, or attention adapters only for constrained accelerators.",
+    )
     result.add_argument("--epochs", type=int, choices=(1, 2), default=2)
     result.add_argument("--learning-rate", type=float, default=2e-4)
     result.add_argument("--gradient-accumulation", type=int, default=8)
