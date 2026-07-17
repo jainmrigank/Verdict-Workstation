@@ -34,11 +34,13 @@ MODEL_CONFIGS = {
         "model": "unsloth/gemma-3-4b-it-unsloth-bnb-4bit",
         "chatTemplate": "gemma-3",
         "ggufQuantization": "Q8_0",
+        "requiresBfloat16": True,
     },
     "gemma4-e2b": {
         "model": "unsloth/gemma-4-E2B-it-unsloth-bnb-4bit",
         "chatTemplate": "gemma-4",
         "ggufQuantization": "Q8_0",
+        "requiresBfloat16": True,
     },
     "gemma4-e4b": {
         # Pin the repository that FastModel actually loads. Passing the 16-bit
@@ -47,11 +49,13 @@ MODEL_CONFIGS = {
         "model": "unsloth/gemma-4-E4B-it-unsloth-bnb-4bit",
         "chatTemplate": "gemma-4",
         "ggufQuantization": "Q8_0",
+        "requiresBfloat16": True,
     },
     "gemma4-12b": {
         "model": "unsloth/gemma-4-12B-it",
         "chatTemplate": "gemma-4",
         "ggufQuantization": "Q8_0",
+        "requiresBfloat16": True,
     },
 }
 RESPONSE_MARKER_CANDIDATES = (
@@ -311,6 +315,17 @@ def installed_versions() -> dict[str, str]:
 
 def configure_pytorch_allocator() -> str:
     return os.environ.setdefault("PYTORCH_ALLOC_CONF", DEFAULT_PYTORCH_ALLOC_CONF)
+
+
+def require_candidate_hardware(candidate: str, config: dict[str, Any], torch: Any) -> None:
+    if not config.get("requiresBfloat16") or bool(torch.cuda.is_bf16_supported()):
+        return
+    device = torch.cuda.get_device_name(0)
+    raise RuntimeError(
+        f"Hardware preflight failed: {candidate} full-sequence training requires a BF16-capable CUDA accelerator; "
+        f"{device} does not support BF16. Use an L4, A100, H100, or another BF16-capable GPU. "
+        "The pilot will not switch to float32 attention or truncate training examples."
+    )
 
 
 def artifact_checksums(run_root: Path, roots: list[Path]) -> dict[str, str]:
@@ -605,6 +620,7 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
         raise RuntimeError("CUDA preflight failed: a CUDA accelerator is required for the Unsloth pilot.")
 
     config = MODEL_CONFIGS[args.model]
+    require_candidate_hardware(args.model, config, torch)
     preflight_path = run_root / "preflight_manifest.json"
     train_name = "train.jsonl" if args.final else "pilot_train.jsonl"
     validation_name = "validation.jsonl" if args.final else "pilot_validation.jsonl"

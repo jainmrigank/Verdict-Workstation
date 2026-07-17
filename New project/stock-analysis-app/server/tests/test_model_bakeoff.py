@@ -20,6 +20,7 @@ from tools.gemma_bakeoff import (
     gemma4_projection_dtype_state,
     latest_checkpoint,
     prepare_lora_model,
+    require_candidate_hardware,
     resolve_resume_checkpoint,
     resolve_sequence_length,
     rounded_sequence_length,
@@ -77,6 +78,29 @@ class ModelBakeoffTests(unittest.TestCase):
     def test_pytorch_allocator_preserves_explicit_configuration(self) -> None:
         with patch.dict(os.environ, {"PYTORCH_ALLOC_CONF": "max_split_size_mb:128"}, clear=True):
             self.assertEqual(configure_pytorch_allocator(), "max_split_size_mb:128")
+
+    def test_gemma_candidates_require_bfloat16_hardware(self) -> None:
+        class UnsupportedCuda:
+            class cuda:
+                @staticmethod
+                def is_bf16_supported() -> bool:
+                    return False
+
+                @staticmethod
+                def get_device_name(_index: int) -> str:
+                    return "Tesla T4"
+
+        with self.assertRaisesRegex(RuntimeError, "Tesla T4 does not support BF16"):
+            require_candidate_hardware("gemma3-4b", MODEL_CONFIGS["gemma3-4b"], UnsupportedCuda())
+
+    def test_bfloat16_hardware_passes_candidate_gate(self) -> None:
+        class SupportedCuda:
+            class cuda:
+                @staticmethod
+                def is_bf16_supported() -> bool:
+                    return True
+
+        require_candidate_hardware("gemma4-e4b", MODEL_CONFIGS["gemma4-e4b"], SupportedCuda())
 
     def test_gemma4_projection_follows_embedding_dtype(self) -> None:
         class Weight:
