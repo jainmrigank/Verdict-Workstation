@@ -577,6 +577,10 @@ class ModelBakeoffTests(unittest.TestCase):
                 ("training_metrics.json", metrics),
             ):
                 (run_root / name).write_text(json.dumps(payload), encoding="utf-8")
+            (run_root / "run_manifest.json").write_text(
+                json.dumps({"status": "complete", "ggufPath": str(requested_gguf)}),
+                encoding="utf-8",
+            )
 
             args = argparse.Namespace(
                 output_root=output_root,
@@ -604,6 +608,8 @@ class ModelBakeoffTests(unittest.TestCase):
             self.assertNotIn("gguf/model.safetensors", manifest["artifactHashes"])
             self.assertTrue((run_root / "checksums.json").is_file())
             self.assertTrue((run_root / "run_manifest.json").is_file())
+            repeated = finalize_existing_run(args)
+            self.assertEqual(repeated["status"], "already-complete")
 
     def test_gguf_resolution_requires_real_gguf_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

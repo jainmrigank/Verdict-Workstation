@@ -969,9 +969,6 @@ def finalize_existing_run(args: argparse.Namespace) -> dict[str, Any]:
     run_name = clean_run_name(args.run_name or default_run_name(args))
     run_root = (args.output_root / run_name).resolve()
     manifest_path = run_root / "run_manifest.json"
-    if manifest_path.exists():
-        existing = json.loads(manifest_path.read_text(encoding="utf-8"))
-        return {**existing, "status": "already-complete"}
 
     identity_path = run_root / "run_identity.json"
     preflight_path = run_root / "preflight_manifest.json"
@@ -1035,6 +1032,14 @@ def finalize_existing_run(args: argparse.Namespace) -> dict[str, Any]:
         artifact_roots.append(gguf)
     if not (adapter / "adapter_model.safetensors").is_file():
         raise RuntimeError("Interrupted run has no complete adapter weights.")
+
+    if manifest_path.exists():
+        existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if existing.get("finalizedAfterInterruption"):
+            integrity_errors = validate_completed_run(existing, args, validation, run_root)
+            if integrity_errors:
+                raise RuntimeError("Finalized run failed integrity checks: " + "; ".join(integrity_errors))
+            return {**existing, "status": "already-complete"}
 
     hashes = artifact_checksums(run_root, artifact_roots)
     tree_hashes = {"adapter": tree_hash_from_artifact_hashes(run_root, adapter, hashes)}
