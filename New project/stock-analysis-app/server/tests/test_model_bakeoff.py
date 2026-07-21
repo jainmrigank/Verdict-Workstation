@@ -17,6 +17,7 @@ from tools.gemma_bakeoff import (
     detect_response_markers,
     directory_tree_hash,
     dry_run,
+    gemma4_activation_dtype,
     gemma4_projection_dtype_state,
     latest_checkpoint,
     prepare_lora_model,
@@ -101,6 +102,30 @@ class ModelBakeoffTests(unittest.TestCase):
                     return True
 
         require_candidate_hardware("gemma4-e4b", MODEL_CONFIGS["gemma4-e4b"], SupportedCuda())
+
+    def test_gemma4_activation_dtype_uses_bfloat16_on_l4_class_hardware(self) -> None:
+        class Torch:
+            bfloat16 = "bfloat16"
+            float32 = "float32"
+
+            class cuda:
+                @staticmethod
+                def is_bf16_supported() -> bool:
+                    return True
+
+        self.assertEqual(gemma4_activation_dtype(Torch()), "bfloat16")
+
+    def test_gemma4_activation_dtype_retains_float32_fallback(self) -> None:
+        class Torch:
+            bfloat16 = "bfloat16"
+            float32 = "float32"
+
+            class cuda:
+                @staticmethod
+                def is_bf16_supported() -> bool:
+                    return False
+
+        self.assertEqual(gemma4_activation_dtype(Torch()), "float32")
 
     def test_gemma4_projection_follows_embedding_dtype(self) -> None:
         class Weight:

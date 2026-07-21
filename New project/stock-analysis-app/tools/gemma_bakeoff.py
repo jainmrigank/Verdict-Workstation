@@ -223,6 +223,10 @@ def gemma4_projection_dtype_state(model: Any) -> list[dict[str, str]]:
     return state
 
 
+def gemma4_activation_dtype(torch: Any) -> Any:
+    return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32
+
+
 def rounded_sequence_length(maximum_tokens: int, headroom: int = SEQUENCE_HEADROOM, multiple: int = SEQUENCE_MULTIPLE) -> int:
     if maximum_tokens <= 0:
         raise ValueError("maximum_tokens must be positive")
@@ -650,9 +654,10 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
         full_finetuning=False,
         revision=base_revision,
     )
-    # Unsloth uses float32 activations for Gemma 4 on GPUs without bfloat16.
-    # The PLE linears are not quantized and must follow that activation dtype.
-    model, dtype_adjustments = prepare_lora_model(FastModel, model, args, torch.float32)
+    # The PLE linears are not quantized and must follow the runtime activation
+    # dtype. A hard-coded float32 target breaks BF16 accelerators such as L4.
+    activation_dtype = gemma4_activation_dtype(torch)
+    model, dtype_adjustments = prepare_lora_model(FastModel, model, args, activation_dtype)
     dtype_state = gemma4_projection_dtype_state(model)
     tokenizer = get_chat_template(tokenizer, chat_template=config["chatTemplate"])
     texts = [message_text(tokenizer, row["messages"]) for row in [*train_rows, *validation_rows]]
