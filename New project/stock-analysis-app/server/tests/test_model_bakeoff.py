@@ -17,6 +17,7 @@ from tools.gemma_bakeoff import (
     detect_response_markers,
     directory_tree_hash,
     dry_run,
+    finalize_existing_run,
     gemma4_activation_dtype,
     gemma4_projection_dtype_state,
     latest_checkpoint,
@@ -24,6 +25,7 @@ from tools.gemma_bakeoff import (
     require_candidate_hardware,
     resolve_resume_checkpoint,
     resolve_sequence_length,
+    resolved_gguf_artifact,
     rounded_sequence_length,
     sha256_file,
     token_ids,
@@ -493,6 +495,11 @@ class ModelBakeoffTests(unittest.TestCase):
                 "ggufPath": "",
                 "artifactHashes": hashes,
                 "artifactTreeHashes": {"adapter": directory_tree_hash(adapter)},
+                "environment": {
+                    "gitCommit": identity["gitCommit"],
+                    "packages": identity["packages"],
+                    "baseModelRevision": identity["baseModelRevision"],
+                },
             }
             with (
                 patch("tools.gemma_bakeoff.current_git_commit", return_value="commit"),
@@ -501,6 +508,110 @@ class ModelBakeoffTests(unittest.TestCase):
                 self.assertEqual(validate_completed_run(manifest, args, validation, run_root), [])
                 weight.write_bytes(b"tampered")
                 self.assertTrue(validate_completed_run(manifest, args, validation, run_root))
+
+    def test_interrupted_run_finalizer_records_actual_gguf_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_root = Path(directory)
+            run_name = "gemma4-e2b-r8-e2-seed560-attention"
+            run_root = output_root / run_name
+            adapter = run_root / "adapter"
+            merged = run_root / "merged_hf"
+            requested_gguf = run_root / "gguf"
+            actual_gguf = run_root / "gguf_gguf"
+            for artifact in (adapter, merged, requested_gguf, actual_gguf):
+                artifact.mkdir(parents=True)
+            (adapter / "adapter_model.safetensors").write_bytes(b"adapter")
+            (merged / "model.safetensors").write_bytes(b"merged")
+            (requested_gguf / "model.safetensors").write_bytes(b"placeholder")
+            (actual_gguf / "model.Q8_0.gguf").write_bytes(b"gguf")
+            (actual_gguf / "model.BF16-mmproj.gguf").write_bytes(b"projector")
+
+            environment = {
+                "gitCommit": "training-commit",
+                "packages": {"torch": "test"},
+                "baseModelRevision": "a" * 40,
+            }
+            identity = {
+                "candidate": "gemma4-e2b",
+                "baseModel": MODEL_CONFIGS["gemma4-e2b"]["model"],
+                "baseModelRevision": environment["baseModelRevision"],
+                "datasetHash": "dataset-hash",
+                "datasetFiles": {"train": "train-hash", "validation": "validation-hash"},
+                "maxSequenceLength": 8192,
+                "loraRank": 8,
+                "loraTargets": "attention",
+                "epochs": 2,
+                "learningRate": 2e-4,
+                "gradientAccumulation": 8,
+                "seed": 560,
+                "responseMarkers": {"instruction": "user", "response": "model"},
+                "gitCommit": environment["gitCommit"],
+                "packages": environment["packages"],
+                "trainingSourceHash": "source-hash",
+                "requirementsHash": "requirements-hash",
+            }
+            preflight = {
+                "status": "training-step-passed",
+                "dataset": {
+                    "datasetHash": "dataset-hash",
+                    "files": identity["datasetFiles"],
+                    "train": 75,
+                    "validation": 15,
+                    "errors": [],
+                },
+                "maximumSequenceTokens": 7000,
+                "trainingSourceHash": identity["trainingSourceHash"],
+                "requirementsHash": identity["requirementsHash"],
+                "environment": environment,
+            }
+            metrics = {
+                "trainLoss": 0.0639,
+                "responseMaskAudit": {
+                    "train": {"activeAssistantTokens": 100},
+                    "validation": {"activeAssistantTokens": 20},
+                },
+            }
+            for name, payload in (
+                ("run_identity.json", identity),
+                ("preflight_manifest.json", preflight),
+                ("training_metrics.json", metrics),
+            ):
+                (run_root / name).write_text(json.dumps(payload), encoding="utf-8")
+
+            args = argparse.Namespace(
+                output_root=output_root,
+                run_name=run_name,
+                expected_dataset_hash="dataset-hash",
+                final=False,
+                model="gemma4-e2b",
+                lora_rank=8,
+                lora_targets="attention",
+                epochs=2,
+                learning_rate=2e-4,
+                gradient_accumulation=8,
+                seed=560,
+                export_merged_hf=True,
+                export_gguf=True,
+                quantization="Q8_0",
+            )
+            with patch("tools.gemma_bakeoff.current_git_commit", return_value="finalizer-commit"):
+                manifest = finalize_existing_run(args)
+
+            self.assertEqual(Path(manifest["ggufPath"]), actual_gguf.resolve())
+            self.assertTrue(manifest["finalizedAfterInterruption"])
+            self.assertEqual(manifest["finalizerGitCommit"], "finalizer-commit")
+            self.assertIn("gguf_gguf/model.Q8_0.gguf", manifest["artifactHashes"])
+            self.assertNotIn("gguf/model.safetensors", manifest["artifactHashes"])
+            self.assertTrue((run_root / "checksums.json").is_file())
+            self.assertTrue((run_root / "run_manifest.json").is_file())
+
+    def test_gguf_resolution_requires_real_gguf_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            requested = Path(directory) / "gguf"
+            requested.mkdir()
+            (requested / "model.safetensors").write_bytes(b"placeholder")
+            with self.assertRaisesRegex(RuntimeError, "contains no .gguf files"):
+                resolved_gguf_artifact(requested)
 
     def test_generation_profile_records_unsupported_seed(self) -> None:
         args = argparse.Namespace(temperature=0.1, max_output_tokens=8192, reasoning_effort="minimal", seed=560, runtime="")

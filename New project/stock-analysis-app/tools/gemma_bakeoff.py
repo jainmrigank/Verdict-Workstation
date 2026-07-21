@@ -366,6 +366,31 @@ def directory_tree_hash(root: Path) -> str:
     return digest.hexdigest()
 
 
+def tree_hash_from_artifact_hashes(run_root: Path, root: Path, hashes: dict[str, str]) -> str:
+    if not root.is_dir():
+        raise RuntimeError(f"Artifact directory does not exist: {root}")
+    files = sorted(path for path in root.rglob("*") if path.is_file())
+    if not files:
+        raise RuntimeError(f"Artifact directory contains no files: {root}")
+    digest = hashlib.sha256()
+    for path in files:
+        run_relative = str(path.relative_to(run_root))
+        file_hash = hashes.get(run_relative)
+        if not file_hash:
+            raise RuntimeError(f"Artifact checksum is missing: {run_relative}")
+        digest.update(str(path.relative_to(root)).encode("utf-8"))
+        digest.update(file_hash.encode("ascii"))
+    return digest.hexdigest()
+
+
+def resolved_gguf_artifact(requested: Path) -> Path:
+    candidates = (requested.with_name(f"{requested.name}_gguf"), requested)
+    for candidate in candidates:
+        if candidate.is_dir() and any(candidate.rglob("*.gguf")):
+            return candidate
+    raise RuntimeError(f"GGUF export contains no .gguf files: {requested}")
+
+
 def verify_or_write_run_identity(path: Path, identity: dict[str, Any], checkpoint_root: Path) -> None:
     if path.exists():
         existing = json.loads(path.read_text(encoding="utf-8"))
@@ -410,10 +435,6 @@ def validate_completed_run(
             "learningRate": args.learning_rate,
             "gradientAccumulation": args.gradient_accumulation,
             "seed": args.seed,
-            "gitCommit": current_git_commit(),
-            "packages": installed_versions(),
-            "trainingSourceHash": sha256_file(Path(__file__)),
-            "requirementsHash": sha256_file(REQUIREMENTS_PATH),
         }
         errors.extend(
             f"run identity mismatch: {key}"
@@ -423,6 +444,13 @@ def validate_completed_run(
         for key in ("baseModel", "baseModelRevision", "datasetFiles", "maxSequenceLength", "responseMarkers"):
             if manifest.get(key) != identity.get(key):
                 errors.append(f"manifest/run identity mismatch: {key}")
+        for key in ("gitCommit", "packages", "trainingSourceHash", "requirementsHash"):
+            if not identity.get(key):
+                errors.append(f"run identity is missing: {key}")
+        environment = manifest.get("environment") or {}
+        for key in ("gitCommit", "packages", "baseModelRevision"):
+            if environment.get(key) != identity.get(key):
+                errors.append(f"environment/run identity mismatch: {key}")
     path_fields = {"adapter": "adapterPath", "mergedHf": "mergedHfPath", "gguf": "ggufPath"}
     expected_trees = manifest.get("artifactTreeHashes") or {}
     checksum_roots: list[Path] = []
@@ -844,18 +872,19 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
         artifact_roots.append(merged)
     gguf_path = ""
     if args.export_gguf:
-        gguf = run_root / "gguf"
+        requested_gguf = run_root / "gguf"
         model.save_pretrained_gguf(
-            str(gguf), tokenizer, quantization_method=args.quantization or config["ggufQuantization"]
+            str(requested_gguf), tokenizer, quantization_method=args.quantization or config["ggufQuantization"]
         )
+        gguf = resolved_gguf_artifact(requested_gguf)
         gguf_path = str(gguf)
         artifact_roots.append(gguf)
     hashes = artifact_checksums(run_root, artifact_roots)
-    tree_hashes = {"adapter": directory_tree_hash(adapter)}
+    tree_hashes = {"adapter": tree_hash_from_artifact_hashes(run_root, adapter, hashes)}
     if merged_path:
-        tree_hashes["mergedHf"] = directory_tree_hash(Path(merged_path))
+        tree_hashes["mergedHf"] = tree_hash_from_artifact_hashes(run_root, Path(merged_path), hashes)
     if gguf_path:
-        tree_hashes["gguf"] = directory_tree_hash(Path(gguf_path))
+        tree_hashes["gguf"] = tree_hash_from_artifact_hashes(run_root, Path(gguf_path), hashes)
     checksums_path = run_root / "checksums.json"
     write_json_atomic(checksums_path, hashes)
     manifest = {
@@ -880,6 +909,7 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
         "seed": args.seed,
         "quantization": args.quantization or config["ggufQuantization"],
         "responseOnlyLoss": True,
+        "responseMarkers": run_identity["responseMarkers"],
         "responseMaskAudit": response_mask_audit,
         "trainLoss": metrics["trainLoss"],
         "resumedFromCheckpoint": resume_checkpoint or "",
@@ -909,6 +939,11 @@ def parser() -> argparse.ArgumentParser:
     mode = result.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="Validate files without loading a model.")
     mode.add_argument("--preflight", action="store_true", help="Load the candidate and prove full-sequence GPU fit without training.")
+    mode.add_argument(
+        "--finalize-existing",
+        action="store_true",
+        help="Validate and finalize already-exported artifacts after an interrupted post-training step.",
+    )
     result.add_argument("--run-name", default="")
     result.add_argument("--max-seq-length", type=int, default=0, help="Zero derives a no-truncation length from the rendered dataset.")
     result.add_argument("--lora-rank", type=int, choices=(8, 16), default=16)
@@ -930,15 +965,139 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
+def finalize_existing_run(args: argparse.Namespace) -> dict[str, Any]:
+    run_name = clean_run_name(args.run_name or default_run_name(args))
+    run_root = (args.output_root / run_name).resolve()
+    manifest_path = run_root / "run_manifest.json"
+    if manifest_path.exists():
+        existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return {**existing, "status": "already-complete"}
+
+    identity_path = run_root / "run_identity.json"
+    preflight_path = run_root / "preflight_manifest.json"
+    metrics_path = run_root / "training_metrics.json"
+    for required in (identity_path, preflight_path, metrics_path):
+        if not required.is_file():
+            raise RuntimeError(f"Cannot finalize interrupted run; missing {required.name}")
+
+    identity = json.loads(identity_path.read_text(encoding="utf-8"))
+    preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
+    metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    validation = preflight.get("dataset") or {}
+    expected_hash = args.expected_dataset_hash or (PILOT_DATASET_HASH if not args.final else "")
+    expected_identity = {
+        "candidate": args.model,
+        "baseModel": MODEL_CONFIGS[args.model]["model"],
+        "datasetHash": expected_hash,
+        "loraRank": args.lora_rank,
+        "loraTargets": args.lora_targets,
+        "epochs": args.epochs,
+        "learningRate": args.learning_rate,
+        "gradientAccumulation": args.gradient_accumulation,
+        "seed": args.seed,
+    }
+    mismatches = [key for key, value in expected_identity.items() if identity.get(key) != value]
+    if mismatches:
+        raise RuntimeError("Interrupted run identity mismatch: " + ", ".join(sorted(mismatches)))
+    if preflight.get("status") != "training-step-passed":
+        raise RuntimeError("Interrupted run has no successful training-step preflight.")
+    if validation.get("datasetHash") != identity.get("datasetHash"):
+        raise RuntimeError("Preflight dataset hash does not match run identity.")
+    if validation.get("errors"):
+        raise RuntimeError("Preflight dataset gate contains errors.")
+    if preflight.get("trainingSourceHash") != identity.get("trainingSourceHash"):
+        raise RuntimeError("Preflight training source does not match run identity.")
+    if preflight.get("requirementsHash") != identity.get("requirementsHash"):
+        raise RuntimeError("Preflight requirements do not match run identity.")
+    environment = preflight.get("environment") or {}
+    for key in ("gitCommit", "packages", "baseModelRevision"):
+        if environment.get(key) != identity.get(key):
+            raise RuntimeError(f"Preflight environment does not match run identity: {key}")
+
+    response_mask_audit = metrics.get("responseMaskAudit") or {}
+    for split in ("train", "validation"):
+        if int((response_mask_audit.get(split) or {}).get("activeAssistantTokens") or 0) <= 0:
+            raise RuntimeError(f"Training metrics contain no active response tokens for {split}.")
+
+    adapter = run_root / "adapter"
+    artifact_roots: list[Path] = [adapter, metrics_path]
+    merged_path = ""
+    if args.export_merged_hf:
+        merged = run_root / "merged_hf"
+        if not (merged / "model.safetensors").is_file():
+            raise RuntimeError("Interrupted run has no complete merged Hugging Face model.")
+        merged_path = str(merged)
+        artifact_roots.append(merged)
+    gguf_path = ""
+    if args.export_gguf:
+        gguf = resolved_gguf_artifact(run_root / "gguf")
+        gguf_path = str(gguf)
+        artifact_roots.append(gguf)
+    if not (adapter / "adapter_model.safetensors").is_file():
+        raise RuntimeError("Interrupted run has no complete adapter weights.")
+
+    hashes = artifact_checksums(run_root, artifact_roots)
+    tree_hashes = {"adapter": tree_hash_from_artifact_hashes(run_root, adapter, hashes)}
+    if merged_path:
+        tree_hashes["mergedHf"] = tree_hash_from_artifact_hashes(run_root, Path(merged_path), hashes)
+    if gguf_path:
+        tree_hashes["gguf"] = tree_hash_from_artifact_hashes(run_root, Path(gguf_path), hashes)
+    checksums_path = run_root / "checksums.json"
+    write_json_atomic(checksums_path, hashes)
+    checkpoint_root = run_root / "checkpoints"
+    manifest = {
+        "schemaVersion": "gemma-bakeoff-run.v2",
+        "status": "complete",
+        "runName": run_name,
+        "candidate": args.model,
+        "baseModel": identity["baseModel"],
+        "baseModelRevision": identity["baseModelRevision"],
+        "datasetHash": identity["datasetHash"],
+        "datasetFiles": identity["datasetFiles"],
+        "finalDataset": args.final,
+        "trainRows": validation.get("train"),
+        "validationRows": validation.get("validation"),
+        "maximumSequenceTokens": preflight.get("maximumSequenceTokens"),
+        "maxSequenceLength": identity["maxSequenceLength"],
+        "loraRank": args.lora_rank,
+        "loraTargets": args.lora_targets,
+        "epochs": args.epochs,
+        "learningRate": args.learning_rate,
+        "gradientAccumulation": args.gradient_accumulation,
+        "seed": args.seed,
+        "quantization": args.quantization or MODEL_CONFIGS[args.model]["ggufQuantization"],
+        "responseOnlyLoss": True,
+        "responseMarkers": identity["responseMarkers"],
+        "responseMaskAudit": response_mask_audit,
+        "trainLoss": metrics.get("trainLoss"),
+        "resumedFromCheckpoint": "",
+        "latestCheckpoint": str(latest_checkpoint(checkpoint_root) or ""),
+        "adapterPath": str(adapter),
+        "mergedHfPath": merged_path,
+        "ggufPath": gguf_path,
+        "checksumsPath": str(checksums_path),
+        "artifactHashes": hashes,
+        "artifactTreeHashes": tree_hashes,
+        "runIdentityPath": str(identity_path),
+        "environment": environment,
+        "finalizedAfterInterruption": True,
+        "finalizerGitCommit": current_git_commit(),
+        "completedAt": datetime.now(UTC).isoformat(),
+    }
+    write_json_atomic(manifest_path, manifest)
+    return manifest
+
+
 def main() -> int:
     args = parser().parse_args()
     if not args.expected_dataset_hash and not args.final:
         args.expected_dataset_hash = PILOT_DATASET_HASH
-    payload = (
-        dry_run(args.data_root, args.final, args.expected_dataset_hash, args.evaluation_seal)
-        if args.dry_run
-        else run_training(args)
-    )
+    if args.dry_run:
+        payload = dry_run(args.data_root, args.final, args.expected_dataset_hash, args.evaluation_seal)
+    elif args.finalize_existing:
+        payload = finalize_existing_run(args)
+    else:
+        payload = run_training(args)
     print(json.dumps(payload, indent=2))
     return 0 if not payload.get("errors") else 1
 
