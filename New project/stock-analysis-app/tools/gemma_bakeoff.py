@@ -188,6 +188,17 @@ def tokenize_text(tokenizer: Any, text: str, **kwargs: Any) -> Any:
     return tokenizer(text=text, **kwargs)
 
 
+def token_ids(tokenizer: Any, text: str, **kwargs: Any) -> list[int]:
+    values = tokenize_text(tokenizer, text, **kwargs)["input_ids"]
+    if hasattr(values, "tolist"):
+        values = values.tolist()
+    if values and isinstance(values[0], list):
+        if len(values) != 1:
+            raise RuntimeError(f"Expected one tokenized text row, found {len(values)}.")
+        values = values[0]
+    return list(values)
+
+
 def align_gemma4_projection_dtype(model: Any, activation_dtype: Any | None = None) -> list[str]:
     adjusted: list[str] = []
     for name, module in model.named_modules():
@@ -466,7 +477,7 @@ def _last_subsequence_end(values: list[int], needle: list[int]) -> int | None:
 def audit_response_masks(trainer: Any, tokenizer: Any | None = None, response_marker: str = "") -> dict[str, Any]:
     result: dict[str, Any] = {}
     marker_tokens = (
-        list(tokenize_text(tokenizer, response_marker, add_special_tokens=False)["input_ids"])
+        token_ids(tokenizer, response_marker, add_special_tokens=False)
         if tokenizer is not None and response_marker
         else []
     )
@@ -524,7 +535,7 @@ def run_training_memory_probe(
     labels = encoded["input_ids"].clone()
     sequence_tokens = int(encoded["input_ids"].shape[-1])
     response_end = text.index(response_marker) + len(response_marker)
-    prefix_tokens = len(tokenize_text(tokenizer, text[:response_end], add_special_tokens=True)["input_ids"])
+    prefix_tokens = len(token_ids(tokenizer, text[:response_end], add_special_tokens=True))
     labels[:, :prefix_tokens] = -100
     assistant_tokens = int((labels != -100).sum().item())
     if assistant_tokens <= 0:
@@ -642,7 +653,7 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
     probe_tokenizer = AutoTokenizer.from_pretrained(config["model"], revision=base_revision)
     probe_tokenizer = get_chat_template(probe_tokenizer, chat_template=config["chatTemplate"])
     probe_texts = [message_text(probe_tokenizer, row["messages"]) for row in [*train_rows, *validation_rows]]
-    token_lengths = [len(tokenize_text(probe_tokenizer, text, add_special_tokens=True)["input_ids"]) for text in probe_texts]
+    token_lengths = [len(token_ids(probe_tokenizer, text, add_special_tokens=True)) for text in probe_texts]
     maximum_tokens = max(token_lengths)
     sequence_length = resolve_sequence_length(maximum_tokens, args.max_seq_length)
 
@@ -661,7 +672,7 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
     dtype_state = gemma4_projection_dtype_state(model)
     tokenizer = get_chat_template(tokenizer, chat_template=config["chatTemplate"])
     texts = [message_text(tokenizer, row["messages"]) for row in [*train_rows, *validation_rows]]
-    loaded_lengths = [len(tokenize_text(tokenizer, text, add_special_tokens=True)["input_ids"]) for text in texts]
+    loaded_lengths = [len(token_ids(tokenizer, text, add_special_tokens=True)) for text in texts]
     if max(loaded_lengths) > sequence_length:
         raise RuntimeError(
             f"No-truncation gate failed after model load: {max(loaded_lengths)} tokens exceed {sequence_length}."
