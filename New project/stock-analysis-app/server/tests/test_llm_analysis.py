@@ -27,6 +27,7 @@ from server.llm_analysis import (
     lexical_rule_set,
     lexical_retrieve,
     normalise_analysis,
+    parse_provider_json,
     provider_timeout,
     provider_version,
     prepare_provider_analysis,
@@ -75,6 +76,13 @@ def raw_analysis() -> dict:
 
 
 class LlmAnalysisTests(unittest.TestCase):
+    def test_provider_json_parser_accepts_only_a_complete_json_fence(self) -> None:
+        self.assertEqual(parse_provider_json('```json\n{"ok": true}\n```'), {"ok": True})
+        with self.assertRaises(json.JSONDecodeError):
+            parse_provider_json('Here is the result: {"ok": true}')
+        with self.assertRaises(json.JSONDecodeError):
+            parse_provider_json('```json\n{"ok": true}')
+
     def test_context_fingerprint_is_stable(self) -> None:
         self.assertEqual(context_fingerprint(facts()), context_fingerprint(facts()))
 

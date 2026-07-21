@@ -26,6 +26,7 @@ from server.llm_analysis import (
     analysis_prompt,
     lexical_rule_set,
     normalise_analysis,
+    parse_provider_json,
     prepare_provider_analysis,
     semantic_analysis_errors,
     validate_analysis,
@@ -229,6 +230,9 @@ def parse_training_facts(row: dict[str, Any]) -> tuple[dict[str, Any], dict[str,
     user = next((message.get("content") for message in messages if message.get("role") == "user"), "{}")
     payload = json.loads(user)
     facts = payload.get("facts") or {}
+    rule_set = payload.get("retrievedRuleSet")
+    if isinstance(rule_set, dict) and isinstance(rule_set.get("rules"), list):
+        return facts, rule_set
     return facts, lexical_rule_set(facts)
 
 
@@ -309,7 +313,7 @@ def evaluate_response(row: dict[str, Any], raw: str, latency: float, repairs: in
     parsed: dict[str, Any] = {}
     if not error:
         try:
-            parsed = prepare_provider_analysis(json.loads(raw), facts, rule_set)
+            parsed = prepare_provider_analysis(parse_provider_json(raw), facts, rule_set)
             schema_errors = validate_raw_analysis(parsed)
             if not schema_errors:
                 analysis = normalise_analysis(parsed, "bakeoff", sources)

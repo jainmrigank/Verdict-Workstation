@@ -19,9 +19,10 @@ if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
 from tools.gemma_bakeoff import current_git_commit, sha256_file, write_json_atomic
+from tools.mlx_convert_compat import shared_kv_compatibility
 
 
-MINIMUM_MLX_LM_VERSION = (0, 31, 2)
+MINIMUM_MLX_LM_VERSION = (0, 31, 3)
 
 
 def version_tuple(value: str) -> tuple[int, ...]:
@@ -61,14 +62,11 @@ def tree_hash(root: Path) -> str:
 def conversion_command(source: Path, output: Path, bits: int) -> list[str]:
     return [
         sys.executable,
-        "-m",
-        "mlx_lm",
-        "convert",
+        str(APP_ROOT / "tools" / "mlx_convert_compat.py"),
         "--hf-path",
         str(source),
         "--mlx-path",
         str(output),
-        "--quantize",
         "--q-bits",
         str(bits),
     ]
@@ -86,6 +84,10 @@ def server_command(model: Path, port: int) -> list[str]:
         "127.0.0.1",
         "--port",
         str(port),
+        "--prompt-concurrency",
+        "1",
+        "--decode-concurrency",
+        "1",
     ]
 
 
@@ -107,6 +109,7 @@ def convert(args: argparse.Namespace) -> dict[str, Any]:
         raise RuntimeError(f"Merged-model hash mismatch: expected {expected_source_hash}, found {source_hash}")
     if output.exists():
         raise RuntimeError(f"MLX output already exists; use a new versioned path: {output}")
+    compatibility = shared_kv_compatibility(source, getattr(args, "adapter", None))
     command = conversion_command(source, output, args.bits)
     if args.dry_run:
         return {
@@ -114,6 +117,7 @@ def convert(args: argparse.Namespace) -> dict[str, Any]:
             "sourceHash": source_hash,
             "runManifest": str(run_manifest_path),
             "mlxLmVersion": version,
+            "compatibility": compatibility,
             "command": command,
         }
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -132,6 +136,7 @@ def convert(args: argparse.Namespace) -> dict[str, Any]:
         "modelArtifactHash": artifact_hash,
         "quantization": f"MLX-{args.bits}bit",
         "mlxLmVersion": version,
+        "compatibility": compatibility,
         "conversionCommand": staging_command,
         "gitCommit": current_git_commit(),
         "createdAt": datetime.now(UTC).isoformat(),
@@ -197,6 +202,7 @@ def parser() -> argparse.ArgumentParser:
     convert_parser = commands.add_parser("convert")
     convert_parser.add_argument("--merged-hf", type=Path, required=True)
     convert_parser.add_argument("--run-manifest", type=Path, required=True)
+    convert_parser.add_argument("--adapter", type=Path)
     convert_parser.add_argument("--output", type=Path, required=True)
     convert_parser.add_argument("--bits", type=int, choices=(4, 6, 8), default=8)
     convert_parser.add_argument("--dry-run", action="store_true")

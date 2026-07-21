@@ -138,6 +138,15 @@ def canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def parse_provider_json(content: str) -> Any:
+    """Parse JSON, allowing only a single complete Markdown JSON fence."""
+    text = content.strip()
+    fenced = re.fullmatch(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
+    if fenced:
+        text = fenced.group(1).strip()
+    return json.loads(text)
+
+
 def context_fingerprint(context: dict[str, Any]) -> str:
     return hashlib.sha256(canonical_json(context).encode("utf-8")).hexdigest()[:24]
 
@@ -1879,7 +1888,7 @@ def _generate_analysis(context: dict[str, Any], config: dict[str, str] | None) -
                 last_error = str(exc)
                 break
             try:
-                parsed = prepare_provider_analysis(json.loads(content), context, rule_set)
+                parsed = prepare_provider_analysis(parse_provider_json(content), context, rule_set)
                 raw_errors = validate_raw_analysis(parsed)
                 if raw_errors:
                     raise ValueError("; ".join(raw_errors))

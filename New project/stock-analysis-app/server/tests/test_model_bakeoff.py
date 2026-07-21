@@ -6,6 +6,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from tools.gemma_bakeoff import (
@@ -46,6 +47,7 @@ from tools.model_bakeoff_eval import (
     generation_profile,
     human_review_summary,
     non_company_applicability_errors,
+    parse_training_facts,
     percentile95,
     provider_settings,
     response_content_hash,
@@ -54,6 +56,13 @@ from tools.model_bakeoff_eval import (
     run as run_bakeoff,
     sealed_eval_authorization,
     verify_sealed_provider_rows,
+)
+from tools.mlx_convert_compat import (
+    SHARED_KV_LORA_B,
+    SHARED_KV_WEIGHT,
+    shared_kv_configuration,
+    shared_kv_compatibility,
+    shared_kv_key,
 )
 from tools.prepare_mlx_runtime import convert as convert_mlx, conversion_command, serve as serve_mlx, server_command, tree_hash, version_tuple
 from tools.teacher_bakeoff import run as run_teacher_bakeoff
@@ -74,6 +83,18 @@ def training_row(index: int, split: str) -> dict:
 
 
 class ModelBakeoffTests(unittest.TestCase):
+    def test_evaluator_preserves_the_provider_rows_retrieved_rule_set(self) -> None:
+        stored = {"schemaVersion": "retrieved-rule-set.v1", "mode": "hybrid", "rules": [{"id": "rule-one"}]}
+        row = training_row(1, "validation")
+        row["messages"][1]["content"] = json.dumps(
+            {"facts": {"instrument": {"type": "equity"}}, "retrievedRuleSet": stored}
+        )
+
+        facts, rule_set = parse_training_facts(row)
+
+        self.assertEqual(facts, {"instrument": {"type": "equity"}})
+        self.assertEqual(rule_set, stored)
+
     def test_pytorch_allocator_defaults_to_expandable_segments(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(configure_pytorch_allocator(), "expandable_segments:True")
@@ -1086,10 +1107,12 @@ class ModelBakeoffTests(unittest.TestCase):
     def test_mlx_commands_are_versioned_and_loopback_only(self) -> None:
         source = Path("/tmp/merged")
         output = Path("/tmp/mlx")
-        self.assertGreaterEqual(version_tuple("0.31.2"), (0, 31, 2))
+        self.assertGreaterEqual(version_tuple("0.31.3"), (0, 31, 3))
         self.assertIn("--q-bits", conversion_command(source, output, 4))
         command = server_command(output, 8080)
         self.assertIn("127.0.0.1", command)
+        self.assertEqual(command[command.index("--prompt-concurrency") + 1], "1")
+        self.assertEqual(command[command.index("--decode-concurrency") + 1], "1")
         self.assertNotIn("0.0.0.0", command)
 
     def test_mlx_conversion_requires_manifest_hash_and_publishes_atomically(self) -> None:
@@ -1120,12 +1143,13 @@ class ModelBakeoffTests(unittest.TestCase):
             args = argparse.Namespace(
                 merged_hf=source,
                 run_manifest=run_manifest,
+                adapter=None,
                 output=output,
                 bits=8,
                 dry_run=False,
             )
             with (
-                patch("tools.prepare_mlx_runtime.require_mlx_lm", return_value="0.31.2"),
+                patch("tools.prepare_mlx_runtime.require_mlx_lm", return_value="0.31.3"),
                 patch("tools.prepare_mlx_runtime.subprocess.run", side_effect=fake_conversion),
                 patch("tools.prepare_mlx_runtime.current_git_commit", return_value="commit"),
             ):
@@ -1140,9 +1164,113 @@ class ModelBakeoffTests(unittest.TestCase):
             model.mkdir()
             (model / "weights.safetensors").write_bytes(b"mlx")
             args = argparse.Namespace(model=model, port=8080, dry_run=True)
-            with patch("tools.prepare_mlx_runtime.require_mlx_lm", return_value="0.31.2"):
+            with patch("tools.prepare_mlx_runtime.require_mlx_lm", return_value="0.31.3"):
                 with self.assertRaisesRegex(RuntimeError, "runtime_manifest"):
                     serve_mlx(args)
+
+    def test_gemma4_shared_kv_keys_are_scoped_to_canonical_shared_layers(self) -> None:
+        self.assertFalse(
+            shared_kv_key("language_model.model.layers.14.self_attn.k_proj.weight", 15, SHARED_KV_WEIGHT)
+        )
+        self.assertTrue(
+            shared_kv_key("language_model.model.layers.15.self_attn.k_proj.weight", 15, SHARED_KV_WEIGHT)
+        )
+        self.assertTrue(
+            shared_kv_key(
+                "base_model.model.model.language_model.layers.34.self_attn.v_proj.lora_B.weight",
+                15,
+                SHARED_KV_LORA_B,
+            )
+        )
+        self.assertFalse(
+            shared_kv_key("language_model.model.layers.20.self_attn.q_proj.weight", 15, SHARED_KV_WEIGHT)
+        )
+
+    def test_gemma4_shared_kv_configuration_uses_checkpoint_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            (source / "config.json").write_text(
+                json.dumps(
+                    {
+                        "model_type": "gemma4",
+                        "text_config": {"num_hidden_layers": 35, "num_kv_shared_layers": 20},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                shared_kv_configuration(source),
+                {"numHiddenLayers": 35, "numKvSharedLayers": 20, "firstSharedLayer": 15},
+            )
+
+    def test_gemma4_shared_kv_conversion_rejects_nonzero_adapter_updates(self) -> None:
+        class BooleanResult:
+            def __init__(self, value: bool) -> None:
+                self.value = value
+
+            def any(self) -> bool:
+                return self.value
+
+        class Tensor:
+            def __init__(self, nonzero: bool) -> None:
+                self.nonzero = nonzero
+
+            def __ne__(self, _value: object) -> BooleanResult:
+                return BooleanResult(self.nonzero)
+
+        class Store:
+            def __init__(self, values: dict[str, Tensor]) -> None:
+                self.values = values
+
+            def __enter__(self) -> "Store":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def keys(self) -> list[str]:
+                return list(self.values)
+
+            def get_tensor(self, key: str) -> Tensor:
+                return self.values[key]
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "merged"
+            adapter = Path(directory) / "adapter"
+            source.mkdir()
+            adapter.mkdir()
+            (source / "config.json").write_text(
+                json.dumps(
+                    {
+                        "model_type": "gemma4",
+                        "text_config": {"num_hidden_layers": 3, "num_kv_shared_layers": 1},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            source_weights = source / "model.safetensors"
+            adapter_weights = adapter / "adapter_model.safetensors"
+            source_weights.touch()
+            adapter_weights.touch()
+            merged_values = {
+                f"language_model.model.layers.2.self_attn.{projection}.weight": Tensor(False)
+                for projection in ("k_proj", "v_proj", "k_norm")
+            }
+            adapter_values = {
+                f"base_model.model.model.language_model.layers.2.self_attn.{projection}.lora_B.weight": Tensor(False)
+                for projection in ("k_proj", "v_proj")
+            }
+
+            def safe_open(path: Path, **_kwargs: object) -> Store:
+                return Store(adapter_values if Path(path) == adapter_weights else merged_values)
+
+            with patch.dict("sys.modules", {"safetensors": SimpleNamespace(safe_open=safe_open)}):
+                result = shared_kv_compatibility(source, adapter)
+                self.assertEqual(result["droppedWeightCount"], 3)
+                self.assertEqual(result["auditedZeroLoraBCount"], 2)
+                next(iter(adapter_values.values())).nonzero = True
+                with self.assertRaisesRegex(RuntimeError, "nonzero trained adapter updates"):
+                    shared_kv_compatibility(source, adapter)
 
     def test_promotion_requires_every_hard_and_human_gate(self) -> None:
         ids = [f"case-{index}" for index in range(15)]
