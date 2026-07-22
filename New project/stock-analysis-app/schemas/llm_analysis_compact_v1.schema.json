@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stock-analysis-agent.local/schemas/llm-analysis-compact.v1.json",
+  "title": "LlmAnalysisCompactV1",
+  "description": "Model-only contract expanded by the bridge into LlmAnalysisV1.",
+  "type": "object",
+  "required": ["schemaVersion", "decision", "chart", "company", "portfolio", "reasoning", "coach", "warnings"],
+  "$defs": {
+    "tone": { "enum": ["p", "n", "u"] },
+    "refs": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "item": {
+      "description": "[text, tone code, factRefs, ruleRefs]",
+      "type": "array",
+      "prefixItems": [
+        { "type": "string", "minLength": 1 },
+        { "$ref": "#/$defs/tone" },
+        { "$ref": "#/$defs/refs" },
+        { "$ref": "#/$defs/refs", "maxItems": 1 }
+      ],
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "items": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/item" },
+      "maxItems": 1
+    },
+    "step": {
+      "description": "[evidence, implication, action, tone code, factRefs, ruleRefs]",
+      "type": "array",
+      "prefixItems": [
+        { "type": "string", "minLength": 1 },
+        { "type": "string", "minLength": 1 },
+        { "type": "string", "minLength": 1 },
+        { "$ref": "#/$defs/tone" },
+        { "$ref": "#/$defs/refs" },
+        { "$ref": "#/$defs/refs", "maxItems": 1 }
+      ],
+      "minItems": 6,
+      "maxItems": 6
+    }
+  },
+  "properties": {
+    "schemaVersion": { "const": "llm-analysis-compact.v1" },
+    "decision": {
+      "type": "object",
+      "required": ["summary", "nextActions", "avoid", "priceDrivers", "risks", "dataGaps"],
+      "properties": {
+        "summary": { "type": "string" },
+        "nextActions": { "$ref": "#/$defs/items" },
+        "avoid": { "$ref": "#/$defs/items" },
+        "priceDrivers": { "$ref": "#/$defs/items" },
+        "risks": { "$ref": "#/$defs/items" },
+        "dataGaps": { "$ref": "#/$defs/items" }
+      },
+      "additionalProperties": false
+    },
+    "chart": {
+      "type": "object",
+      "required": ["summary", "trend", "momentum", "volume", "volatility", "levels", "patterns"],
+      "properties": {
+        "summary": { "type": "string" },
+        "trend": { "$ref": "#/$defs/items" },
+        "momentum": { "$ref": "#/$defs/items" },
+        "volume": { "$ref": "#/$defs/items" },
+        "volatility": { "$ref": "#/$defs/items" },
+        "levels": { "$ref": "#/$defs/items" },
+        "patterns": { "$ref": "#/$defs/items" }
+      },
+      "additionalProperties": false
+    },
+    "company": {
+      "type": "object",
+      "required": ["summary", "businessModel", "quality", "profitability", "balanceSheet", "cashFlow", "valuation", "sectorDrivers", "catalysts", "risks", "dataGaps"],
+      "properties": {
+        "summary": { "type": "string" },
+        "businessModel": { "$ref": "#/$defs/items" },
+        "quality": { "$ref": "#/$defs/items" },
+        "profitability": { "$ref": "#/$defs/items" },
+        "balanceSheet": { "$ref": "#/$defs/items" },
+        "cashFlow": { "$ref": "#/$defs/items" },
+        "valuation": { "$ref": "#/$defs/items" },
+        "sectorDrivers": { "$ref": "#/$defs/items" },
+        "catalysts": { "$ref": "#/$defs/items" },
+        "risks": { "$ref": "#/$defs/items" },
+        "dataGaps": { "$ref": "#/$defs/items" }
+      },
+      "additionalProperties": false
+    },
+    "portfolio": {
+      "type": "object",
+      "required": ["summary", "positionFit", "concentration", "sizing", "holdingActions", "risks"],
+      "properties": {
+        "summary": { "type": "string" },
+        "positionFit": { "$ref": "#/$defs/items" },
+        "concentration": { "$ref": "#/$defs/items" },
+        "sizing": { "$ref": "#/$defs/items" },
+        "holdingActions": { "$ref": "#/$defs/items" },
+        "risks": { "$ref": "#/$defs/items" }
+      },
+      "additionalProperties": false
+    },
+    "reasoning": {
+      "type": "object",
+      "required": ["steps"],
+      "properties": {
+        "steps": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/step" },
+          "minItems": 3,
+          "maxItems": 3
+        }
+      },
+      "additionalProperties": false
+    },
+    "coach": {
+      "type": "object",
+      "required": ["verdictSummary", "chartSummary", "companySummary", "questionsBeforeAction"],
+      "properties": {
+        "verdictSummary": { "type": "string" },
+        "chartSummary": { "type": "string" },
+        "companySummary": { "type": "string" },
+        "questionsBeforeAction": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/item" },
+          "minItems": 3,
+          "maxItems": 3
+        }
+      },
+      "additionalProperties": false
+    },
+    "warnings": { "type": "array", "items": { "type": "string" } }
+  },
+  "additionalProperties": false
+}

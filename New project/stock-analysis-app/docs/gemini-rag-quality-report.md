@@ -75,6 +75,7 @@ The private pilot inputs are ready:
 - No train/validation lineage overlap.
 - No sealed-evaluation overlap.
 - Resumable, no-truncation Gemma 4 E4B training configuration using QLoRA rank 16, two epochs, and seed 560.
+- A reversible compact model contract, a 3,584-token output ceiling, and an A100-only eight-case qualification smoke that must pass before full E4B training.
 
 No Gemma adapter, merged model, MLX bundle, or GGUF has been produced yet. The next external action is to mount the user's private Google Drive in the signed-in Colab session and upload only `pilot_train.jsonl` and `pilot_validation.jsonl`. The sealed 30-case evaluation set remains local and untouched.
 

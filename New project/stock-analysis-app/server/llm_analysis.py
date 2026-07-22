@@ -25,11 +25,13 @@ LEGACY_RULEBOOK_PATH = REPO_ROOT / "data" / "reference" / "trading_rule_index.js
 INDEX_PATH = APP_ROOT / "data" / "generated" / "varsity_rag.sqlite3"
 INDEX_STAGING_PATH = APP_ROOT / "data" / "generated" / "varsity_rag.build.sqlite3"
 SCHEMA_PATH = APP_ROOT / "schemas" / "llm_analysis_v1.schema.json"
+COMPACT_SCHEMA_PATH = APP_ROOT / "schemas" / "llm_analysis_compact_v1.schema.json"
 EMBEDDING_MODEL = "gemini-embedding-2"
 EMBEDDING_DIMENSIONS = 768
 MAX_RULES = 10
 RETRIEVED_RULESET_VERSION = "retrieved-rule-set.v1"
 ANALYSIS_PROMPT_VERSION = "analysis-prompt.v8"
+COMPACT_ANALYSIS_PROMPT_VERSION = "analysis-compact-prompt.v1"
 
 ANALYSIS_CACHE: dict[str, dict[str, Any]] = {}
 ANALYSIS_CACHE_LOCK = threading.Lock()
@@ -113,6 +115,8 @@ SECTION_ARRAYS = {
     "portfolio": ("positionFit", "concentration", "sizing", "holdingActions", "risks"),
 }
 STANDARD_ANALYSIS_AREAS = ("decision", "chart", "company", "portfolio", "reasoning", "coach")
+COMPACT_TONES = {"positive": "p", "negative": "n", "neutral": "u"}
+EXPANDED_TONES = {value: key for key, value in COMPACT_TONES.items()}
 
 
 def utc_now() -> str:
@@ -145,6 +149,178 @@ def parse_provider_json(content: str) -> Any:
     if fenced:
         text = fenced.group(1).strip()
     return json.loads(text)
+
+
+def _compact_item(value: dict[str, Any]) -> list[Any]:
+    rules = [str(item) for item in value.get("ruleRefs") or []]
+    return [
+        str(value.get("text") or ""),
+        COMPACT_TONES.get(str(value.get("tone") or "neutral"), "u"),
+        [str(item) for item in value.get("factRefs") or []],
+        rules[:1],
+    ]
+
+
+def _compact_step(value: dict[str, Any]) -> list[Any]:
+    rules = [str(item) for item in value.get("ruleRefs") or []]
+    return [
+        str(value.get("evidence") or value.get("text") or ""),
+        str(value.get("implication") or ""),
+        str(value.get("action") or ""),
+        COMPACT_TONES.get(str(value.get("tone") or "neutral"), "u"),
+        [str(item) for item in value.get("factRefs") or []],
+        rules[:1],
+    ]
+
+
+def compact_analysis(value: dict[str, Any]) -> dict[str, Any]:
+    """Convert an approved LlmAnalysisV1 response into the model-only contract."""
+    errors = validate_raw_analysis(value)
+    if errors:
+        raise ValueError("Cannot compact invalid LlmAnalysisV1: " + "; ".join(errors[:12]))
+    compact: dict[str, Any] = {"schemaVersion": "llm-analysis-compact.v1"}
+    for section, arrays in SECTION_ARRAYS.items():
+        source = value[section]
+        compact[section] = {"summary": str(source["summary"])}
+        for array in arrays:
+            items = source[array]
+            compact[section][array] = [_compact_item(items[0])] if items else []
+    compact["reasoning"] = {"steps": [_compact_step(item) for item in value["reasoning"]["steps"]]}
+    compact["coach"] = {
+        "verdictSummary": str(value["coach"]["verdictSummary"]),
+        "chartSummary": str(value["coach"]["chartSummary"]),
+        "companySummary": str(value["coach"]["companySummary"]),
+        "questionsBeforeAction": [_compact_item(item) for item in value["coach"]["questionsBeforeAction"]],
+    }
+    compact["warnings"] = [str(item) for item in value["warnings"]]
+    return compact
+
+
+def _compact_refs(value: Any, path: str) -> list[str]:
+    if not isinstance(value, list) or not value or any(not isinstance(item, str) or not item for item in value):
+        return [f"{path} must be a non-empty array of strings"]
+    return []
+
+
+def _compact_item_errors(value: Any, path: str, *, step: bool = False) -> list[str]:
+    size = 6 if step else 4
+    if not isinstance(value, list) or len(value) != size:
+        return [f"{path} must contain exactly {size} positional values"]
+    errors: list[str] = []
+    text_indexes = (0, 1, 2) if step else (0,)
+    errors.extend(f"{path}[{index}] must be a non-empty string" for index in text_indexes if not isinstance(value[index], str) or not value[index].strip())
+    tone_index = 3 if step else 1
+    if value[tone_index] not in EXPANDED_TONES:
+        errors.append(f"{path}[{tone_index}] must be p, n, or u")
+    fact_index = 4 if step else 2
+    rule_index = 5 if step else 3
+    errors.extend(_compact_refs(value[fact_index], f"{path}[{fact_index}]"))
+    errors.extend(_compact_refs(value[rule_index], f"{path}[{rule_index}]"))
+    if isinstance(value[rule_index], list) and len(value[rule_index]) > 1:
+        errors.append(f"{path}[{rule_index}] must contain exactly one primary rule")
+    return errors
+
+
+def validate_compact_analysis(value: Any) -> list[str]:
+    if not isinstance(value, dict):
+        return ["compact analysis must be an object"]
+    required = {"schemaVersion", "decision", "chart", "company", "portfolio", "reasoning", "coach", "warnings"}
+    errors = [f"{key} is required" for key in sorted(required - set(value))]
+    unknown = sorted(set(value) - required)
+    if unknown:
+        errors.append(f"compact analysis contains unsupported top-level fields: {unknown}")
+    if value.get("schemaVersion") != "llm-analysis-compact.v1":
+        errors.append("schemaVersion must be llm-analysis-compact.v1")
+    for section, arrays in SECTION_ARRAYS.items():
+        section_value = value.get(section)
+        if not isinstance(section_value, dict):
+            errors.append(f"{section} must be an object")
+            continue
+        allowed = {"summary", *arrays}
+        errors.extend(f"{section}.{key} is required" for key in sorted(allowed - set(section_value)))
+        extra = sorted(set(section_value) - allowed)
+        if extra:
+            errors.append(f"{section} contains unsupported fields: {extra}")
+        if not isinstance(section_value.get("summary"), str):
+            errors.append(f"{section}.summary must be a string")
+        for array in arrays:
+            items = section_value.get(array)
+            if not isinstance(items, list) or len(items) > 1:
+                errors.append(f"{section}.{array} must be an array with at most one item")
+                continue
+            for index, item in enumerate(items):
+                errors.extend(_compact_item_errors(item, f"{section}.{array}[{index}]"))
+    reasoning = value.get("reasoning")
+    steps = reasoning.get("steps") if isinstance(reasoning, dict) else None
+    if not isinstance(reasoning, dict) or set(reasoning) != {"steps"}:
+        errors.append("reasoning must contain only steps")
+    if not isinstance(steps, list) or len(steps) != 3:
+        errors.append("reasoning.steps must contain exactly three steps")
+    else:
+        for index, step_value in enumerate(steps):
+            errors.extend(_compact_item_errors(step_value, f"reasoning.steps[{index}]", step=True))
+    coach = value.get("coach")
+    coach_required = {"verdictSummary", "chartSummary", "companySummary", "questionsBeforeAction"}
+    if not isinstance(coach, dict) or set(coach) != coach_required:
+        errors.append("coach must contain only the four required fields")
+    else:
+        for key in ("verdictSummary", "chartSummary", "companySummary"):
+            if not isinstance(coach.get(key), str):
+                errors.append(f"coach.{key} must be a string")
+        questions = coach.get("questionsBeforeAction")
+        if not isinstance(questions, list) or len(questions) != 3:
+            errors.append("coach.questionsBeforeAction must contain exactly three questions")
+        else:
+            for index, item in enumerate(questions):
+                errors.extend(_compact_item_errors(item, f"coach.questionsBeforeAction[{index}]"))
+    warnings = value.get("warnings")
+    if not isinstance(warnings, list) or any(not isinstance(item, str) for item in warnings):
+        errors.append("warnings must be an array of strings")
+    return errors
+
+
+def _expand_compact_item(value: list[Any]) -> dict[str, Any]:
+    return {
+        "text": value[0],
+        "tone": EXPANDED_TONES[value[1]],
+        "factRefs": value[2],
+        "ruleRefs": value[3],
+    }
+
+
+def expand_compact_analysis(value: Any) -> dict[str, Any]:
+    """Expand a validated model response into the public LlmAnalysisV1 shape."""
+    errors = validate_compact_analysis(value)
+    if errors:
+        raise ValueError("; ".join(errors[:24]))
+    expanded: dict[str, Any] = {}
+    for section, arrays in SECTION_ARRAYS.items():
+        source = value[section]
+        expanded[section] = {"summary": source["summary"]}
+        for array in arrays:
+            expanded[section][array] = [_expand_compact_item(item) for item in source[array]]
+    steps = []
+    for step in value["reasoning"]["steps"]:
+        steps.append(
+            {
+                "text": step[2],
+                "tone": EXPANDED_TONES[step[3]],
+                "factRefs": step[4],
+                "ruleRefs": step[5],
+                "evidence": step[0],
+                "implication": step[1],
+                "action": step[2],
+            }
+        )
+    expanded["reasoning"] = {"steps": steps}
+    expanded["coach"] = {
+        "verdictSummary": value["coach"]["verdictSummary"],
+        "chartSummary": value["coach"]["chartSummary"],
+        "companySummary": value["coach"]["companySummary"],
+        "questionsBeforeAction": [_expand_compact_item(item) for item in value["coach"]["questionsBeforeAction"]],
+    }
+    expanded["warnings"] = value["warnings"]
+    return expanded
 
 
 def context_fingerprint(context: dict[str, Any]) -> str:
@@ -1679,6 +1855,53 @@ Return only JSON matching the supplied schema. Every narrative item, reasoning s
     ]
 
 
+def compact_analysis_prompt(
+    context: dict[str, Any],
+    rule_set: dict[str, Any],
+    repair: str | None = None,
+    previous_response: str | None = None,
+) -> list[dict[str, str]]:
+    """Build the frozen Gemma prompt for the compact model-only contract."""
+    schema = json.loads(COMPACT_SCHEMA_PATH.read_text(encoding="utf-8"))
+    system = """
+You are the grounded analyst inside Stock Analysis Agent, an educational NSE/BSE decision-support application.
+The deterministic app verdict and supplied numeric facts are authoritative. Never replace the verdict, recalculate a supplied value, or invent a metric, event, price, date, or instrument fact.
+Use retrieved Varsity-derived rules only as reasoning guidance. Return one complete JSON object matching LlmAnalysisCompactV1, without Markdown fences or prose. The bridge expands this compact model response into the public LlmAnalysisV1 UI contract.
+Compact narrative items are positional arrays: [text, tone, factRefs, ruleRefs]. Compact reasoning steps are [evidence, implication, action, tone, factRefs, ruleRefs]. Tone is p, n, or u. Every populated item must cite supplied facts and exactly one retrieved rule.
+""".strip()
+    user: dict[str, Any] = {
+        "task": "Fill every applicable narrative field using the compact contract without changing deterministic facts or verdicts.",
+        "outputSchema": schema,
+        "retrievedRuleSet": rule_set,
+        "facts": context,
+        "validFactRefs": sorted(_fact_reference_paths(context)),
+        "validRuleRefs": sorted(str(rule.get("id")) for rule in rule_set.get("rules") or [] if isinstance(rule, dict)),
+        "evidenceGuardrails": _analysis_guardrails(context),
+        "requirements": [
+            "Return exactly one item in every applicable section array and an empty array only when unavailable, non-applicable, or patterns are disabled.",
+            "Keep summaries under 40 words and item text under 24 words.",
+            "Return exactly three reasoning steps and exactly three questionsBeforeAction items.",
+            "Include the exact deterministic verdict wording in decision.summary and coach.verdictSummary.",
+            "Use only fact paths listed in validFactRefs and exactly one rule ID from validRuleRefs for each populated item.",
+            "Do not calculate, round, scale, convert, or introduce a number not explicitly present in a cited fact.",
+            "Do not invent tranche counts, order types, stops, targets, percentages, catalysts, forecasts, or position sizes.",
+            "Use the exact Buy or Sell label from userContext.action in portfolio.holdingActions item text.",
+            "Return an empty chart.patterns array when facts.uiOptions.patternsEnabled is false.",
+            "Treat operating-company fundamentals as non-applicable for funds, ETFs, and indices.",
+            "Every reader-facing string must be concise prose, never a raw backend field name or prompt instruction.",
+        ],
+    }
+    if repair:
+        user["repair"] = {
+            "validationErrors": repair,
+            "previousResponse": (previous_response or "")[:12000],
+        }
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": canonical_json(user)},
+    ]
+
+
 def _extract_openai_text(payload: dict[str, Any]) -> str:
     return str((((payload.get("choices") or [{}])[0].get("message") or {}).get("content") or ""))
 
@@ -1727,7 +1950,7 @@ def provider_timeout(config: dict[str, str]) -> float:
 
 def provider_version(config: dict[str, str]) -> str:
     provider = runtime_provider(config)
-    components = [provider, str(config.get("model") or "unknown")]
+    components = [provider, str(config.get("model") or "unknown"), provider_output_contract(config)]
     if provider == "local_openai":
         components.extend(
             [
@@ -1736,6 +1959,15 @@ def provider_version(config: dict[str, str]) -> str:
             ]
         )
     return ":".join(components)
+
+
+def provider_output_contract(config: dict[str, str]) -> str:
+    explicit = str(config.get("output_contract") or "").strip().lower()
+    if runtime_provider(config) == "local_openai" and not explicit:
+        explicit = os.environ.get("LOCAL_LLM_OUTPUT_CONTRACT", "full").strip().lower()
+    if explicit in {"compact", "compact_v1", "llm-analysis-compact.v1"}:
+        return "llm-analysis-compact.v1"
+    return "llm-analysis.v1"
 
 
 def gemini_fallback_config() -> dict[str, str] | None:
@@ -1877,10 +2109,12 @@ def _generate_analysis(context: dict[str, Any], config: dict[str, str] | None) -
     if fallback:
         providers.append(fallback)
     for response_config in providers:
+        output_contract = provider_output_contract(response_config)
+        prompt_builder = compact_analysis_prompt if output_contract == "llm-analysis-compact.v1" else analysis_prompt
         repair_note: str | None = None
         previous_response: str | None = None
         for _attempt in range(2):
-            messages = analysis_prompt(context, rule_set, repair_note, previous_response)
+            messages = prompt_builder(context, rule_set, repair_note, previous_response)
             try:
                 content = call_provider(messages, response_config)
             except RuntimeError as exc:
@@ -1888,7 +2122,13 @@ def _generate_analysis(context: dict[str, Any], config: dict[str, str] | None) -
                 last_error = str(exc)
                 break
             try:
-                parsed = prepare_provider_analysis(parse_provider_json(content), context, rule_set)
+                provider_value = parse_provider_json(content)
+                if output_contract == "llm-analysis-compact.v1":
+                    compact_errors = validate_compact_analysis(provider_value)
+                    if compact_errors:
+                        raise ValueError("; ".join(compact_errors))
+                    provider_value = expand_compact_analysis(provider_value)
+                parsed = prepare_provider_analysis(provider_value, context, rule_set)
                 raw_errors = validate_raw_analysis(parsed)
                 if raw_errors:
                     raise ValueError("; ".join(raw_errors))

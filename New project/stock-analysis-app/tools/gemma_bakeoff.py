@@ -20,11 +20,28 @@ from typing import Any
 
 
 APP_ROOT = Path(__file__).resolve().parents[1]
+if str(APP_ROOT) not in sys.path:
+    sys.path.insert(0, str(APP_ROOT))
+
+from server.llm_analysis import (
+    COMPACT_ANALYSIS_PROMPT_VERSION,
+    expand_compact_analysis,
+    parse_provider_json,
+    semantic_analysis_errors,
+    validate_compact_analysis,
+    validate_raw_analysis,
+)
+
 DEFAULT_DATA_ROOT = APP_ROOT / "data" / "training" / "provider"
 DEFAULT_OUTPUT_ROOT = APP_ROOT / "data" / "generated" / "gemma_bakeoff"
 DEFAULT_EVALUATION_SEAL = APP_ROOT / "data" / "training" / "evaluation_seal.json"
 REQUIREMENTS_PATH = APP_ROOT / "notebooks" / "gemma_bakeoff_requirements.txt"
-PILOT_DATASET_HASH = "6a374ec58b9fd134de5cf1ccdeda33384ba24c02935c4af2b3e3d8a6bbd75c09"
+PILOT_DATASET_HASH = "284966959d0e5155221e871305450752d24736721e713c0bc08335de93efae7b"
+PILOT_OUTPUT_CONTRACT = "llm-analysis-compact.v1"
+MAX_COMPACT_OUTPUT_TOKENS = 3584
+QUALIFICATION_TRAIN_ROWS = 5
+QUALIFICATION_VALIDATION_ROWS = 3
+QUALIFICATION_MAX_STEPS = 30
 SEQUENCE_HEADROOM = 128
 SEQUENCE_MULTIPLE = 256
 PACKAGE_NAMES = ("accelerate", "bitsandbytes", "datasets", "peft", "torch", "transformers", "trl", "unsloth")
@@ -103,6 +120,21 @@ def validate_rows(rows: list[dict[str, Any]], expected: int, split: str) -> dict
             errors.append(f"row {index}: messages must be system/user/assistant")
         elif any(not isinstance(message.get("content"), str) or not message["content"].strip() for message in messages):
             errors.append(f"row {index}: every message must contain non-empty text")
+        else:
+            metadata = row.get("metadata") or {}
+            if metadata.get("promptVersion") != COMPACT_ANALYSIS_PROMPT_VERSION:
+                errors.append(f"row {index}: compact prompt version is not locked")
+            if metadata.get("outputContract") != PILOT_OUTPUT_CONTRACT:
+                errors.append(f"row {index}: output contract must be {PILOT_OUTPUT_CONTRACT}")
+            try:
+                compact = parse_provider_json(messages[2]["content"])
+                compact_errors = validate_compact_analysis(compact)
+                if compact_errors:
+                    errors.append(f"row {index}: invalid compact response: {'; '.join(compact_errors[:4])}")
+                elif validate_raw_analysis(expand_compact_analysis(compact)):
+                    errors.append(f"row {index}: compact response does not expand into LlmAnalysisV1")
+            except (json.JSONDecodeError, ValueError) as exc:
+                errors.append(f"row {index}: invalid compact response JSON: {exc}")
         if row.get("split") != split:
             errors.append(f"row {index}: expected split {split!r}, found {row.get('split')!r}")
         if not row.get("lineageId"):
@@ -116,7 +148,12 @@ def validate_rows(rows: list[dict[str, Any]], expected: int, split: str) -> dict
         errors.append(f"duplicate row IDs: {duplicate_ids[:12]}")
     if len(rows) != expected:
         errors.append(f"expected {expected} rows, found {len(rows)}")
-    return {"rows": len(rows), "errors": errors}
+    return {
+        "rows": len(rows),
+        "promptVersion": COMPACT_ANALYSIS_PROMPT_VERSION,
+        "outputContract": PILOT_OUTPUT_CONTRACT,
+        "errors": errors,
+    }
 
 
 def evaluation_ids(seal_path: Path) -> set[str]:
@@ -182,6 +219,10 @@ def message_text(tokenizer: Any, messages: list[dict[str, Any]]) -> str:
     return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False).removeprefix("<bos>")
 
 
+def generation_prompt_text(tokenizer: Any, messages: list[dict[str, Any]]) -> str:
+    return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True).removeprefix("<bos>")
+
+
 def tokenize_text(tokenizer: Any, text: str, **kwargs: Any) -> Any:
     # Gemma 4 FastModel returns a multimodal processor whose first positional
     # argument is images. The explicit keyword also works for text tokenizers.
@@ -197,6 +238,63 @@ def token_ids(tokenizer: Any, text: str, **kwargs: Any) -> list[int]:
             raise RuntimeError(f"Expected one tokenized text row, found {len(values)}.")
         values = values[0]
     return list(values)
+
+
+def assistant_token_lengths(tokenizer: Any, rows: list[dict[str, Any]]) -> list[int]:
+    return [
+        len(token_ids(tokenizer, row["messages"][2]["content"], add_special_tokens=False))
+        for row in rows
+    ]
+
+
+def qualification_rows(
+    train_rows: list[dict[str, Any]], validation_rows: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if len(train_rows) < QUALIFICATION_TRAIN_ROWS or len(validation_rows) < QUALIFICATION_VALIDATION_ROWS:
+        raise RuntimeError("Qualification smoke requires at least five train and three validation rows.")
+    return train_rows[:QUALIFICATION_TRAIN_ROWS], validation_rows[:QUALIFICATION_VALIDATION_ROWS]
+
+
+def qualification_output_errors(row: dict[str, Any], raw: str, generated_tokens: int) -> list[str]:
+    errors: list[str] = []
+    if generated_tokens >= MAX_COMPACT_OUTPUT_TOKENS:
+        errors.append(f"generation reached the {MAX_COMPACT_OUTPUT_TOKENS}-token ceiling")
+    try:
+        compact = parse_provider_json(raw)
+    except (json.JSONDecodeError, ValueError) as exc:
+        return [*errors, f"invalid response JSON: {exc}"]
+    compact_errors = validate_compact_analysis(compact)
+    if compact_errors:
+        return [*errors, *compact_errors]
+    expanded = expand_compact_analysis(compact)
+    errors.extend(validate_raw_analysis(expanded))
+    try:
+        prompt = json.loads(row["messages"][1]["content"])
+    except (KeyError, json.JSONDecodeError, TypeError) as exc:
+        return [*errors, f"invalid training prompt: {exc}"]
+    facts = prompt.get("facts") or {}
+    rule_set = prompt.get("retrievedRuleSet") or {"rules": []}
+    errors.extend(semantic_analysis_errors(expanded, facts, rule_set))
+    verdict = str((facts.get("deterministicAnalysis") or {}).get("verdict") or "").strip()
+    if not verdict:
+        errors.append("deterministic verdict is missing from the prompt")
+    else:
+        for path, text in (
+            ("decision.summary", expanded["decision"]["summary"]),
+            ("coach.verdictSummary", expanded["coach"]["verdictSummary"]),
+        ):
+            if verdict.casefold() not in str(text).casefold():
+                errors.append(f"{path} does not preserve deterministic verdict {verdict!r}")
+    return errors
+
+
+def decode_generated_tokens(tokenizer: Any, values: Any) -> str:
+    decoder = getattr(tokenizer, "decode", None)
+    if not callable(decoder):
+        decoder = getattr(getattr(tokenizer, "tokenizer", None), "decode", None)
+    if not callable(decoder):
+        raise RuntimeError("Loaded Gemma tokenizer does not expose a decode method.")
+    return str(decoder(values, skip_special_tokens=True)).strip()
 
 
 def align_gemma4_projection_dtype(model: Any, activation_dtype: Any | None = None) -> list[str]:
@@ -418,6 +516,9 @@ def validate_completed_run(
         "gradientAccumulation": args.gradient_accumulation,
         "seed": args.seed,
         "quantization": args.quantization or MODEL_CONFIGS[args.model]["ggufQuantization"],
+        "outputContract": PILOT_OUTPUT_CONTRACT,
+        "promptVersion": COMPACT_ANALYSIS_PROMPT_VERSION,
+        "maxOutputTokens": MAX_COMPACT_OUTPUT_TOKENS,
     }
     errors.extend(f"manifest mismatch: {key}" for key, value in expected.items() if manifest.get(key) != value)
     identity_path = run_root / "run_identity.json"
@@ -435,13 +536,26 @@ def validate_completed_run(
             "learningRate": args.learning_rate,
             "gradientAccumulation": args.gradient_accumulation,
             "seed": args.seed,
+            "outputContract": PILOT_OUTPUT_CONTRACT,
+            "promptVersion": COMPACT_ANALYSIS_PROMPT_VERSION,
+            "maxOutputTokens": MAX_COMPACT_OUTPUT_TOKENS,
         }
         errors.extend(
             f"run identity mismatch: {key}"
             for key, value in identity_expected.items()
             if identity.get(key) != value
         )
-        for key in ("baseModel", "baseModelRevision", "datasetFiles", "maxSequenceLength", "responseMarkers"):
+        for key in (
+            "baseModel",
+            "baseModelRevision",
+            "datasetFiles",
+            "maxSequenceLength",
+            "maximumAssistantTokens",
+            "maxOutputTokens",
+            "outputContract",
+            "promptVersion",
+            "responseMarkers",
+        ):
             if manifest.get(key) != identity.get(key):
                 errors.append(f"manifest/run identity mismatch: {key}")
         for key in ("gitCommit", "packages", "trainingSourceHash", "requirementsHash"):
@@ -629,6 +743,109 @@ def prepare_lora_model(
     return model, align_gemma4_projection_dtype(model, activation_dtype)
 
 
+def run_qualification_generation(
+    model: Any,
+    tokenizer: Any,
+    rows: list[dict[str, Any]],
+    torch: Any,
+    FastModel: Any,
+) -> dict[str, Any]:
+    if hasattr(FastModel, "for_inference"):
+        FastModel.for_inference(model)
+    else:
+        model.eval()
+    cases: list[dict[str, Any]] = []
+
+    def generate(messages: list[dict[str, Any]]) -> tuple[str, int, int]:
+        prompt = generation_prompt_text(tokenizer, messages)
+        encoded = tokenize_text(tokenizer, prompt, return_tensors="pt", add_special_tokens=False)
+        encoded = {key: value.to("cuda") for key, value in encoded.items() if hasattr(value, "to")}
+        prompt_tokens = int(encoded["input_ids"].shape[-1])
+        torch.manual_seed(560)
+        with torch.inference_mode():
+            output = model.generate(
+                **encoded,
+                max_new_tokens=MAX_COMPACT_OUTPUT_TOKENS,
+                do_sample=False,
+                use_cache=True,
+            )
+        generated = output[0][prompt_tokens:]
+        generated_tokens = int(generated.shape[-1])
+        raw = decode_generated_tokens(tokenizer, generated)
+        del output, generated, encoded
+        torch.cuda.empty_cache()
+        return raw, prompt_tokens, generated_tokens
+
+    for row in rows:
+        raw, prompt_tokens, generated_tokens = generate(row["messages"][:2])
+        errors = qualification_output_errors(row, raw, generated_tokens)
+        repairs = 0
+        if errors:
+            repairs = 1
+            repair_messages = [
+                row["messages"][0],
+                {
+                    "role": "user",
+                    "content": row["messages"][1]["content"]
+                    + "\nREPAIR THE RESPONSE. Validation errors: "
+                    + "; ".join(errors[:12])
+                    + ". Return one complete corrected compact JSON object only.",
+                },
+            ]
+            raw, prompt_tokens, generated_tokens = generate(repair_messages)
+            errors = qualification_output_errors(row, raw, generated_tokens)
+        cases.append(
+            {
+                "id": str(row.get("id") or ""),
+                "split": str(row.get("split") or ""),
+                "promptTokens": prompt_tokens,
+                "generatedTokens": generated_tokens,
+                "repairs": repairs,
+                "schemaAndGroundingValid": not errors,
+                "errors": errors,
+                "response": raw,
+            }
+        )
+    passed = len(cases) == QUALIFICATION_TRAIN_ROWS + QUALIFICATION_VALIDATION_ROWS and all(
+        case["schemaAndGroundingValid"] for case in cases
+    )
+    return {
+        "schemaVersion": "gemma-qualification-smoke.v1",
+        "status": "passed" if passed else "failed",
+        "outputContract": PILOT_OUTPUT_CONTRACT,
+        "promptVersion": COMPACT_ANALYSIS_PROMPT_VERSION,
+        "maxOutputTokens": MAX_COMPACT_OUTPUT_TOKENS,
+        "cases": cases,
+        "passedCases": sum(bool(case["schemaAndGroundingValid"]) for case in cases),
+        "totalCases": len(cases),
+    }
+
+
+def qualification_report_errors(
+    report: dict[str, Any], args: argparse.Namespace, validation: dict[str, Any]
+) -> list[str]:
+    expected = {
+        "status": "passed",
+        "candidate": args.model,
+        "datasetHash": validation["datasetHash"],
+        "outputContract": PILOT_OUTPUT_CONTRACT,
+        "promptVersion": COMPACT_ANALYSIS_PROMPT_VERSION,
+        "maxOutputTokens": MAX_COMPACT_OUTPUT_TOKENS,
+        "loraRank": args.lora_rank,
+        "loraTargets": args.lora_targets,
+        "maxSteps": QUALIFICATION_MAX_STEPS,
+        "passedCases": QUALIFICATION_TRAIN_ROWS + QUALIFICATION_VALIDATION_ROWS,
+        "totalCases": QUALIFICATION_TRAIN_ROWS + QUALIFICATION_VALIDATION_ROWS,
+    }
+    errors = [f"qualification report mismatch: {key}" for key, value in expected.items() if report.get(key) != value]
+    cases = report.get("cases") or []
+    if not isinstance(cases, list) or len(cases) != QUALIFICATION_TRAIN_ROWS + QUALIFICATION_VALIDATION_ROWS:
+        errors.append("qualification report must contain all eight cases")
+    elif any(case.get("errors") or not case.get("schemaAndGroundingValid") for case in cases):
+        errors.append("qualification report contains failed cases")
+    return errors
+
+
 def run_training(args: argparse.Namespace) -> dict[str, Any]:
     allocator_config = configure_pytorch_allocator()
     expected_hash = args.expected_dataset_hash
@@ -639,6 +856,13 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
     run_name = clean_run_name(args.run_name or default_run_name(args))
     run_root = args.output_root / run_name
     manifest_path = run_root / "run_manifest.json"
+    qualification_path = run_root / "qualification_report.json"
+    if args.qualification_smoke and qualification_path.exists() and not args.preflight:
+        existing_qualification = json.loads(qualification_path.read_text(encoding="utf-8"))
+        qualification_errors = qualification_report_errors(existing_qualification, args, validation)
+        if qualification_errors:
+            raise RuntimeError("Existing qualification smoke failed integrity checks: " + "; ".join(qualification_errors))
+        return {**existing_qualification, "status": "already-passed"}
     if manifest_path.exists() and not args.preflight:
         existing = json.loads(manifest_path.read_text(encoding="utf-8"))
         completed_errors = validate_completed_run(existing, args, validation, run_root)
@@ -669,6 +893,13 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
     validation_name = "validation.jsonl" if args.final else "pilot_validation.jsonl"
     train_rows = read_jsonl(args.data_root / train_name)
     validation_rows = read_jsonl(args.data_root / validation_name)
+    if args.require_qualification_report and not args.qualification_smoke and not args.preflight:
+        if not args.require_qualification_report.is_file():
+            raise RuntimeError(f"Required qualification report does not exist: {args.require_qualification_report}")
+        required_report = json.loads(args.require_qualification_report.read_text(encoding="utf-8"))
+        qualification_errors = qualification_report_errors(required_report, args, validation)
+        if qualification_errors:
+            raise RuntimeError("Required qualification smoke did not pass: " + "; ".join(qualification_errors))
     existing_preflight = json.loads(preflight_path.read_text(encoding="utf-8")) if preflight_path.exists() else {}
     base_revision = str(
         args.base_revision
@@ -682,7 +913,14 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
     probe_tokenizer = get_chat_template(probe_tokenizer, chat_template=config["chatTemplate"])
     probe_texts = [message_text(probe_tokenizer, row["messages"]) for row in [*train_rows, *validation_rows]]
     token_lengths = [len(token_ids(probe_tokenizer, text, add_special_tokens=True)) for text in probe_texts]
+    output_token_lengths = assistant_token_lengths(probe_tokenizer, [*train_rows, *validation_rows])
     maximum_tokens = max(token_lengths)
+    maximum_output_tokens = max(output_token_lengths)
+    if maximum_output_tokens > MAX_COMPACT_OUTPUT_TOKENS:
+        raise RuntimeError(
+            f"Compact-output gate failed: approved assistant output needs {maximum_output_tokens} tokens, "
+            f"above the {MAX_COMPACT_OUTPUT_TOKENS}-token generation ceiling."
+        )
     sequence_length = resolve_sequence_length(maximum_tokens, args.max_seq_length)
 
     model, tokenizer = FastModel.from_pretrained(
@@ -732,6 +970,10 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
         "baseModel": config["model"],
         "dataset": validation,
         "maximumSequenceTokens": maximum_tokens,
+        "maximumAssistantTokens": maximum_output_tokens,
+        "maxOutputTokens": MAX_COMPACT_OUTPUT_TOKENS,
+        "outputContract": PILOT_OUTPUT_CONTRACT,
+        "promptVersion": COMPACT_ANALYSIS_PROMPT_VERSION,
         "requiredSequenceLength": rounded_sequence_length(maximum_tokens),
         "resolvedSequenceLength": sequence_length,
         "responseMarkers": {"instruction": instruction_marker, "response": response_marker},
@@ -742,6 +984,7 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
             "learningRate": args.learning_rate,
             "gradientAccumulation": args.gradient_accumulation,
             "seed": args.seed,
+            "qualificationSmoke": bool(args.qualification_smoke),
         },
         "trainingSourceHash": sha256_file(Path(__file__)),
         "requirementsHash": sha256_file(REQUIREMENTS_PATH),
@@ -768,6 +1011,10 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
         "candidate": args.model,
         "baseModel": config["model"],
         "maximumSequenceTokens": maximum_tokens,
+        "maximumAssistantTokens": maximum_output_tokens,
+        "maxOutputTokens": MAX_COMPACT_OUTPUT_TOKENS,
+        "outputContract": PILOT_OUTPUT_CONTRACT,
+        "promptVersion": COMPACT_ANALYSIS_PROMPT_VERSION,
         "resolvedSequenceLength": sequence_length,
         "responseMarkers": preflight["responseMarkers"],
         "trainingConfiguration": preflight["trainingConfiguration"],
@@ -789,6 +1036,12 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
             "Training requires a matching training-step preflight for this exact run: " + ", ".join(sorted(set(preflight_errors)))
         )
 
+    selected_train_rows, selected_validation_rows = (
+        qualification_rows(train_rows, validation_rows)
+        if args.qualification_smoke
+        else (train_rows, validation_rows)
+    )
+
     def dataset(rows: list[dict[str, Any]]) -> Any:
         return Dataset.from_list([{"text": message_text(tokenizer, row["messages"])} for row in rows])
 
@@ -801,12 +1054,17 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
         "datasetHash": validation["datasetHash"],
         "datasetFiles": validation["files"],
         "maxSequenceLength": sequence_length,
+        "maximumAssistantTokens": maximum_output_tokens,
+        "maxOutputTokens": MAX_COMPACT_OUTPUT_TOKENS,
+        "outputContract": PILOT_OUTPUT_CONTRACT,
+        "promptVersion": COMPACT_ANALYSIS_PROMPT_VERSION,
         "loraRank": args.lora_rank,
         "loraTargets": args.lora_targets,
         "epochs": args.epochs,
         "learningRate": args.learning_rate,
         "gradientAccumulation": args.gradient_accumulation,
         "seed": args.seed,
+        "qualificationSmoke": bool(args.qualification_smoke),
         "responseMarkers": {"instruction": instruction_marker, "response": response_marker},
         "gitCommit": environment["gitCommit"],
         "packages": environment["packages"],
@@ -836,11 +1094,21 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
         "output_dir": str(checkpoint_root),
         **sft_sequence_kwargs(SFTConfig, sequence_length),
     }
+    if args.qualification_smoke:
+        sft_args.update(
+            {
+                "max_steps": QUALIFICATION_MAX_STEPS,
+                "eval_strategy": "steps",
+                "eval_steps": 10,
+                "save_strategy": "steps",
+                "save_steps": 10,
+            }
+        )
     trainer_parameters = inspect.signature(SFTTrainer).parameters
     trainer_kwargs: dict[str, Any] = {
         "model": model,
-        "train_dataset": dataset(train_rows),
-        "eval_dataset": dataset(validation_rows),
+        "train_dataset": dataset(selected_train_rows),
+        "eval_dataset": dataset(selected_validation_rows),
         "args": SFTConfig(**sft_args),
     }
     trainer_kwargs["processing_class" if "processing_class" in trainer_parameters else "tokenizer"] = tokenizer
@@ -857,6 +1125,32 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
         "responseMaskAudit": response_mask_audit,
     }
     write_json_atomic(metrics_path, metrics)
+    if args.qualification_smoke:
+        qualification = run_qualification_generation(
+            model,
+            tokenizer,
+            [*selected_train_rows, *selected_validation_rows],
+            torch,
+            FastModel,
+        )
+        qualification.update(
+            {
+                "candidate": args.model,
+                "datasetHash": validation["datasetHash"],
+                "runName": run_name,
+                "loraRank": args.lora_rank,
+                "loraTargets": args.lora_targets,
+                "maxSteps": QUALIFICATION_MAX_STEPS,
+                "gitCommit": environment["gitCommit"],
+                "trainingSourceHash": sha256_file(Path(__file__)),
+                "completedAt": datetime.now(UTC).isoformat(),
+            }
+        )
+        write_json_atomic(qualification_path, qualification)
+        qualification_errors = qualification_report_errors(qualification, args, validation)
+        if qualification_errors:
+            raise RuntimeError("Qualification smoke failed: " + "; ".join(qualification_errors))
+        return qualification
     adapter = run_root / "adapter"
     adapter.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(str(adapter))
@@ -900,6 +1194,10 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
         "trainRows": validation["train"],
         "validationRows": validation["validation"],
         "maximumSequenceTokens": maximum_tokens,
+        "maximumAssistantTokens": maximum_output_tokens,
+        "maxOutputTokens": MAX_COMPACT_OUTPUT_TOKENS,
+        "outputContract": PILOT_OUTPUT_CONTRACT,
+        "promptVersion": COMPACT_ANALYSIS_PROMPT_VERSION,
         "maxSequenceLength": sequence_length,
         "loraRank": args.lora_rank,
         "loraTargets": args.lora_targets,
@@ -936,6 +1234,16 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--evaluation-seal", type=Path, default=DEFAULT_EVALUATION_SEAL)
     result.add_argument("--expected-dataset-hash", default="")
     result.add_argument("--final", action="store_true", help="Use the final 900/150 files instead of the 75/15 pilot.")
+    result.add_argument(
+        "--qualification-smoke",
+        action="store_true",
+        help="Train 30 steps on five train and three validation rows, then require 8/8 grounded compact outputs.",
+    )
+    result.add_argument(
+        "--require-qualification-report",
+        type=Path,
+        help="Refuse a full run unless this matching qualification_report.json passed.",
+    )
     mode = result.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="Validate files without loading a model.")
     mode.add_argument("--preflight", action="store_true", help="Load the candidate and prove full-sequence GPU fit without training.")
@@ -992,6 +1300,9 @@ def finalize_existing_run(args: argparse.Namespace) -> dict[str, Any]:
         "learningRate": args.learning_rate,
         "gradientAccumulation": args.gradient_accumulation,
         "seed": args.seed,
+        "outputContract": PILOT_OUTPUT_CONTRACT,
+        "promptVersion": COMPACT_ANALYSIS_PROMPT_VERSION,
+        "maxOutputTokens": MAX_COMPACT_OUTPUT_TOKENS,
     }
     mismatches = [key for key, value in expected_identity.items() if identity.get(key) != value]
     if mismatches:
@@ -1063,6 +1374,10 @@ def finalize_existing_run(args: argparse.Namespace) -> dict[str, Any]:
         "trainRows": validation.get("train"),
         "validationRows": validation.get("validation"),
         "maximumSequenceTokens": preflight.get("maximumSequenceTokens"),
+        "maximumAssistantTokens": preflight.get("maximumAssistantTokens"),
+        "maxOutputTokens": identity["maxOutputTokens"],
+        "outputContract": identity["outputContract"],
+        "promptVersion": identity["promptVersion"],
         "maxSequenceLength": identity["maxSequenceLength"],
         "loraRank": args.lora_rank,
         "loraTargets": args.lora_targets,

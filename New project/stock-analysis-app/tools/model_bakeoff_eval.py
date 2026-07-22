@@ -23,13 +23,17 @@ if str(APP_ROOT) not in os.sys.path:
 
 from server.llm_analysis import (
     ANALYSIS_PROMPT_VERSION,
+    COMPACT_ANALYSIS_PROMPT_VERSION,
     analysis_prompt,
+    compact_analysis_prompt,
+    expand_compact_analysis,
     lexical_rule_set,
     normalise_analysis,
     parse_provider_json,
     prepare_provider_analysis,
     semantic_analysis_errors,
     validate_analysis,
+    validate_compact_analysis,
     validate_raw_analysis,
 )
 from tools.approve_candidates import unsupported_numeric_claims
@@ -236,6 +240,10 @@ def parse_training_facts(row: dict[str, Any]) -> tuple[dict[str, Any], dict[str,
     return facts, lexical_rule_set(facts)
 
 
+def row_output_contract(row: dict[str, Any]) -> str:
+    return str((row.get("metadata") or {}).get("outputContract") or "llm-analysis.v1")
+
+
 NON_COMPANY_INSTRUMENT_TYPES = {"etf", "fund", "index", "mutual fund", "mutual_fund"}
 NON_COMPANY_APPLICABILITY_TERMS = (
     "not applicable",
@@ -313,8 +321,14 @@ def evaluate_response(row: dict[str, Any], raw: str, latency: float, repairs: in
     parsed: dict[str, Any] = {}
     if not error:
         try:
-            parsed = prepare_provider_analysis(parse_provider_json(raw), facts, rule_set)
-            schema_errors = validate_raw_analysis(parsed)
+            provider_value = parse_provider_json(raw)
+            if row_output_contract(row) == "llm-analysis-compact.v1":
+                schema_errors = validate_compact_analysis(provider_value)
+                if not schema_errors:
+                    provider_value = expand_compact_analysis(provider_value)
+            if not schema_errors:
+                parsed = prepare_provider_analysis(provider_value, facts, rule_set)
+                schema_errors = validate_raw_analysis(parsed)
             if not schema_errors:
                 analysis = normalise_analysis(parsed, "bakeoff", sources)
                 schema_errors.extend(validate_analysis(analysis))
@@ -532,6 +546,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         rows = [row for row in rows if str(row.get("id")) in requested]
     if args.split == "eval":
         verify_sealed_provider_rows(rows)
+    output_contracts = {row_output_contract(row) for row in rows}
+    if len(output_contracts) != 1:
+        raise RuntimeError(f"Evaluation rows contain mixed output contracts: {sorted(output_contracts)}")
+    output_contract = next(iter(output_contracts))
+    prompt_version = (
+        COMPACT_ANALYSIS_PROMPT_VERSION
+        if output_contract == "llm-analysis-compact.v1"
+        else ANALYSIS_PROMPT_VERSION
+    )
     settings = provider_settings(args)
     profile = generation_profile(args, settings["provider"])
     configure_gemini_pacing(args.rpm if args.provider == "gemini" else 0)
@@ -559,7 +582,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "modelArtifactHash": args.model_artifact_hash,
         "quantization": args.quantization,
         "gitCommit": current_git_commit(),
-        "promptVersion": ANALYSIS_PROMPT_VERSION,
+        "promptVersion": prompt_version,
+        "outputContract": output_contract,
         "evaluatorVersion": EVALUATOR_VERSION,
         "evaluatorSourceHash": sha256_file(Path(__file__)),
         "evaluationHelperSourceHash": sha256_file(APP_ROOT / "tools" / "evaluate_llm.py"),
@@ -630,7 +654,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         if row_id in existing:
             continue
         facts, rule_set = parse_training_facts(row)
-        messages = analysis_prompt(facts, rule_set)
+        prompt_builder = compact_analysis_prompt if output_contract == "llm-analysis-compact.v1" else analysis_prompt
+        messages = prompt_builder(facts, rule_set)
         usage_before = provider_usage_snapshot()
         started = time.perf_counter()
         raw = ""
@@ -641,10 +666,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             first = evaluate_response(row, raw, time.perf_counter() - started, repairs)
             if not first["schemaValid"] or not first["semanticValid"]:
                 repairs = 1
-                repair_messages = analysis_prompt(
+                repair_messages = prompt_builder(
                     facts,
                     rule_set,
-                    "The previous response failed raw LlmAnalysisV1 validation: "
+                    f"The previous response failed raw {output_contract} validation: "
                     + "; ".join([*first["schemaErrors"], *first["semanticErrors"]][:12])
                     + ". Return one complete corrected JSON object only.",
                     raw,

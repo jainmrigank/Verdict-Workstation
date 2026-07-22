@@ -15,6 +15,7 @@ from server.llm_analysis import (
     ANALYSIS_CACHE,
     ANALYSIS_CACHE_LOCK,
     ANALYSIS_INFLIGHT,
+    COMPACT_ANALYSIS_PROMPT_VERSION,
     RULEBOOK_PATH,
     analysis_prompt,
     analysis_context_fingerprint,
@@ -22,6 +23,9 @@ from server.llm_analysis import (
     call_provider,
     corpus_version,
     context_fingerprint,
+    compact_analysis,
+    compact_analysis_prompt,
+    expand_compact_analysis,
     generate_analysis,
     local_endpoint_is_loopback,
     lexical_rule_set,
@@ -29,12 +33,14 @@ from server.llm_analysis import (
     normalise_analysis,
     parse_provider_json,
     provider_timeout,
+    provider_output_contract,
     provider_version,
     prepare_provider_analysis,
     retrieve_rule_set,
     sanitise_reader_annotations,
     semantic_analysis_errors,
     validate_analysis,
+    validate_compact_analysis,
     validate_raw_analysis,
 )
 
@@ -76,6 +82,37 @@ def raw_analysis() -> dict:
 
 
 class LlmAnalysisTests(unittest.TestCase):
+    def test_compact_contract_round_trips_into_public_analysis_shape(self) -> None:
+        compact = compact_analysis(raw_analysis())
+        self.assertEqual(validate_compact_analysis(compact), [])
+        self.assertEqual(compact["decision"]["nextActions"][0][1], "u")
+        self.assertEqual(len(compact["decision"]["nextActions"][0][3]), 1)
+        expanded = expand_compact_analysis(compact)
+        self.assertEqual(validate_raw_analysis(expanded), [])
+        self.assertEqual(expanded["reasoning"]["steps"][0]["text"], "Action")
+
+    def test_compact_contract_rejects_extra_items_and_missing_references(self) -> None:
+        compact = compact_analysis(raw_analysis())
+        compact["decision"]["nextActions"].append(list(compact["decision"]["nextActions"][0]))
+        compact["chart"]["trend"][0][2] = []
+        errors = validate_compact_analysis(compact)
+        self.assertTrue(any("at most one item" in error for error in errors))
+        self.assertTrue(any("non-empty array" in error for error in errors))
+
+    def test_compact_prompt_is_versioned_and_uses_model_only_schema(self) -> None:
+        messages = compact_analysis_prompt(facts(), {"schemaVersion": "retrieved-rule-set.v1", "rules": []})
+        user = json.loads(messages[1]["content"])
+        self.assertEqual(COMPACT_ANALYSIS_PROMPT_VERSION, "analysis-compact-prompt.v1")
+        self.assertEqual(user["outputSchema"]["title"], "LlmAnalysisCompactV1")
+        self.assertIn("positional arrays", messages[0]["content"])
+
+    def test_local_output_contract_requires_explicit_compact_setting(self) -> None:
+        config = {"runtime_provider": "local_openai", "base_url": "http://127.0.0.1:8080"}
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(provider_output_contract(config), "llm-analysis.v1")
+        with patch.dict(os.environ, {"LOCAL_LLM_OUTPUT_CONTRACT": "compact_v1"}, clear=True):
+            self.assertEqual(provider_output_contract(config), "llm-analysis-compact.v1")
+
     def test_provider_json_parser_accepts_only_a_complete_json_fence(self) -> None:
         self.assertEqual(parse_provider_json('```json\n{"ok": true}\n```'), {"ok": True})
         with self.assertRaises(json.JSONDecodeError):

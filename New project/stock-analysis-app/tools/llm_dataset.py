@@ -25,7 +25,12 @@ if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
 from tools.approve_candidates import audit_candidate, unsupported_numeric_claims
-from server.llm_analysis import ANALYSIS_PROMPT_VERSION, analysis_prompt, static_retrieved_rule_set
+from server.llm_analysis import (
+    COMPACT_ANALYSIS_PROMPT_VERSION,
+    compact_analysis,
+    compact_analysis_prompt,
+    static_retrieved_rule_set,
+)
 
 
 TRAINING_ROOT = APP_ROOT / "data" / "training"
@@ -1037,14 +1042,17 @@ def expand_to_target(target: int, batch_size: int) -> dict[str, Any]:
 
 def provider_row(row: dict[str, Any]) -> dict[str, Any]:
     rule_set = row.get("retrievedRuleSet") or static_retrieved_rule_set(row.get("retrievedRuleIds") or [], row["facts"])
-    prompt = analysis_prompt(row["facts"], rule_set)
+    prompt = compact_analysis_prompt(row["facts"], rule_set)
     return {
         "id": row["id"],
         "lineageId": row.get("lineageId") or row["id"],
         "split": row["split"],
         "messages": [
             *prompt,
-            {"role": "assistant", "content": json.dumps(row["output"], ensure_ascii=False, separators=(",", ":"))},
+            {
+                "role": "assistant",
+                "content": json.dumps(compact_analysis(row["output"]), ensure_ascii=False, separators=(",", ":")),
+            },
         ],
         "metadata": {
             "reviewStatus": row.get("reviewStatus"),
@@ -1052,7 +1060,8 @@ def provider_row(row: dict[str, Any]) -> dict[str, Any]:
             "retrievalMode": (row.get("retrievedRuleSet") or {}).get("mode"),
             "instrumentType": (row.get("facts") or {}).get("instrument", {}).get("type"),
             "action": (row.get("facts") or {}).get("userContext", {}).get("action"),
-            "promptVersion": ANALYSIS_PROMPT_VERSION,
+            "promptVersion": COMPACT_ANALYSIS_PROMPT_VERSION,
+            "outputContract": "llm-analysis-compact.v1",
         },
     }
 

@@ -6,7 +6,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from server.llm_analysis import lexical_rule_set, prepare_provider_analysis, semantic_analysis_errors, validate_raw_analysis
+from server.llm_analysis import (
+    expand_compact_analysis,
+    lexical_rule_set,
+    prepare_provider_analysis,
+    semantic_analysis_errors,
+    validate_raw_analysis,
+)
 from tools.approve_candidates import unsupported_numeric_claims
 from tools.llm_dataset import (
     GeminiQuotaError,
@@ -41,6 +47,13 @@ from tools.reasoning_dataset import (
 
 
 def gold_row(index: int, split: str) -> dict:
+    item = {
+        "text": "Use the supplied evidence.",
+        "tone": "neutral",
+        "factRefs": ["deterministicAnalysis.verdict"],
+        "ruleRefs": ["rule-one"],
+    }
+    step = {**item, "evidence": "Evidence", "implication": "Implication", "action": "Action"}
     return {
         "id": f"gold-{index:03d}",
         "lineageId": f"gold-{index:03d}",
@@ -57,9 +70,22 @@ def gold_row(index: int, split: str) -> dict:
             "dataQuality": {"state": "complete"},
             "uiOptions": {"patternsEnabled": True},
         },
-        "retrievedRuleIds": [],
-        "retrievedRuleSet": {"schemaVersion": "retrieved-rule-set.v1", "corpusVersion": "test", "mode": "training", "rules": []},
-        "output": {"decision": {}, "chart": {}, "company": {}, "portfolio": {}, "reasoning": {}, "coach": {}, "warnings": []},
+        "retrievedRuleIds": ["rule-one"],
+        "retrievedRuleSet": {
+            "schemaVersion": "retrieved-rule-set.v1",
+            "corpusVersion": "test",
+            "mode": "training",
+            "rules": [{"id": "rule-one"}],
+        },
+        "output": {
+            "decision": {"summary": "Wait and Watch", "nextActions": [item], "avoid": [item], "priceDrivers": [item], "risks": [item], "dataGaps": []},
+            "chart": {"summary": "Chart", "trend": [item], "momentum": [], "volume": [], "volatility": [], "levels": [], "patterns": [item]},
+            "company": {"summary": "Company", "businessModel": [item], "quality": [item], "profitability": [], "balanceSheet": [], "cashFlow": [], "valuation": [], "sectorDrivers": [], "catalysts": [], "risks": [], "dataGaps": []},
+            "portfolio": {"summary": "Portfolio", "positionFit": [item], "concentration": [], "sizing": [], "holdingActions": [item], "risks": []},
+            "reasoning": {"steps": [step, step, step]},
+            "coach": {"verdictSummary": "Wait and Watch", "chartSummary": "Chart", "companySummary": "Company", "questionsBeforeAction": [item, item, item]},
+            "warnings": [],
+        },
     }
 
 
@@ -357,9 +383,12 @@ class ReasoningDatasetTests(unittest.TestCase):
         self.assertEqual([message["role"] for message in exported["messages"]], ["system", "user", "assistant"])
         prompt = json.loads(exported["messages"][1]["content"])
         self.assertEqual(prompt["retrievedRuleSet"]["schemaVersion"], "retrieved-rule-set.v1")
-        self.assertEqual(prompt["outputSchema"]["title"], "LlmAnalysisV1")
+        self.assertEqual(prompt["outputSchema"]["title"], "LlmAnalysisCompactV1")
         self.assertTrue(prompt["requirements"])
-        self.assertEqual(exported["metadata"]["promptVersion"], "analysis-prompt.v8")
+        self.assertEqual(exported["metadata"]["promptVersion"], "analysis-compact-prompt.v1")
+        self.assertEqual(exported["metadata"]["outputContract"], "llm-analysis-compact.v1")
+        compact = json.loads(exported["messages"][2]["content"])
+        self.assertEqual(validate_raw_analysis(expand_compact_analysis(compact)), [])
         self.assertEqual(exported["lineageId"], "gold-001")
 
     def test_every_approved_gold_output_passes_runtime_semantic_contract(self) -> None:

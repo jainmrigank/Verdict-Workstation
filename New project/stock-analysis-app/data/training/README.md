@@ -55,7 +55,7 @@ Once all reasoning gold is approved:
 ```bash
 python3 tools/llm_dataset.py export --pilot
 python3 tools/gemma_bakeoff.py --dry-run --model gemma4-e4b \
-  --expected-dataset-hash 6a374ec58b9fd134de5cf1ccdeda33384ba24c02935c4af2b3e3d8a6bbd75c09
+  --expected-dataset-hash 284966959d0e5155221e871305450752d24736721e713c0bc08335de93efae7b
 ```
 
 First capture the validation baseline with identical RAG input and a recorded generation profile:
@@ -71,7 +71,7 @@ python3 tools/model_bakeoff_eval.py run \
   --rpm 15
 ```
 
-The included Colab notebook requires typed confirmation before mounting private Drive or uploading files. It checks out an explicit reviewed commit, installs the tracked dependency lock including Torch, accepts exactly `pilot_train.jsonl` and `pilot_validation.jsonl`, writes checkpoints and artifacts to private Drive, derives sequence length from all 90 fully rendered examples, and refuses truncation. Preflight runs one full forward, backward, and 8-bit optimizer step on the longest example and records peak GPU memory. Training refuses to start unless that exact run name, dataset, model revision, package environment, GPU, and hyperparameter set has a matching preflight proof. Train `gemma4-e4b` rank 16 for two epochs first. Use the separately preflighted rank 8, one-epoch fallback only after a validation regression; preflight `gemma4-12b` only after the E4B review.
+The included Colab notebook requires typed confirmation before mounting private Drive or uploading files. It checks out an explicit reviewed commit, installs the tracked dependency lock including Torch, accepts exactly `pilot_train.jsonl` and `pilot_validation.jsonl`, writes checkpoints and artifacts to private Drive, and requires an A100 with BF16 and at least 38 GiB VRAM for the primary E4B run. The no-truncation preflight performs one full forward, backward, and 8-bit optimizer step on the longest example. A separate 30-step qualification run must then generate eight valid, grounded `LlmAnalysisCompactV1` responses within 3,584 output tokens. The rank-16, two-epoch run refuses to start without that exact passing report. Use the separately preflighted rank-8 fallback only after a validation regression; preflight `gemma4-12b` only after the E4B review.
 
 Every completed run records the Git commit, base revision, GPU/CUDA and package environment, dataset and artifact hashes, training metrics, checkpoints, adapter, merged Hugging Face model, and Q8_0 GGUF. Generated files remain ignored and must not be uploaded to a public model repository.
 

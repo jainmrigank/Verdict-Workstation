@@ -10,7 +10,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from tools.gemma_bakeoff import (
+    COMPACT_ANALYSIS_PROMPT_VERSION,
+    MAX_COMPACT_OUTPUT_TOKENS,
     MODEL_CONFIGS,
+    PILOT_OUTPUT_CONTRACT,
     align_gemma4_projection_dtype,
     artifact_checksums,
     audit_response_masks,
@@ -23,6 +26,9 @@ from tools.gemma_bakeoff import (
     gemma4_projection_dtype_state,
     latest_checkpoint,
     prepare_lora_model,
+    qualification_output_errors,
+    qualification_report_errors,
+    qualification_rows,
     require_candidate_hardware,
     resolve_resume_checkpoint,
     resolve_sequence_length,
@@ -80,6 +86,67 @@ def training_row(index: int, split: str) -> dict:
         ],
         "metadata": {},
     }
+
+
+def compact_training_row(index: int, split: str) -> dict:
+    item = ["Use the supplied evidence.", "u", ["deterministicAnalysis.verdict"], ["rule-one"]]
+    step = ["Evidence", "Implication", "Action", "u", ["deterministicAnalysis.verdict"], ["rule-one"]]
+    response = {
+        "schemaVersion": PILOT_OUTPUT_CONTRACT,
+        "decision": {
+            "summary": "Wait and Watch",
+            "nextActions": [item],
+            "avoid": [item],
+            "priceDrivers": [item],
+            "risks": [item],
+            "dataGaps": [],
+        },
+        "chart": {
+            "summary": "Chart",
+            "trend": [item],
+            "momentum": [],
+            "volume": [],
+            "volatility": [],
+            "levels": [],
+            "patterns": [],
+        },
+        "company": {
+            "summary": "Company",
+            "businessModel": [item],
+            "quality": [],
+            "profitability": [],
+            "balanceSheet": [],
+            "cashFlow": [],
+            "valuation": [],
+            "sectorDrivers": [],
+            "catalysts": [],
+            "risks": [],
+            "dataGaps": [],
+        },
+        "portfolio": {
+            "summary": "Portfolio",
+            "positionFit": [item],
+            "concentration": [],
+            "sizing": [],
+            "holdingActions": [item],
+            "risks": [],
+        },
+        "reasoning": {"steps": [step, step, step]},
+        "coach": {
+            "verdictSummary": "Wait and Watch",
+            "chartSummary": "Chart",
+            "companySummary": "Company",
+            "questionsBeforeAction": [item, item, item],
+        },
+        "warnings": [],
+    }
+    row = training_row(index, split)
+    row["messages"][2]["content"] = json.dumps(response)
+    row["metadata"] = {
+        "promptVersion": COMPACT_ANALYSIS_PROMPT_VERSION,
+        "outputContract": PILOT_OUTPUT_CONTRACT,
+    }
+    return row
 
 
 class ModelBakeoffTests(unittest.TestCase):
@@ -364,8 +431,8 @@ class ModelBakeoffTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for name, rows in (
-                ("pilot_train.jsonl", [training_row(index, "train") for index in range(75)]),
-                ("pilot_validation.jsonl", [training_row(index, "validation") for index in range(15)]),
+                ("pilot_train.jsonl", [compact_training_row(index, "train") for index in range(75)]),
+                ("pilot_validation.jsonl", [compact_training_row(index, "validation") for index in range(15)]),
             ):
                 (root / name).write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
             result = dry_run(root, final=False)
@@ -376,8 +443,8 @@ class ModelBakeoffTests(unittest.TestCase):
     def test_pilot_dry_run_rejects_hash_changes_and_sealed_rows(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            train = [training_row(index, "train") for index in range(75)]
-            validation = [training_row(index, "validation") for index in range(15)]
+            train = [compact_training_row(index, "train") for index in range(75)]
+            validation = [compact_training_row(index, "validation") for index in range(15)]
             train[0]["id"] = "gold-nse-sbin-buy"
             for name, rows in (("pilot_train.jsonl", train), ("pilot_validation.jsonl", validation)):
                 (root / name).write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
@@ -392,6 +459,50 @@ class ModelBakeoffTests(unittest.TestCase):
         self.assertEqual(resolve_sequence_length(6000, 8192), 8192)
         with self.assertRaisesRegex(RuntimeError, "No-truncation gate failed"):
             resolve_sequence_length(6000, 6000)
+
+    def test_qualification_smoke_uses_stable_five_three_subset(self) -> None:
+        train = [training_row(index, "train") for index in range(8)]
+        validation = [training_row(index, "validation") for index in range(5)]
+
+        selected_train, selected_validation = qualification_rows(train, validation)
+
+        self.assertEqual([row["id"] for row in selected_train], [f"row-train-{index}" for index in range(5)])
+        self.assertEqual(
+            [row["id"] for row in selected_validation],
+            [f"row-validation-{index}" for index in range(3)],
+        )
+
+    def test_qualification_output_rejects_token_ceiling_before_schema_pass(self) -> None:
+        errors = qualification_output_errors(
+            compact_training_row(1, "validation"),
+            "not-json",
+            MAX_COMPACT_OUTPUT_TOKENS,
+        )
+        self.assertTrue(any("token ceiling" in error for error in errors))
+        self.assertTrue(any("invalid response JSON" in error for error in errors))
+
+    def test_qualification_report_must_bind_contract_and_all_eight_cases(self) -> None:
+        args = argparse.Namespace(model="gemma4-e4b", lora_rank=16, lora_targets="all")
+        report = {
+            "status": "passed",
+            "candidate": "gemma4-e4b",
+            "datasetHash": "dataset",
+            "outputContract": PILOT_OUTPUT_CONTRACT,
+            "promptVersion": COMPACT_ANALYSIS_PROMPT_VERSION,
+            "maxOutputTokens": MAX_COMPACT_OUTPUT_TOKENS,
+            "loraRank": 16,
+            "loraTargets": "all",
+            "maxSteps": 30,
+            "passedCases": 8,
+            "totalCases": 8,
+            "cases": [
+                {"id": f"case-{index}", "schemaAndGroundingValid": True, "errors": []}
+                for index in range(8)
+            ],
+        }
+        self.assertEqual(qualification_report_errors(report, args, {"datasetHash": "dataset"}), [])
+        report["cases"][0]["errors"] = ["bad schema"]
+        self.assertTrue(qualification_report_errors(report, args, {"datasetHash": "dataset"}))
 
     def test_response_only_markers_are_detected_from_rendered_rows(self) -> None:
         texts = ["<start_of_turn>user\nQuestion<start_of_turn>model\nAnswer"]
@@ -491,6 +602,10 @@ class ModelBakeoffTests(unittest.TestCase):
                 "datasetHash": "dataset",
                 "datasetFiles": {},
                 "maxSequenceLength": 1024,
+                "maximumAssistantTokens": 512,
+                "maxOutputTokens": MAX_COMPACT_OUTPUT_TOKENS,
+                "outputContract": PILOT_OUTPUT_CONTRACT,
+                "promptVersion": COMPACT_ANALYSIS_PROMPT_VERSION,
                 "loraRank": 16,
                 "loraTargets": "all",
                 "epochs": 2,
@@ -507,6 +622,7 @@ class ModelBakeoffTests(unittest.TestCase):
             manifest = {
                 **{key: identity[key] for key in (
                     "candidate", "baseModel", "baseModelRevision", "datasetHash", "datasetFiles", "maxSequenceLength",
+                    "maximumAssistantTokens", "maxOutputTokens", "outputContract", "promptVersion",
                     "loraRank", "loraTargets", "epochs", "learningRate", "gradientAccumulation", "seed", "responseMarkers",
                 )},
                 "status": "complete",
@@ -559,6 +675,10 @@ class ModelBakeoffTests(unittest.TestCase):
                 "datasetHash": "dataset-hash",
                 "datasetFiles": {"train": "train-hash", "validation": "validation-hash"},
                 "maxSequenceLength": 8192,
+                "maximumAssistantTokens": 3000,
+                "maxOutputTokens": MAX_COMPACT_OUTPUT_TOKENS,
+                "outputContract": PILOT_OUTPUT_CONTRACT,
+                "promptVersion": COMPACT_ANALYSIS_PROMPT_VERSION,
                 "loraRank": 8,
                 "loraTargets": "attention",
                 "epochs": 2,
@@ -581,6 +701,7 @@ class ModelBakeoffTests(unittest.TestCase):
                     "errors": [],
                 },
                 "maximumSequenceTokens": 7000,
+                "maximumAssistantTokens": identity["maximumAssistantTokens"],
                 "trainingSourceHash": identity["trainingSourceHash"],
                 "requirementsHash": identity["requirementsHash"],
                 "environment": environment,
